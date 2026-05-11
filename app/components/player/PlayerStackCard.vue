@@ -5,6 +5,9 @@ defineProps<{
   player: Player | null
   pot: number
   currentBet: number
+  callAmount: number
+  isMyTurn: boolean
+  currentPlayerName: string | null
 }>()
 </script>
 
@@ -13,7 +16,11 @@ defineProps<{
     <h3>Ваш стек: {{ player?.stack ?? '-' }}</h3>
     <p>Банк: {{ pot }}</p>
     <p>Текущая ставка: {{ currentBet }}</p>
+    <p>Нужно доставить: {{ callAmount }}</p>
     <p>Ваш статус: {{ player?.status ?? '-' }}</p>
+    <p class="turn" :class="{ 'turn--active': isMyTurn }">
+      {{ isMyTurn ? 'Ваш ход' : `Сейчас ход: ${currentPlayerName || '—'}` }}
+    </p>
   </section>
 </template>
 
@@ -27,6 +34,15 @@ defineProps<{
   p {
     margin-top: 0.35rem;
     color: var(--text-muted);
+  }
+
+  .turn {
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  .turn--active {
+    color: var(--success);
   }
 }
 </style>

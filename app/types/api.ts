@@ -28,6 +28,7 @@ export interface JoinRoomResponse {
 export interface RoomStateResponse {
   room: Room
   players: import('./game').Player[]
+  currentSession: import('./game').OnlineGameSession | null
   currentHand: import('./game').OnlineHand | null
   actions: import('./game').OnlinePlayerAction[]
   pendingActions: import('./game').OnlinePlayerAction[]

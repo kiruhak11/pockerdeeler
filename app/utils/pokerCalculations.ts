@@ -1,6 +1,7 @@
 import type {
   ActionInput,
   ActionResult,
+  AvailableActions,
   Player,
   PlayerAction,
   PotDistributionResult,
@@ -416,17 +417,7 @@ export function getAvailableActions(
     handActive: boolean
     isCurrentPlayer: boolean
   }
-): {
-  canCheck: boolean
-  canCall: boolean
-  canBet: boolean
-  canRaise: boolean
-  canFold: boolean
-  canAllIn: boolean
-  callAmount: number
-  minRaiseAmount: number
-  disabledReason?: string
-} {
+): AvailableActions {
   const inactive = player.status === 'folded' || player.status === 'all-in' || player.status === 'out'
   if (!gameState.handActive) {
     return {

@@ -127,6 +127,64 @@ function applyBlind(player: DbPlayer, blindAmount: number) {
   return amount
 }
 
+function canPlayerAct(status: CalcPlayer['status'], stack: number): boolean {
+  return stack > 0 && status !== 'folded' && status !== 'out' && status !== 'all-in'
+}
+
+function getNextPlayerBySeat(
+  orderedPlayers: DbPlayer[],
+  playersAfterAction: CalcPlayer[],
+  actedPlayerId: string
+): DbPlayer | null {
+  if (!orderedPlayers.length) {
+    return null
+  }
+
+  const eligibleIds = new Set(
+    playersAfterAction
+      .filter((player) => canPlayerAct(player.status, player.stack))
+      .map((player) => player.id)
+  )
+
+  if (!eligibleIds.size) {
+    return null
+  }
+
+  const actedIndex = orderedPlayers.findIndex((player) => player.id === actedPlayerId)
+  if (actedIndex < 0) {
+    return orderedPlayers.find((player) => eligibleIds.has(player.id)) ?? null
+  }
+
+  for (let offset = 1; offset <= orderedPlayers.length; offset += 1) {
+    const candidate = orderedPlayers[(actedIndex + offset) % orderedPlayers.length]
+    if (candidate && eligibleIds.has(candidate.id)) {
+      return candidate
+    }
+  }
+
+  return null
+}
+
+function applyPlayerActionOrThrow(
+  players: CalcPlayer[],
+  pot: number,
+  currentBet: number,
+  input: {
+    playerId: string
+    type: 'check' | 'bet' | 'call' | 'raise' | 'fold' | 'all-in'
+    amount: number
+  }
+) {
+  try {
+    return applyPlayerAction(players, pot, currentBet, input)
+  } catch (error) {
+    throw createError({
+      statusCode: 409,
+      statusMessage: error instanceof Error ? error.message : 'Некорректное действие'
+    })
+  }
+}
+
 async function savePlayers(tx: Prisma.TransactionClient, players: DbPlayer[]) {
   for (const player of players) {
     await tx.player.update({
@@ -342,23 +400,6 @@ export async function startHandByDealer({ roomCode, dealerSecret }: DealerAuth) 
   return getRoomState(roomCode)
 }
 
-function getNextPlayer(activePlayers: DbPlayer[], currentPlayerId?: string | null) {
-  if (!activePlayers.length) {
-    return null
-  }
-
-  if (!currentPlayerId) {
-    return activePlayers[0] ?? null
-  }
-
-  const currentIndex = activePlayers.findIndex((player) => player.id === currentPlayerId)
-  if (currentIndex < 0) {
-    return activePlayers[0] ?? null
-  }
-
-  return activePlayers[nextIndex(currentIndex, activePlayers.length)] ?? null
-}
-
 export async function requestPlayerAction(input: {
   roomCode: string
   playerId: string
@@ -445,11 +486,37 @@ export async function requestPlayerAction(input: {
       isCurrentPlayer: true
     })
 
-    if (!availability.canAllIn && input.type === 'all-in') {
+    const canUseAction = {
+      check: availability.canCheck,
+      call: availability.canCall,
+      bet: availability.canBet,
+      raise: availability.canRaise,
+      fold: availability.canFold,
+      'all-in': availability.canAllIn
+    }[input.type]
+
+    if (!canUseAction) {
       throw createError({ statusCode: 409, statusMessage: availability.disabledReason || 'Действие недоступно' })
     }
 
     if (settings.requireDealerActionApproval) {
+      const existingPending = await tx.playerAction.findFirst({
+        where: {
+          roomId: room.id,
+          handId: hand.id,
+          playerId: player.id,
+          status: 'pending'
+        },
+        orderBy: { createdAt: 'desc' }
+      })
+
+      if (existingPending) {
+        return {
+          success: true,
+          action: existingPending
+        }
+      }
+
       const pending = await tx.playerAction.create({
         data: {
           roomId: room.id,
@@ -497,7 +564,7 @@ export async function requestPlayerAction(input: {
       }
     })
 
-    const result = applyPlayerAction(calcPlayers, hand.pot, hand.currentBet, {
+    const result = applyPlayerActionOrThrow(calcPlayers, hand.pot, hand.currentBet, {
       playerId: player.id,
       type: input.type,
       amount: input.amount
@@ -529,13 +596,7 @@ export async function requestPlayerAction(input: {
       })
     }
 
-    const activePlayers = result.players.filter((p) => p.status !== 'folded' && p.status !== 'out')
-    const nextPlayer = getNextPlayer(
-      players
-        .map((item) => ({ ...item }))
-        .filter((item) => activePlayers.some((active) => active.id === item.id) && item.stack > 0),
-      session.currentPlayerId
-    )
+    const nextPlayer = getNextPlayerBySeat(players, result.players, player.id)
 
     await tx.hand.update({
       where: { id: hand.id },
@@ -625,6 +686,10 @@ export async function dealerResolvePendingAction(input: {
       throw createError({ statusCode: 409, statusMessage: 'Раздача не активна' })
     }
 
+    if (session.currentPlayerId && session.currentPlayerId !== pending.playerId) {
+      throw createError({ statusCode: 409, statusMessage: 'Ожидающее действие уже не актуально: сменился ход' })
+    }
+
     const players = await tx.player.findMany({
       where: { roomId: room.id },
       orderBy: [{ seat: 'asc' }, { createdAt: 'asc' }]
@@ -647,7 +712,7 @@ export async function dealerResolvePendingAction(input: {
       }
     })
 
-    const result = applyPlayerAction(calcPlayers, hand.pot, hand.currentBet, {
+    const result = applyPlayerActionOrThrow(calcPlayers, hand.pot, hand.currentBet, {
       playerId: pending.playerId,
       type: pending.type as 'check' | 'bet' | 'call' | 'raise' | 'fold' | 'all-in',
       amount: pending.amount
@@ -676,13 +741,7 @@ export async function dealerResolvePendingAction(input: {
       }
     })
 
-    const activePlayers = result.players.filter((p) => p.status !== 'folded' && p.status !== 'out')
-    const nextPlayer = getNextPlayer(
-      players
-        .map((item) => ({ ...item }))
-        .filter((item) => activePlayers.some((active) => active.id === item.id) && item.stack > 0),
-      session.currentPlayerId
-    )
+    const nextPlayer = getNextPlayerBySeat(players, result.players, pending.playerId)
 
     await tx.hand.update({
       where: { id: hand.id },

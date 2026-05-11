@@ -12,6 +12,14 @@ const roomStore = useRoomStore()
 const code = computed(() => String(route.params.code || '').toUpperCase())
 useRoomRealtime(code)
 
+const currentPlayer = computed(() => {
+  if (!roomStore.currentSession?.currentPlayerId) {
+    return null
+  }
+
+  return roomStore.players.find((player) => player.id === roomStore.currentSession?.currentPlayerId) ?? null
+})
+
 onMounted(async () => {
   const state = await $fetch(`/api/rooms/${code.value}/state`)
   roomStore.setRoomState(state)
@@ -29,9 +37,17 @@ onMounted(async () => {
       :pot="roomStore.currentHand?.pot || 0"
       :current-bet="roomStore.currentHand?.currentBet || 0"
       :hand-number="roomStore.currentHand?.handNumber || 0"
+      :small-blind="roomStore.room?.settings.smallBlind"
+      :big-blind="roomStore.room?.settings.bigBlind"
+      :current-player-name="currentPlayer?.name || null"
     />
 
-    <TablePlayers :players="roomStore.players" />
+    <TablePlayers
+      :players="roomStore.players"
+      :current-player-id="roomStore.currentSession?.currentPlayerId || null"
+      :small-blind-player-id="roomStore.currentSession?.smallBlindPlayerId || null"
+      :big-blind-player-id="roomStore.currentSession?.bigBlindPlayerId || null"
+    />
     <ActionHistory :actions="roomStore.actions.slice(-15)" />
   </main>
 </template>

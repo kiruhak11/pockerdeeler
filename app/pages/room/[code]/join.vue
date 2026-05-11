@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useRoomStore } from "~/stores/room"
 import { usePlayerSessionStore } from "~/stores/playerSession"
+import { getHttpErrorMessage } from '~/utils/httpError'
 const route = useRoute()
 const roomStore = useRoomStore()
 const sessionStore = usePlayerSessionStore()
@@ -18,7 +19,7 @@ onMounted(async () => {
     const state = await $fetch(`/api/rooms/${code.value}/state`)
     roomStore.setRoomState(state)
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : 'Комната не найдена'
+    errorMessage.value = getHttpErrorMessage(error, 'Комната не найдена')
   }
 })
 
@@ -53,7 +54,7 @@ async function submit() {
       await navigateTo(`/room/${code.value}/player`)
     }
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : 'Ошибка входа'
+    errorMessage.value = getHttpErrorMessage(error, 'Ошибка входа')
   } finally {
     isLoading.value = false
   }

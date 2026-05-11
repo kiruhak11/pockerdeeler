@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { OnlinePlayerAction, Player, OnlineHand } from '~/types/game'
+import type { OnlineGameSession, OnlineHand, OnlinePlayerAction, Player } from '~/types/game'
 import DealerControls from './DealerControls.vue'
 import PendingActions from './PendingActions.vue'
 import PotDistributionPreview from './PotDistributionPreview.vue'
@@ -11,6 +11,7 @@ const props = defineProps<{
   players: Player[]
   actions: OnlinePlayerAction[]
   pendingActions: OnlinePlayerAction[]
+  currentSession: OnlineGameSession | null
   currentHand: OnlineHand | null
 }>()
 
@@ -23,10 +24,48 @@ const emit = defineEmits<{
   reject: [actionId: string]
   distribute: [winnerIds: string[]]
 }>()
+
+const currentPlayer = computed(() => {
+  if (!props.currentSession?.currentPlayerId) {
+    return null
+  }
+
+  return props.players.find((player) => player.id === props.currentSession?.currentPlayerId) ?? null
+})
+
+const dealerButtonPlayer = computed(() => {
+  if (!props.currentSession?.dealerButtonPlayerId) {
+    return null
+  }
+
+  return props.players.find((player) => player.id === props.currentSession?.dealerButtonPlayerId) ?? null
+})
+
+const smallBlindPlayer = computed(() => {
+  if (!props.currentSession?.smallBlindPlayerId) {
+    return null
+  }
+
+  return props.players.find((player) => player.id === props.currentSession?.smallBlindPlayerId) ?? null
+})
+
+const bigBlindPlayer = computed(() => {
+  if (!props.currentSession?.bigBlindPlayerId) {
+    return null
+  }
+
+  return props.players.find((player) => player.id === props.currentSession?.bigBlindPlayerId) ?? null
+})
 </script>
 
 <template>
   <section class="dealer-dashboard">
+    <section class="panel dealer-dashboard__meta">
+      <p><strong>Сейчас ходит:</strong> {{ currentPlayer?.name || '—' }}</p>
+      <p><strong>Дилер:</strong> {{ dealerButtonPlayer?.name || '—' }}</p>
+      <p><strong>SB/BB:</strong> {{ smallBlindPlayer?.name || '—' }} / {{ bigBlindPlayer?.name || '—' }}</p>
+    </section>
+
     <DealerControls
       @start-game="emit('start-game')"
       @start-hand="emit('start-hand')"
@@ -41,7 +80,15 @@ const emit = defineEmits<{
     <DealerWinnerSelector :players="players" @distribute="emit('distribute', $event)" />
 
     <section class="dealer-dashboard__players">
-      <DealerPlayerCard v-for="player in players" :key="player.id" :player="player" />
+      <DealerPlayerCard
+        v-for="player in players"
+        :key="player.id"
+        :player="player"
+        :is-current-player="currentSession?.currentPlayerId === player.id"
+        :is-dealer-button="currentSession?.dealerButtonPlayerId === player.id"
+        :is-small-blind="currentSession?.smallBlindPlayerId === player.id"
+        :is-big-blind="currentSession?.bigBlindPlayerId === player.id"
+      />
     </section>
 
     <DealerActionLog :actions="actions" :players="players" />
@@ -52,6 +99,20 @@ const emit = defineEmits<{
 .dealer-dashboard {
   display: grid;
   gap: 0.8rem;
+
+  &__meta {
+    display: grid;
+    gap: 0.35rem;
+
+    p {
+      margin: 0;
+      color: var(--text-muted);
+    }
+
+    strong {
+      color: var(--text);
+    }
+  }
 
   &__players {
     display: grid;

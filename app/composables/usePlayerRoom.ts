@@ -1,6 +1,7 @@
 import { createClientRequestId } from '~/utils/idempotency'
 import { usePlayerSessionStore } from '~/stores/playerSession'
 import { useRoomStore } from '~/stores/room'
+import type { RoomState } from '~/types/room'
 
 export function usePlayerRoom(roomCode: MaybeRefOrGetter<string | undefined>) {
   const sessionStore = usePlayerSessionStore()
@@ -29,18 +30,33 @@ export function usePlayerRoom(roomCode: MaybeRefOrGetter<string | undefined>) {
       throw new Error('Сессия игрока не найдена')
     }
 
-    const response = await $fetch(`/api/rooms/${currentCode}/action`, {
-      method: 'POST',
-      body: {
-        playerId: sessionStore.playerId,
-        token: sessionStore.token,
-        type: payload.type,
-        amount: payload.amount,
-        clientRequestId: createClientRequestId('action')
-      }
-    })
+    try {
+      const response = await $fetch<{
+        success: boolean
+        state?: RoomState
+        action?: {
+          status: 'pending' | 'approved' | 'rejected' | 'applied'
+        }
+      }>(`/api/rooms/${currentCode}/action`, {
+        method: 'POST',
+        body: {
+          playerId: sessionStore.playerId,
+          token: sessionStore.token,
+          type: payload.type,
+          amount: payload.amount,
+          clientRequestId: createClientRequestId('action')
+        }
+      })
 
-    return response
+      if (response.state) {
+        roomStore.setRoomState(response.state)
+      }
+
+      return response
+    } catch (error) {
+      await fetchState().catch(() => undefined)
+      throw error
+    }
   }
 
   async function fetchState() {

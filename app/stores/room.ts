@@ -1,9 +1,10 @@
-import type { OnlineHand, OnlinePlayerAction, Player } from '~/types/game'
+import type { OnlineGameSession, OnlineHand, OnlinePlayerAction, Player } from '~/types/game'
 import type { Room } from '~/types/room'
 
 interface RoomStoreState {
   room: Room | null
   players: Player[]
+  currentSession: OnlineGameSession | null
   currentHand: OnlineHand | null
   actions: OnlinePlayerAction[]
   pendingActions: OnlinePlayerAction[]
@@ -16,6 +17,7 @@ export const useRoomStore = defineStore('room', {
   state: (): RoomStoreState => ({
     room: null,
     players: [],
+    currentSession: null,
     currentHand: null,
     actions: [],
     pendingActions: [],
@@ -28,12 +30,14 @@ export const useRoomStore = defineStore('room', {
     setRoomState(payload: {
       room: Room
       players: Player[]
+      currentSession: OnlineGameSession | null
       currentHand: OnlineHand | null
       actions: OnlinePlayerAction[]
       pendingActions: OnlinePlayerAction[]
     }) {
       this.room = payload.room
       this.players = payload.players
+      this.currentSession = payload.currentSession
       this.currentHand = payload.currentHand
       this.actions = payload.actions
       this.pendingActions = payload.pendingActions
@@ -68,6 +72,7 @@ export const useRoomStore = defineStore('room', {
     resetRoom() {
       this.room = null
       this.players = []
+      this.currentSession = null
       this.currentHand = null
       this.actions = []
       this.pendingActions = []

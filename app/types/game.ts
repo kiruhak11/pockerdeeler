@@ -141,3 +141,15 @@ export interface OnlinePlayerAction {
   createdAt: string
   appliedAt?: string
 }
+
+export interface AvailableActions {
+  canCheck: boolean
+  canCall: boolean
+  canBet: boolean
+  canRaise: boolean
+  canFold: boolean
+  canAllIn: boolean
+  callAmount: number
+  minRaiseAmount: number
+  disabledReason?: string
+}

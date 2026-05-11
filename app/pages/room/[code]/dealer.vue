@@ -6,6 +6,7 @@ import PlayerLobbyList from '~/components/room/PlayerLobbyList.vue'
 import DealerDashboard from '~/components/dealer/DealerDashboard.vue'
 import { useRoomStore } from '~/stores/room'
 import { usePlayerSessionStore } from '~/stores/playerSession'
+import { getHttpErrorMessage } from '~/utils/httpError'
 
 const route = useRoute()
 const roomStore = useRoomStore()
@@ -54,7 +55,7 @@ async function run(action: () => Promise<unknown>) {
   try {
     await action()
   } catch (error) {
-    roomStore.setError(error instanceof Error ? error.message : 'Ошибка выполнения команды')
+    roomStore.setError(getHttpErrorMessage(error, 'Ошибка выполнения команды'))
   } finally {
     isLoading.value = false
   }
@@ -83,6 +84,7 @@ async function run(action: () => Promise<unknown>) {
       :players="roomStore.players"
       :actions="roomStore.actions"
       :pending-actions="roomStore.pendingActions"
+      :current-session="roomStore.currentSession"
       :current-hand="roomStore.currentHand"
       @start-game="run(startGame)"
       @start-hand="run(startHand)"

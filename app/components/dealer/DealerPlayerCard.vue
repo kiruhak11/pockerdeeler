@@ -3,14 +3,30 @@ import type { Player } from '~/types/game'
 
 defineProps<{
   player: Player
+  isCurrentPlayer?: boolean
+  isDealerButton?: boolean
+  isSmallBlind?: boolean
+  isBigBlind?: boolean
 }>()
 </script>
 
 <template>
-  <article class="dealer-player-card" :class="`dealer-player-card--${player.status}`">
+  <article
+    class="dealer-player-card"
+    :class="[
+      `dealer-player-card--${player.status}`,
+      { 'dealer-player-card--current': isCurrentPlayer }
+    ]"
+  >
     <header>
       <strong>{{ player.name }}</strong>
-      <span class="tag">{{ player.status }}</span>
+      <div class="dealer-player-card__badges">
+        <span v-if="isDealerButton" class="tag">D</span>
+        <span v-if="isSmallBlind" class="tag">SB</span>
+        <span v-if="isBigBlind" class="tag">BB</span>
+        <span v-if="isCurrentPlayer" class="tag tag--turn">Ход</span>
+        <span class="tag">{{ player.status }}</span>
+      </div>
     </header>
     <p>Место: {{ player.seat }}</p>
     <p>Стек: {{ player.stack }}</p>
@@ -41,6 +57,23 @@ defineProps<{
     display: flex;
     justify-content: space-between;
     gap: 0.5rem;
+    align-items: center;
+  }
+
+  &__badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+  }
+
+  &--current {
+    border-color: rgba(255, 196, 0, 0.72);
+    box-shadow: 0 0 0 1px rgba(255, 196, 0, 0.3);
+  }
+
+  .tag--turn {
+    background: rgba(255, 196, 0, 0.22);
+    color: #fff8c7;
   }
 }
 </style>

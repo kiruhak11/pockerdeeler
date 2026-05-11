@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useRoomStore } from "~/stores/room"
 import { usePlayerSessionStore } from "~/stores/playerSession"
+import { getHttpErrorMessage } from '~/utils/httpError'
 
 import ConnectionStatus from '~/components/room/ConnectionStatus.vue'
 import PlayerDashboard from '~/components/player/PlayerDashboard.vue'
@@ -24,6 +25,19 @@ const selfPlayer = computed(() => {
   return roomStore.players.find((player) => player.id === sessionStore.playerId) ?? null
 })
 
+watch(
+  () => roomStore.pendingActions,
+  (pendingActions) => {
+    if (!sessionStore.playerId) {
+      waitingApproval.value = false
+      return
+    }
+
+    waitingApproval.value = pendingActions.some((action) => action.playerId === sessionStore.playerId)
+  },
+  { deep: true }
+)
+
 onMounted(async () => {
   sessionStore.loadSession()
   if (sessionStore.role !== 'player' || sessionStore.roomCode !== code.value || !sessionStore.playerId) {
@@ -42,7 +56,7 @@ async function onAction(payload: { type: 'check' | 'bet' | 'call' | 'raise' | 'f
     waitingApproval.value = result.action?.status === 'pending'
   } catch (error) {
     waitingApproval.value = false
-    roomStore.setError(error instanceof Error ? error.message : 'Ошибка отправки действия')
+    roomStore.setError(getHttpErrorMessage(error, 'Ошибка отправки действия'))
   }
 }
 </script>
@@ -59,6 +73,7 @@ async function onAction(payload: { type: 'check' | 'bet' | 'call' | 'raise' | 'f
     <PlayerDashboard
       :self-player="selfPlayer"
       :players="roomStore.players"
+      :current-session="roomStore.currentSession"
       :current-hand="roomStore.currentHand"
       :waiting-approval="waitingApproval"
       @action="onAction"

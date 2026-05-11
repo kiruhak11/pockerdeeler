@@ -1,4 +1,11 @@
-import type { Prisma, Room as DbRoom, Player as DbPlayer, Hand as DbHand, PlayerAction as DbPlayerAction } from '@prisma/client'
+import type {
+  Prisma,
+  Room as DbRoom,
+  Player as DbPlayer,
+  Hand as DbHand,
+  PlayerAction as DbPlayerAction,
+  GameSession as DbGameSession
+} from '@prisma/client'
 import { createError } from 'h3'
 import { prisma } from '../db/client'
 import { generateSecret, hashSecret, verifySecret } from './authService'
@@ -28,6 +35,7 @@ interface RoomSettings {
 export interface RoomState {
   room: ReturnType<typeof mapRoom>
   players: ReturnType<typeof mapPlayer>[]
+  currentSession: ReturnType<typeof mapSession> | null
   currentHand: ReturnType<typeof mapHand> | null
   actions: ReturnType<typeof mapAction>[]
   pendingActions: ReturnType<typeof mapAction>[]
@@ -61,6 +69,23 @@ function mapPlayer(player: DbPlayer) {
     isConnected: player.isConnected,
     createdAt: player.createdAt.toISOString(),
     updatedAt: player.updatedAt.toISOString()
+  }
+}
+
+function mapSession(session: DbGameSession) {
+  return {
+    id: session.id,
+    roomId: session.roomId,
+    status: session.status as 'lobby' | 'playing' | 'hand_finished' | 'finished',
+    handNumber: session.handNumber,
+    pot: session.pot,
+    currentBet: session.currentBet,
+    currentPlayerId: session.currentPlayerId ?? undefined,
+    dealerButtonPlayerId: session.dealerButtonPlayerId ?? undefined,
+    smallBlindPlayerId: session.smallBlindPlayerId ?? undefined,
+    bigBlindPlayerId: session.bigBlindPlayerId ?? undefined,
+    createdAt: session.createdAt.toISOString(),
+    updatedAt: session.updatedAt.toISOString()
   }
 }
 
@@ -369,6 +394,7 @@ export async function getRoomState(roomCode: string): Promise<RoomState> {
   return {
     room: mapRoom(room),
     players: players.map(mapPlayer),
+    currentSession: session ? mapSession(session) : null,
     currentHand: currentHand ? mapHand(currentHand) : null,
     actions: actions.map(mapAction),
     pendingActions: pendingActions.map(mapAction)
