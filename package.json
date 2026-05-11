@@ -1,0 +1,38 @@
+{
+  "name": "pockerdeeler",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "nuxt build",
+    "dev": "nuxt dev",
+    "generate": "nuxt generate",
+    "preview": "nuxt preview",
+    "typecheck": "nuxt typecheck",
+    "postinstall": "nuxt prepare && prisma generate",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio",
+    "deploy": "scp -r .output/* j40068510@d562a1a402a2.hosting.myjino.ru:~/domains/pocker.kiruhak11.ru/ && ssh j40068510@d562a1a402a2.hosting.myjino.ru \"mkdir -p ~/domains/pocker.kiruhak11.ru/tmp && touch ~/domains/pocker.kiruhak11.ru/tmp/restart.txt && chmod -R 777 ~/domains/pocker.kiruhak11\""
+  },
+  "dependencies": {
+    "@pinia/nuxt": "^0.11.3",
+    "@prisma/client": "^6.7.0",
+    "nuxt": "^4.4.4",
+    "pinia": "^3.0.4",
+    "qrcode": "^1.5.4",
+    "vue": "^3.5.33",
+    "vue-router": "^5.0.6",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.2",
+    "@types/qrcode": "^1.5.6",
+    "prisma": "^6.7.0",
+    "sass": "^1.93.2",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3",
+    "vue-tsc": "^3.2.8"
+  }
+}

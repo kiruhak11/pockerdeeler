@@ -1,0 +1,58 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-poker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-poker}
+      POSTGRES_DB: ${POSTGRES_DB:-pokerdb}
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-poker} -d ${POSTGRES_DB:-pokerdb}']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+
+  adminer:
+    image: adminer:4
+    restart: unless-stopped
+    ports:
+      - '${ADMINER_PORT:-8080}:8080'
+
+  app:
+    build:
+      context: .
+      target: deps
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DATABASE_URL: ${DATABASE_URL:-postgresql://poker:poker@postgres:5432/pokerdb?schema=public}
+      DIRECT_DATABASE_URL: ${DIRECT_DATABASE_URL:-postgresql://poker:poker@postgres:5432/pokerdb?schema=public}
+      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret}
+      ROOM_SECRET_PEPPER: ${ROOM_SECRET_PEPPER:-dev-room-pepper}
+      NUXT_PUBLIC_APP_URL: ${NUXT_PUBLIC_APP_URL:-http://localhost:3000}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+    ports:
+      - '${APP_PORT:-3000}:3000'
+    volumes:
+      - .:/app
+      - app_node_modules:/app/node_modules
+    command: sh -c "./scripts/wait-for-db.sh && npm install && npm run db:generate && npm run db:migrate && npm run dev -- --host 0.0.0.0 --port 3000"
+
+volumes:
+  postgres_data:
+  app_node_modules:

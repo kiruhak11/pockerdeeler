@@ -1,0 +1,70 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-poker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-poker}
+      POSTGRES_DB: ${POSTGRES_DB:-pokerdb}
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-poker} -d ${POSTGRES_DB:-pokerdb}']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.1-p0
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '${PGBOUNCER_PORT:-6432}:5432'
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-poker}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-poker}
+      DB_NAME: ${POSTGRES_DB:-pokerdb}
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 300
+      DEFAULT_POOL_SIZE: 25
+      RESERVE_POOL_SIZE: 5
+      SERVER_RESET_QUERY: DISCARD ALL
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits
+      AUTH_TYPE: plain
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      target: runner
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      DB_HOST: pgbouncer
+      DB_PORT: 5432
+      DATABASE_URL: ${DATABASE_URL:-postgresql://poker:poker@pgbouncer:5432/pokerdb?schema=public&pgbouncer=true&connection_limit=1}
+      DIRECT_DATABASE_URL: ${DIRECT_DATABASE_URL:-postgresql://poker:poker@postgres:5432/pokerdb?schema=public}
+      JWT_SECRET: ${JWT_SECRET:-change-me-jwt-secret}
+      ROOM_SECRET_PEPPER: ${ROOM_SECRET_PEPPER:-change-me-room-pepper}
+      NUXT_PUBLIC_APP_URL: ${NUXT_PUBLIC_APP_URL:-http://localhost:3000}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+    ports:
+      - '${APP_PORT:-3000}:3000'
+    command: sh -c "./scripts/wait-for-db.sh && ./scripts/migrate.sh && node .output/server/index.mjs"
+
+volumes:
+  postgres_prod_data:

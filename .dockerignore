@@ -1,0 +1,12 @@
+.git
+.gitignore
+.nuxt
+.output
+node_modules
+npm-debug.log
+Dockerfile*
+docker-compose*.yml
+.env
+.env.*
+*.md
+coverage

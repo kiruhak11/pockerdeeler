@@ -1,0 +1,189 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_DATABASE_URL")
+}
+
+model Room {
+  id               String            @id @default(uuid()) @db.Uuid
+  code             String            @unique @db.VarChar(8)
+  name             String            @db.Text
+  status           String            @db.VarChar(32)
+  dealerId         String?           @map("dealer_id") @db.Uuid
+  dealerSecretHash String            @map("dealer_secret_hash") @db.Text
+  settings         Json              @db.JsonB
+  createdAt        DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime          @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  participants RoomParticipant[]
+  players      Player[]
+  sessions     GameSession[]
+  hands        Hand[]
+  actions      PlayerAction[]
+  snapshots    GameSnapshot[]
+  auditLogs    AuditLog[]
+
+  @@index([code])
+  @@map("rooms")
+}
+
+model RoomParticipant {
+  id               String   @id @default(uuid()) @db.Uuid
+  roomId           String   @map("room_id") @db.Uuid
+  role             String   @db.VarChar(32)
+  name             String   @db.Text
+  sessionTokenHash String   @map("session_token_hash") @db.Text
+  isConnected      Boolean  @default(false) @map("is_connected")
+  joinedAt         DateTime @default(now()) @map("joined_at") @db.Timestamptz(6)
+  lastSeenAt       DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  player Player?
+  actorAuditLogs AuditLog[]
+
+  @@index([roomId])
+  @@map("room_participants")
+}
+
+model Player {
+  id             String   @id @default(uuid()) @db.Uuid
+  roomId         String   @map("room_id") @db.Uuid
+  participantId  String?  @unique @map("participant_id") @db.Uuid
+  name           String   @db.Text
+  seat           Int
+  stack          Int
+  currentBet     Int      @default(0) @map("current_bet")
+  totalCommitted Int      @default(0) @map("total_committed")
+  status         String   @db.VarChar(32)
+  isConnected    Boolean  @default(false) @map("is_connected")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  room            Room              @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  participant     RoomParticipant?  @relation(fields: [participantId], references: [id], onDelete: SetNull)
+  currentSessions GameSession[]     @relation("CurrentPlayerSession")
+  dealerSessions  GameSession[]     @relation("DealerButtonSession")
+  smallSessions   GameSession[]     @relation("SmallBlindSession")
+  bigSessions     GameSession[]     @relation("BigBlindSession")
+  actions         PlayerAction[]
+  handResults     HandResult[]
+
+  @@index([roomId])
+  @@unique([roomId, seat])
+  @@map("players")
+}
+
+model GameSession {
+  id                  String   @id @default(uuid()) @db.Uuid
+  roomId              String   @map("room_id") @db.Uuid
+  status              String   @db.VarChar(32)
+  handNumber          Int      @default(0) @map("hand_number")
+  pot                 Int      @default(0)
+  currentBet          Int      @default(0) @map("current_bet")
+  currentPlayerId     String?  @map("current_player_id") @db.Uuid
+  dealerButtonPlayerId String? @map("dealer_button_player_id") @db.Uuid
+  smallBlindPlayerId  String?  @map("small_blind_player_id") @db.Uuid
+  bigBlindPlayerId    String?  @map("big_blind_player_id") @db.Uuid
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  currentPlayer Player? @relation("CurrentPlayerSession", fields: [currentPlayerId], references: [id])
+  dealerButtonPlayer Player? @relation("DealerButtonSession", fields: [dealerButtonPlayerId], references: [id])
+  smallBlindPlayer Player? @relation("SmallBlindSession", fields: [smallBlindPlayerId], references: [id])
+  bigBlindPlayer Player? @relation("BigBlindSession", fields: [bigBlindPlayerId], references: [id])
+  hands Hand[]
+
+  @@index([roomId])
+  @@map("game_sessions")
+}
+
+model Hand {
+  id         String   @id @default(uuid()) @db.Uuid
+  roomId     String   @map("room_id") @db.Uuid
+  sessionId  String   @map("session_id") @db.Uuid
+  handNumber Int      @map("hand_number")
+  status     String   @db.VarChar(32)
+  pot        Int      @default(0)
+  currentBet Int      @default(0) @map("current_bet")
+  startedAt  DateTime @default(now()) @map("started_at") @db.Timestamptz(6)
+  finishedAt DateTime? @map("finished_at") @db.Timestamptz(6)
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  session GameSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  actions PlayerAction[]
+  results HandResult[]
+  snapshots GameSnapshot[]
+
+  @@index([roomId, handNumber])
+  @@map("hands")
+}
+
+model PlayerAction {
+  id              String   @id @default(uuid()) @db.Uuid
+  roomId          String   @map("room_id") @db.Uuid
+  handId          String   @map("hand_id") @db.Uuid
+  playerId        String   @map("player_id") @db.Uuid
+  type            String   @db.VarChar(32)
+  amount          Int      @default(0)
+  status          String   @db.VarChar(32)
+  clientRequestId String   @map("client_request_id") @db.Text
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  appliedAt       DateTime? @map("applied_at") @db.Timestamptz(6)
+
+  room   Room   @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  hand   Hand   @relation(fields: [handId], references: [id], onDelete: Cascade)
+  player Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, playerId, clientRequestId])
+  @@index([roomId, handId])
+  @@index([clientRequestId])
+  @@map("player_actions")
+}
+
+model HandResult {
+  id        String @id @default(uuid()) @db.Uuid
+  handId    String @map("hand_id") @db.Uuid
+  playerId  String @map("player_id") @db.Uuid
+  amountWon Int    @map("amount_won")
+  potType   String @map("pot_type") @db.VarChar(32)
+
+  hand   Hand   @relation(fields: [handId], references: [id], onDelete: Cascade)
+  player Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@map("hand_results")
+}
+
+model GameSnapshot {
+  id           String   @id @default(uuid()) @db.Uuid
+  roomId       String   @map("room_id") @db.Uuid
+  handId       String?  @map("hand_id") @db.Uuid
+  snapshotType String   @map("snapshot_type") @db.VarChar(64)
+  data         Json     @db.JsonB
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  hand Hand? @relation(fields: [handId], references: [id], onDelete: Cascade)
+
+  @@map("game_snapshots")
+}
+
+model AuditLog {
+  id                 String   @id @default(uuid()) @db.Uuid
+  roomId             String   @map("room_id") @db.Uuid
+  actorParticipantId String?  @map("actor_participant_id") @db.Uuid
+  actorRole          String   @map("actor_role") @db.VarChar(32)
+  eventType          String   @map("event_type") @db.Text
+  payload            Json     @db.JsonB
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  actorParticipant RoomParticipant? @relation(fields: [actorParticipantId], references: [id])
+
+  @@index([roomId, createdAt])
+  @@map("audit_logs")
+}
