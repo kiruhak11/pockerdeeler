@@ -8,6 +8,7 @@ interface RoomStoreState {
   currentHand: OnlineHand | null
   actions: OnlinePlayerAction[]
   pendingActions: OnlinePlayerAction[]
+  lastDistribution: import('~/types/room').RoomState['lastDistribution']
   connectionStatus: 'disconnected' | 'connecting' | 'connected'
   error: string | null
   isLoading: boolean
@@ -21,6 +22,7 @@ export const useRoomStore = defineStore('room', {
     currentHand: null,
     actions: [],
     pendingActions: [],
+    lastDistribution: null,
     connectionStatus: 'disconnected',
     error: null,
     isLoading: false
@@ -34,6 +36,7 @@ export const useRoomStore = defineStore('room', {
       currentHand: OnlineHand | null
       actions: OnlinePlayerAction[]
       pendingActions: OnlinePlayerAction[]
+      lastDistribution: import('~/types/room').RoomState['lastDistribution']
     }) {
       this.room = payload.room
       this.players = payload.players
@@ -41,6 +44,7 @@ export const useRoomStore = defineStore('room', {
       this.currentHand = payload.currentHand
       this.actions = payload.actions
       this.pendingActions = payload.pendingActions
+      this.lastDistribution = payload.lastDistribution
       this.error = null
     },
 
@@ -76,6 +80,7 @@ export const useRoomStore = defineStore('room', {
       this.currentHand = null
       this.actions = []
       this.pendingActions = []
+      this.lastDistribution = null
       this.connectionStatus = 'disconnected'
       this.error = null
       this.isLoading = false

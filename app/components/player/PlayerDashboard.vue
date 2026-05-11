@@ -10,6 +10,7 @@ const props = defineProps<{
   players: Player[]
   currentSession: OnlineGameSession | null
   currentHand: OnlineHand | null
+  quickBetSteps: number[]
   waitingApproval: boolean
 }>()
 
@@ -70,7 +71,7 @@ const availability = computed<AvailableActions>(() => {
     <PlayerActionPanel
       :waiting-approval="waitingApproval"
       :availability="availability"
-      :pot="currentHand?.pot || 0"
+      :quick-bet-steps="quickBetSteps"
       :stack="selfPlayer?.stack || 0"
       @action="emit('action', $event)"
     />

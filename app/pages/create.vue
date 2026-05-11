@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { usePlayerSessionStore } from "~/stores/playerSession"
+import { parseQuickBetSteps, formatQuickBetSteps } from '~/utils/quickBetSteps'
 const sessionStore = usePlayerSessionStore()
 
 const form = reactive({
@@ -8,6 +9,7 @@ const form = reactive({
   smallBlind: 5,
   bigBlind: 10,
   maxPlayers: 8,
+  quickBetStepsText: formatQuickBetSteps([50, 100, 500]),
   allowLateJoin: false,
   requireDealerActionApproval: true,
   allowSpectators: true
@@ -25,7 +27,10 @@ async function submit() {
       dealerSecret: string
     }>('/api/rooms/create', {
       method: 'POST',
-      body: form
+      body: {
+        ...form,
+        quickBetSteps: parseQuickBetSteps(form.quickBetStepsText)
+      }
     })
 
     sessionStore.saveSession({
@@ -77,6 +82,11 @@ async function submit() {
       <label>
         <span>Максимум игроков</span>
         <input v-model.number="form.maxPlayers" class="input" type="number" min="2" max="10" required>
+      </label>
+
+      <label>
+        <span>Быстрые кнопки ставок (через запятую)</span>
+        <input v-model="form.quickBetStepsText" class="input" type="text" placeholder="50, 100, 500">
       </label>
 
       <label class="check">

@@ -4,7 +4,7 @@ import type { AvailableActions, PlayerActionType } from '~/types/game'
 const props = defineProps<{
   waitingApproval?: boolean
   availability: AvailableActions
-  pot: number
+  quickBetSteps: number[]
   stack: number
 }>()
 
@@ -55,26 +55,22 @@ function send(type: PlayerActionType) {
   })
 }
 
-function setMinAmount() {
-  if (props.availability.canRaise) {
-    amount.value = props.availability.minRaiseAmount
+const quickButtons = computed(() => {
+  const unique = [...new Set(
+    (props.quickBetSteps || [])
+      .map((step) => Math.trunc(step))
+      .filter((step) => step > 0)
+  )]
+
+  return unique.slice(0, 10)
+})
+
+function addQuickAmount(step: number) {
+  if (controlsDisabled.value) {
     return
   }
 
-  if (props.availability.canBet) {
-    amount.value = 1
-    return
-  }
-
-  amount.value = props.availability.callAmount || 1
-}
-
-function setHalfPot() {
-  amount.value = Math.max(1, Math.floor(props.pot / 2))
-}
-
-function setPot() {
-  amount.value = Math.max(1, props.pot)
+  amount.value = Math.max(0, Math.trunc(amount.value || 0)) + step
 }
 </script>
 
@@ -95,11 +91,17 @@ function setPot() {
       >
     </label>
 
-    <div class="player-action-panel__quick">
-      <button type="button" class="btn btn--ghost" :disabled="controlsDisabled" @click="setMinAmount">Мин</button>
-      <button type="button" class="btn btn--ghost" :disabled="controlsDisabled" @click="setHalfPot">1/2 банка</button>
-      <button type="button" class="btn btn--ghost" :disabled="controlsDisabled" @click="setPot">Банк</button>
-      <button type="button" class="btn btn--ghost" :disabled="controlsDisabled || !availability.canAllIn" @click="send('all-in')">Ва-банк</button>
+    <div v-if="quickButtons.length" class="player-action-panel__quick">
+      <button
+        v-for="step in quickButtons"
+        :key="step"
+        type="button"
+        class="btn btn--ghost"
+        :disabled="controlsDisabled"
+        @click="addQuickAmount(step)"
+      >
+        +{{ step }}
+      </button>
     </div>
 
     <div class="player-action-panel__grid">
@@ -132,11 +134,16 @@ function setPot() {
     }
   }
 
-  &__grid,
-  &__quick {
+  &__grid {
     display: grid;
     gap: 0.5rem;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  &__quick {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
   }
 }
 

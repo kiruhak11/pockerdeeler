@@ -1,11 +1,14 @@
 import { z } from 'zod'
 
+const quickBetStepsSchema = z.array(z.number().int().positive().max(1_000_000)).min(1).max(10)
+
 export const createRoomSchema = z.object({
   name: z.string().min(2).max(80),
   startingStack: z.number().int().positive().max(1_000_000),
   smallBlind: z.number().int().positive().optional(),
   bigBlind: z.number().int().positive().optional(),
   maxPlayers: z.number().int().min(2).max(10),
+  quickBetSteps: quickBetStepsSchema.optional(),
   allowLateJoin: z.boolean(),
   requireDealerActionApproval: z.boolean(),
   allowSpectators: z.boolean()
@@ -37,4 +40,16 @@ export const dealerActionSchema = z.object({
 export const distributePotSchema = z.object({
   dealerSecret: z.string().min(8),
   winners: z.array(z.string().uuid()).min(1)
+})
+
+export const updateRoomSettingsSchema = z.object({
+  dealerSecret: z.string().min(8),
+  startingStack: z.number().int().positive().max(1_000_000).optional(),
+  smallBlind: z.number().int().positive().optional(),
+  bigBlind: z.number().int().positive().optional(),
+  maxPlayers: z.number().int().min(2).max(10).optional(),
+  quickBetSteps: quickBetStepsSchema.optional(),
+  allowLateJoin: z.boolean().optional(),
+  requireDealerActionApproval: z.boolean().optional(),
+  allowSpectators: z.boolean().optional()
 })

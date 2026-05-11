@@ -5,13 +5,30 @@ const props = defineProps<{
 }>()
 
 const copied = ref(false)
+const showShareButton = ref(false)
+const canShare = computed(
+  () => import.meta.client && typeof navigator !== 'undefined' && typeof navigator.share === 'function'
+)
 
 async function copyLink() {
   await navigator.clipboard.writeText(props.inviteUrl)
   copied.value = true
+  showShareButton.value = true
   setTimeout(() => {
     copied.value = false
   }, 1500)
+}
+
+async function shareLink() {
+  if (!canShare.value) {
+    return
+  }
+
+  await navigator.share({
+    title: `Покерная комната ${props.code}`,
+    text: `Присоединяйтесь к комнате ${props.code}`,
+    url: props.inviteUrl
+  })
 }
 </script>
 
@@ -20,7 +37,10 @@ async function copyLink() {
     <h3>Код комнаты</h3>
     <p class="room-code-card__code">{{ code }}</p>
     <p class="room-code-card__url">{{ inviteUrl }}</p>
-    <button type="button" class="btn btn--ghost" @click="copyLink">{{ copied ? 'Скопировано' : 'Копировать ссылку' }}</button>
+    <div class="room-code-card__actions">
+      <button type="button" class="btn btn--ghost" @click="copyLink">{{ copied ? 'Скопировано' : 'Копировать ссылку' }}</button>
+      <button v-if="showShareButton && canShare" type="button" class="btn" @click="shareLink">Поделиться</button>
+    </div>
   </section>
 </template>
 
@@ -44,6 +64,12 @@ async function copyLink() {
     color: var(--text-muted);
     font-size: var(--text-sm);
     overflow-wrap: anywhere;
+  }
+
+  &__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
   }
 }
 </style>

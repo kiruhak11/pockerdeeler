@@ -4,6 +4,7 @@ import RoomCodeCard from '~/components/room/RoomCodeCard.vue'
 import QRCodeInvite from '~/components/room/QRCodeInvite.vue'
 import PlayerLobbyList from '~/components/room/PlayerLobbyList.vue'
 import DealerDashboard from '~/components/dealer/DealerDashboard.vue'
+import DealerRoomSettings from '~/components/dealer/DealerRoomSettings.vue'
 import { useRoomStore } from '~/stores/room'
 import { usePlayerSessionStore } from '~/stores/playerSession'
 import { getHttpErrorMessage } from '~/utils/httpError'
@@ -21,7 +22,7 @@ const inviteUrl = computed<string>(() => {
   return `${window.location.origin}/room/${code.value}/join`
 })
 
-const { startGame, startHand, finishHand, approveAction, rejectAction, distributePot, undo } = useDealerRoom(code)
+const { startGame, startHand, finishHand, approveAction, rejectAction, distributePot, undo, updateSettings } = useDealerRoom(code)
 useRoomRealtime(code)
 
 const isLoading = ref(false)
@@ -79,6 +80,13 @@ async function run(action: () => Promise<unknown>) {
       <QRCodeInvite :url="inviteUrl" />
       <PlayerLobbyList :players="roomStore.players" />
     </section>
+
+    <DealerRoomSettings
+      :settings="roomStore.room?.settings || null"
+      :players-count="roomStore.players.length"
+      :disabled="isLoading"
+      @save="run(() => updateSettings($event))"
+    />
 
     <DealerDashboard
       :players="roomStore.players"

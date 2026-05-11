@@ -22,6 +22,7 @@ function parseSettings(settings: Prisma.JsonValue): {
   smallBlind?: number
   bigBlind?: number
   maxPlayers: number
+  quickBetSteps?: number[]
   allowLateJoin: boolean
   requireDealerActionApproval: boolean
   allowSpectators: boolean
@@ -31,6 +32,7 @@ function parseSettings(settings: Prisma.JsonValue): {
     smallBlind?: number
     bigBlind?: number
     maxPlayers: number
+    quickBetSteps?: number[]
     allowLateJoin: boolean
     requireDealerActionApproval: boolean
     allowSpectators: boolean
@@ -888,6 +890,29 @@ export async function distributePotByDealer(input: {
     const distribution = distributePot(calcPlayers, input.winners)
     assertChipConservation(distribution.players, totalBefore)
 
+    const handStartSnapshot = await tx.gameSnapshot.findFirst({
+      where: {
+        roomId: room.id,
+        handId: hand.id,
+        snapshotType: 'manual'
+      },
+      orderBy: { createdAt: 'asc' }
+    })
+
+    const handStartPlayers = ((handStartSnapshot?.data || {}) as {
+      players?: { id: string; stack: number }[]
+    }).players || []
+    const handStartStacks = new Map(handStartPlayers.map((player) => [player.id, player.stack]))
+
+    const deltas = distribution.players.map((player) => {
+      const startStack = handStartStacks.get(player.id) ?? player.stack
+      return {
+        playerId: player.id,
+        delta: player.stack - startStack,
+        finalStack: player.stack
+      }
+    })
+
     for (const updated of distribution.players) {
       await tx.player.update({
         where: { id: updated.id },
@@ -954,8 +979,10 @@ export async function distributePotByDealer(input: {
         eventType: 'pot.distributed',
         payload: {
           handId: hand.id,
+          handNumber: hand.handNumber,
           winners: distribution.result.winners,
-          returned: distribution.result.returned
+          returned: distribution.result.returned,
+          deltas
         } as unknown as Prisma.InputJsonValue
       }
     })

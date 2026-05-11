@@ -39,6 +39,7 @@ export function useDealerRoom(roomCode: MaybeRefOrGetter<string | undefined>) {
     smallBlind?: number
     bigBlind?: number
     maxPlayers: number
+    quickBetSteps?: number[]
     allowLateJoin: boolean
     requireDealerActionApproval: boolean
     allowSpectators: boolean
@@ -85,6 +86,19 @@ export function useDealerRoom(roomCode: MaybeRefOrGetter<string | undefined>) {
     return callDealerRoute('undo')
   }
 
+  async function updateSettings(payload: {
+    startingStack?: number
+    smallBlind?: number
+    bigBlind?: number
+    maxPlayers?: number
+    quickBetSteps?: number[]
+    allowLateJoin?: boolean
+    requireDealerActionApproval?: boolean
+    allowSpectators?: boolean
+  }) {
+    return callDealerRoute('update-settings', payload)
+  }
+
   async function leaveAsDealer() {
     const currentCode = code.value
     if (!currentCode) {
@@ -108,6 +122,7 @@ export function useDealerRoom(roomCode: MaybeRefOrGetter<string | undefined>) {
     finishHand,
     distributePot,
     undo,
+    updateSettings,
     leaveAsDealer
   }
 }

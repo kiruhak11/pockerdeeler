@@ -32,6 +32,7 @@ export interface RoomStateResponse {
   currentHand: import('./game').OnlineHand | null
   actions: import('./game').OnlinePlayerAction[]
   pendingActions: import('./game').OnlinePlayerAction[]
+  lastDistribution: import('./room').RoomState['lastDistribution']
 }
 
 export interface PlayerActionInput {

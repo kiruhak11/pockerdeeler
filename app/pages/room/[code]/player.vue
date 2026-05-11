@@ -5,6 +5,7 @@ import { getHttpErrorMessage } from '~/utils/httpError'
 
 import ConnectionStatus from '~/components/room/ConnectionStatus.vue'
 import PlayerDashboard from '~/components/player/PlayerDashboard.vue'
+import HandResultModal from '~/components/player/HandResultModal.vue'
 
 const route = useRoute()
 const roomStore = useRoomStore()
@@ -16,6 +17,15 @@ const { sendAction } = usePlayerRoom(code)
 useRoomRealtime(code)
 
 const waitingApproval = ref(false)
+const lastSeenDistributionEventId = ref<string | null>(null)
+const handResultModal = reactive({
+  visible: false,
+  title: '',
+  delta: 0,
+  finalStack: 0,
+  handNumber: 0
+})
+let modalTimer: ReturnType<typeof setTimeout> | null = null
 
 const selfPlayer = computed(() => {
   if (!sessionStore.playerId) {
@@ -38,6 +48,13 @@ watch(
   { deep: true }
 )
 
+onBeforeUnmount(() => {
+  if (modalTimer) {
+    clearTimeout(modalTimer)
+    modalTimer = null
+  }
+})
+
 onMounted(async () => {
   sessionStore.loadSession()
   if (sessionStore.role !== 'player' || sessionStore.roomCode !== code.value || !sessionStore.playerId) {
@@ -47,7 +64,48 @@ onMounted(async () => {
 
   const state = await $fetch(`/api/rooms/${code.value}/state`)
   roomStore.setRoomState(state)
+  lastSeenDistributionEventId.value = roomStore.lastDistribution?.eventId ?? null
 })
+
+watch(
+  [() => roomStore.lastDistribution, selfPlayer],
+  ([distribution, player]) => {
+    if (!distribution || !player) {
+      return
+    }
+
+    if (distribution.eventId === lastSeenDistributionEventId.value) {
+      return
+    }
+
+    const deltaItem = distribution.deltas.find((item) => item.playerId === player.id)
+    if (!deltaItem) {
+      lastSeenDistributionEventId.value = distribution.eventId
+      return
+    }
+
+    handResultModal.visible = true
+    handResultModal.delta = deltaItem.delta
+    handResultModal.finalStack = deltaItem.finalStack
+    handResultModal.handNumber = distribution.handNumber
+    handResultModal.title = deltaItem.delta > 0
+      ? 'Победа в раздаче'
+      : deltaItem.delta < 0
+        ? 'Поражение в раздаче'
+        : 'Раздача завершена'
+
+    lastSeenDistributionEventId.value = distribution.eventId
+
+    if (modalTimer) {
+      clearTimeout(modalTimer)
+    }
+
+    modalTimer = setTimeout(() => {
+      handResultModal.visible = false
+    }, 3000)
+  },
+  { deep: true }
+)
 
 async function onAction(payload: { type: 'check' | 'bet' | 'call' | 'raise' | 'fold' | 'all-in'; amount: number }) {
   waitingApproval.value = true
@@ -75,11 +133,20 @@ async function onAction(payload: { type: 'check' | 'bet' | 'call' | 'raise' | 'f
       :players="roomStore.players"
       :current-session="roomStore.currentSession"
       :current-hand="roomStore.currentHand"
+      :quick-bet-steps="roomStore.room?.settings.quickBetSteps || []"
       :waiting-approval="waitingApproval"
       @action="onAction"
     />
 
     <NuxtLink class="btn btn--ghost" to="/">На главную</NuxtLink>
+
+    <HandResultModal
+      :visible="handResultModal.visible"
+      :title="handResultModal.title"
+      :delta="handResultModal.delta"
+      :final-stack="handResultModal.finalStack"
+      :hand-number="handResultModal.handNumber"
+    />
   </main>
 </template>
 

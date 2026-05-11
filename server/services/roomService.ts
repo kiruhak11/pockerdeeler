@@ -4,7 +4,8 @@ import type {
   Player as DbPlayer,
   Hand as DbHand,
   PlayerAction as DbPlayerAction,
-  GameSession as DbGameSession
+  GameSession as DbGameSession,
+  AuditLog as DbAuditLog
 } from '@prisma/client'
 import { createError } from 'h3'
 import { prisma } from '../db/client'
@@ -17,6 +18,7 @@ export interface CreateRoomPayload {
   smallBlind?: number
   bigBlind?: number
   maxPlayers: number
+  quickBetSteps?: number[]
   allowLateJoin: boolean
   requireDealerActionApproval: boolean
   allowSpectators: boolean
@@ -27,10 +29,25 @@ interface RoomSettings {
   smallBlind?: number
   bigBlind?: number
   maxPlayers: number
+  quickBetSteps: number[]
   allowLateJoin: boolean
   requireDealerActionApproval: boolean
   allowSpectators: boolean
 }
+
+interface UpdateRoomSettingsPayload {
+  dealerSecret: string
+  startingStack?: number
+  smallBlind?: number
+  bigBlind?: number
+  maxPlayers?: number
+  quickBetSteps?: number[]
+  allowLateJoin?: boolean
+  requireDealerActionApproval?: boolean
+  allowSpectators?: boolean
+}
+
+const DEFAULT_QUICK_BET_STEPS = [50, 100, 500]
 
 export interface RoomState {
   room: ReturnType<typeof mapRoom>
@@ -39,6 +56,7 @@ export interface RoomState {
   currentHand: ReturnType<typeof mapHand> | null
   actions: ReturnType<typeof mapAction>[]
   pendingActions: ReturnType<typeof mapAction>[]
+  lastDistribution: ReturnType<typeof mapLastDistribution> | null
 }
 
 function mapRoom(room: DbRoom) {
@@ -49,9 +67,38 @@ function mapRoom(room: DbRoom) {
     status: room.status as 'lobby' | 'active' | 'paused' | 'finished',
     dealerId: room.dealerId ?? '',
     dealerSecretHash: room.dealerSecretHash,
-    settings: room.settings as unknown as RoomSettings,
+    settings: parseSettings(room.settings),
     createdAt: room.createdAt.toISOString(),
     updatedAt: room.updatedAt.toISOString()
+  }
+}
+
+function mapLastDistribution(log: DbAuditLog) {
+  const payload = (log.payload || {}) as {
+    handId?: string
+    handNumber?: number
+    winners?: { playerId: string; amountWon: number }[]
+    deltas?: { playerId: string; delta: number; finalStack: number }[]
+  }
+
+  if (!payload.handId || typeof payload.handNumber !== 'number') {
+    return null
+  }
+
+  return {
+    eventId: log.id,
+    handId: payload.handId,
+    handNumber: payload.handNumber,
+    createdAt: log.createdAt.toISOString(),
+    winners: (payload.winners || []).map((winner) => ({
+      playerId: winner.playerId,
+      amountWon: winner.amountWon
+    })),
+    deltas: (payload.deltas || []).map((delta) => ({
+      playerId: delta.playerId,
+      delta: delta.delta,
+      finalStack: delta.finalStack
+    }))
   }
 }
 
@@ -118,6 +165,37 @@ function mapAction(action: DbPlayerAction) {
   }
 }
 
+function sanitizeQuickBetSteps(values?: number[]): number[] {
+  const normalized = Array.isArray(values)
+    ? values
+      .map((value) => Math.trunc(value))
+      .filter((value) => Number.isFinite(value) && value > 0 && value <= 1_000_000)
+    : []
+
+  const unique = [...new Set(normalized)]
+  return unique.length ? unique.slice(0, 10) : [...DEFAULT_QUICK_BET_STEPS]
+}
+
+function parseSettings(settings: Prisma.JsonValue): RoomSettings {
+  const raw = (settings || {}) as Partial<RoomSettings>
+  const smallBlind = typeof raw.smallBlind === 'number' && raw.smallBlind > 0 ? Math.trunc(raw.smallBlind) : 5
+  const fallbackBigBlind = Math.max(smallBlind * 2, 10)
+  const bigBlind = typeof raw.bigBlind === 'number' && raw.bigBlind > smallBlind
+    ? Math.trunc(raw.bigBlind)
+    : fallbackBigBlind
+
+  return {
+    startingStack: typeof raw.startingStack === 'number' && raw.startingStack > 0 ? Math.trunc(raw.startingStack) : 1000,
+    smallBlind,
+    bigBlind,
+    maxPlayers: typeof raw.maxPlayers === 'number' && raw.maxPlayers >= 2 ? Math.trunc(raw.maxPlayers) : 8,
+    quickBetSteps: sanitizeQuickBetSteps(raw.quickBetSteps),
+    allowLateJoin: Boolean(raw.allowLateJoin),
+    requireDealerActionApproval: raw.requireDealerActionApproval !== false,
+    allowSpectators: raw.allowSpectators !== false
+  }
+}
+
 function normalizeSettings(payload: CreateRoomPayload): RoomSettings {
   const smallBlind = payload.smallBlind ?? 5
   const bigBlind = payload.bigBlind ?? Math.max(smallBlind * 2, 10)
@@ -134,6 +212,7 @@ function normalizeSettings(payload: CreateRoomPayload): RoomSettings {
     smallBlind,
     bigBlind,
     maxPlayers: payload.maxPlayers,
+    quickBetSteps: sanitizeQuickBetSteps(payload.quickBetSteps),
     allowLateJoin: payload.allowLateJoin,
     requireDealerActionApproval: payload.requireDealerActionApproval,
     allowSpectators: payload.allowSpectators
@@ -227,8 +306,75 @@ export async function verifyDealer(roomCode: string, dealerSecret: string) {
   return room
 }
 
-function parseSettings(settings: Prisma.JsonValue): RoomSettings {
-  return settings as unknown as RoomSettings
+export async function updateRoomSettingsByDealer(roomCode: string, payload: UpdateRoomSettingsPayload) {
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "rooms" WHERE "code" = ${roomCode} FOR UPDATE`
+    const room = await tx.room.findUnique({ where: { code: roomCode } })
+
+    if (!room) {
+      throw createError({ statusCode: 404, statusMessage: 'Комната не найдена' })
+    }
+
+    if (!verifySecret(payload.dealerSecret, room.dealerSecretHash)) {
+      throw createError({ statusCode: 403, statusMessage: 'Неверный dealerSecret' })
+    }
+
+    const current = parseSettings(room.settings)
+    const nextSettings: RoomSettings = {
+      startingStack: payload.startingStack ?? current.startingStack,
+      smallBlind: payload.smallBlind ?? current.smallBlind,
+      bigBlind: payload.bigBlind ?? current.bigBlind,
+      maxPlayers: payload.maxPlayers ?? current.maxPlayers,
+      quickBetSteps: sanitizeQuickBetSteps(payload.quickBetSteps ?? current.quickBetSteps),
+      allowLateJoin: payload.allowLateJoin ?? current.allowLateJoin,
+      requireDealerActionApproval: payload.requireDealerActionApproval ?? current.requireDealerActionApproval,
+      allowSpectators: payload.allowSpectators ?? current.allowSpectators
+    }
+
+    if (nextSettings.startingStack <= 0) {
+      throw createError({ statusCode: 400, statusMessage: 'Стартовый стек должен быть больше 0' })
+    }
+
+    if (!nextSettings.smallBlind || nextSettings.smallBlind <= 0) {
+      throw createError({ statusCode: 400, statusMessage: 'smallBlind должен быть больше 0' })
+    }
+
+    if (!nextSettings.bigBlind || nextSettings.bigBlind <= nextSettings.smallBlind) {
+      throw createError({ statusCode: 400, statusMessage: 'bigBlind должен быть больше smallBlind' })
+    }
+
+    if (nextSettings.maxPlayers < 2 || nextSettings.maxPlayers > 10) {
+      throw createError({ statusCode: 400, statusMessage: 'Максимум игроков должен быть в диапазоне 2-10' })
+    }
+
+    const playersCount = await tx.player.count({ where: { roomId: room.id } })
+    if (nextSettings.maxPlayers < playersCount) {
+      throw createError({
+        statusCode: 409,
+        statusMessage: `Нельзя установить максимум ${nextSettings.maxPlayers}: в комнате уже ${playersCount} игроков`
+      })
+    }
+
+    await tx.room.update({
+      where: { id: room.id },
+      data: {
+        settings: nextSettings as unknown as Prisma.InputJsonValue,
+        updatedAt: new Date()
+      }
+    })
+
+    await tx.auditLog.create({
+      data: {
+        roomId: room.id,
+        actorParticipantId: room.dealerId,
+        actorRole: 'dealer',
+        eventType: 'room.settings.updated',
+        payload: nextSettings as unknown as Prisma.InputJsonValue
+      }
+    })
+  })
+
+  return getRoomState(roomCode)
 }
 
 export async function joinRoom(roomCode: string, name: string, role: 'player' | 'spectator' = 'player') {
@@ -391,12 +537,34 @@ export async function getRoomState(roomCode: string): Promise<RoomState> {
 
   const pendingActions = actions.filter((action) => action.status === 'pending')
 
+  const lastDistributionLog = await prisma.auditLog.findFirst({
+    where: {
+      roomId: room.id,
+      eventType: 'pot.distributed'
+    },
+    orderBy: { createdAt: 'desc' }
+  })
+
+  let lastDistribution: ReturnType<typeof mapLastDistribution> | null = null
+  const mappedDistribution = lastDistributionLog ? mapLastDistribution(lastDistributionLog) : null
+  if (mappedDistribution) {
+    const distributionHand = await prisma.hand.findUnique({
+      where: { id: mappedDistribution.handId },
+      select: { status: true }
+    })
+
+    if (distributionHand?.status === 'finished') {
+      lastDistribution = mappedDistribution
+    }
+  }
+
   return {
     room: mapRoom(room),
     players: players.map(mapPlayer),
     currentSession: session ? mapSession(session) : null,
     currentHand: currentHand ? mapHand(currentHand) : null,
     actions: actions.map(mapAction),
-    pendingActions: pendingActions.map(mapAction)
+    pendingActions: pendingActions.map(mapAction),
+    lastDistribution
   }
 }
