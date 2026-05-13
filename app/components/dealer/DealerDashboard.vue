@@ -27,12 +27,20 @@ const emit = defineEmits<{
   selectPlayer: [playerId: string]
 }>()
 
+const connectedPlayers = computed(() =>
+  props.players.filter((player) => player.isConnected !== false && Boolean(player.participantId))
+)
+
+const tablePlayers = computed(() =>
+  props.players.filter((player) => player.isConnected !== false || player.status !== 'out')
+)
+
 const currentPlayer = computed(() => {
   if (!props.currentSession?.currentPlayerId) {
     return null
   }
 
-  return props.players.find((player) => player.id === props.currentSession?.currentPlayerId) ?? null
+  return tablePlayers.value.find((player) => player.id === props.currentSession?.currentPlayerId) ?? null
 })
 
 const dealerButtonPlayer = computed(() => {
@@ -40,7 +48,7 @@ const dealerButtonPlayer = computed(() => {
     return null
   }
 
-  return props.players.find((player) => player.id === props.currentSession?.dealerButtonPlayerId) ?? null
+  return tablePlayers.value.find((player) => player.id === props.currentSession?.dealerButtonPlayerId) ?? null
 })
 
 const smallBlindPlayer = computed(() => {
@@ -48,7 +56,7 @@ const smallBlindPlayer = computed(() => {
     return null
   }
 
-  return props.players.find((player) => player.id === props.currentSession?.smallBlindPlayerId) ?? null
+  return tablePlayers.value.find((player) => player.id === props.currentSession?.smallBlindPlayerId) ?? null
 })
 
 const bigBlindPlayer = computed(() => {
@@ -56,10 +64,10 @@ const bigBlindPlayer = computed(() => {
     return null
   }
 
-  return props.players.find((player) => player.id === props.currentSession?.bigBlindPlayerId) ?? null
+  return tablePlayers.value.find((player) => player.id === props.currentSession?.bigBlindPlayerId) ?? null
 })
 
-const canRestartGame = computed(() => props.players.filter((player) => player.stack > 0).length === 1)
+const canRestartGame = computed(() => connectedPlayers.value.filter((player) => player.stack > 0).length === 1)
 </script>
 
 <template>
@@ -87,7 +95,7 @@ const canRestartGame = computed(() => props.players.filter((player) => player.st
 
     <section class="dealer-dashboard__players">
       <DealerPlayerCard
-        v-for="player in players"
+        v-for="player in tablePlayers"
         :key="player.id"
         :player="player"
         :is-current-player="currentSession?.currentPlayerId === player.id"

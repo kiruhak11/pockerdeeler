@@ -30,6 +30,7 @@ defineProps<{
         <span v-if="isSmallBlind" class="tag">SB</span>
         <span v-if="isBigBlind" class="tag">BB</span>
         <span v-if="isCurrentPlayer" class="tag tag--turn">Ход</span>
+        <span v-if="player.isConnected === false" class="tag tag--offline">Отключен</span>
         <span class="tag">{{ player.status }}</span>
       </div>
     </header>
@@ -79,6 +80,11 @@ defineProps<{
   .tag--turn {
     background: rgba(255, 196, 0, 0.22);
     color: #fff8c7;
+  }
+
+  .tag--offline {
+    background: rgba(138, 138, 138, 0.3);
+    color: #d6d6d6;
   }
 
   cursor: pointer;

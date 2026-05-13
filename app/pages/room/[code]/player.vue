@@ -22,6 +22,8 @@ useRoomRealtime(code)
 
 const waitingApproval = ref(false)
 const lastSeenDistributionEventId = ref<string | null>(null)
+const stateLoaded = ref(false)
+const kickedHandled = ref(false)
 const handResultModal = reactive({
   visible: false,
   title: '',
@@ -82,8 +84,27 @@ onMounted(async () => {
 
   const state = await $fetch(`/api/rooms/${code.value}/state`)
   roomStore.setRoomState(state)
+  stateLoaded.value = true
   lastSeenDistributionEventId.value = roomStore.lastDistribution?.eventId ?? null
 })
+
+watch(
+  selfPlayer,
+  async (player) => {
+    if (!stateLoaded.value || kickedHandled.value) {
+      return
+    }
+
+    if (!player || player.isConnected === false || !player.participantId) {
+      kickedHandled.value = true
+      waitingApproval.value = false
+      roomStore.setError('Вас удалили из комнаты')
+      sessionStore.clearSession()
+      await navigateTo(`/room/${code.value}/join?reason=kicked`)
+    }
+  },
+  { deep: true }
+)
 
 watch(
   [() => roomStore.lastDistribution, selfPlayer],

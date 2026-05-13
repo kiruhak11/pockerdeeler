@@ -16,6 +16,7 @@ const asSpectator = ref(false)
 const useAccount = ref(true)
 const isLoading = ref(false)
 const errorMessage = ref('')
+const accessNotice = computed(() => route.query.reason === 'kicked' ? 'Дилер удалил вас из комнаты. Можно войти снова.' : '')
 
 const { joinRoom } = usePlayerRoom(code)
 
@@ -84,6 +85,7 @@ async function submit() {
     </header>
 
     <section class="panel join-room-page__form">
+      <p v-if="accessNotice" class="join-room-page__notice">{{ accessNotice }}</p>
       <p v-if="accountStore.user" class="join-room-page__account-info">
         Аккаунт: <strong>{{ accountStore.user.username }}</strong> · Баланс: <strong>{{ accountStore.user.balance }}</strong>
       </p>
@@ -127,6 +129,11 @@ async function submit() {
 .join-room-page__account-info {
   margin: 0;
   color: var(--text-muted);
+}
+
+.join-room-page__notice {
+  margin: 0;
+  color: var(--accent-strong);
 }
 
 .check {

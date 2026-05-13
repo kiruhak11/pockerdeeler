@@ -7,11 +7,17 @@ export type GameVariant = 'texas-holdem' | 'omaha'
 
 export interface Player {
   id: string
+  roomId?: string
+  participantId?: string
+  userId?: string
   name: string
   stack: number
   currentBet: number
   totalCommitted: number
   status: PlayerStatus
+  isConnected?: boolean
+  createdAt?: string
+  updatedAt?: string
   seat?: number
 }
 

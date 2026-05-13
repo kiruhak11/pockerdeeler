@@ -171,6 +171,18 @@ function canPlayerAct(status: CalcPlayer['status'], stack: number): boolean {
   return stack > 0 && status !== 'folded' && status !== 'out' && status !== 'all-in'
 }
 
+function isConnectedTablePlayer(player: Pick<DbPlayer, 'isConnected' | 'participantId'>): boolean {
+  return player.isConnected && Boolean(player.participantId)
+}
+
+function canParticipateInHand(player: Pick<DbPlayer, 'stack' | 'isConnected' | 'participantId'>): boolean {
+  return player.stack > 0 && isConnectedTablePlayer(player)
+}
+
+function normalizePlayerStatusForActiveTable(player: Pick<DbPlayer, 'stack' | 'isConnected' | 'participantId' | 'status'>) {
+  player.status = canParticipateInHand(player) ? 'active' : 'out'
+}
+
 function getNextPlayerBySeat(
   orderedPlayers: DbPlayer[],
   playersAfterAction: CalcPlayer[],
@@ -267,14 +279,15 @@ export async function startGameByDealer({ roomCode, dealerSecret }: DealerAuth) 
       orderBy: [{ seat: 'asc' }, { createdAt: 'asc' }]
     })
 
-    if (players.length < 2) {
-      throw createError({ statusCode: 409, statusMessage: 'Нужно минимум 2 игрока' })
-    }
-
     for (const player of players) {
       player.currentBet = 0
       player.totalCommitted = 0
-      player.status = player.stack > 0 ? 'active' : 'out'
+      normalizePlayerStatusForActiveTable(player)
+    }
+
+    const readyPlayers = players.filter((player) => canParticipateInHand(player))
+    if (readyPlayers.length < 2) {
+      throw createError({ statusCode: 409, statusMessage: 'Нужно минимум 2 подключенных игрока с фишками' })
     }
 
     await savePlayers(tx, players)
@@ -344,11 +357,11 @@ export async function restartGameSamePlayersByDealer({ roomCode, dealerSecret }:
       throw createError({ statusCode: 409, statusMessage: 'В комнате нет игроков для перезапуска' })
     }
 
-    const playersWithChips = players.filter((player) => player.stack > 0)
+    const playersWithChips = players.filter((player) => canParticipateInHand(player))
     if (playersWithChips.length !== 1) {
       throw createError({
         statusCode: 409,
-        statusMessage: 'Перезапуск доступен, когда в игре остался ровно один игрок'
+        statusMessage: 'Перезапуск доступен, когда за столом остался ровно один активный подключенный игрок'
       })
     }
 
@@ -370,7 +383,7 @@ export async function restartGameSamePlayersByDealer({ roomCode, dealerSecret }:
         player.stack = settings.startingStack
       }
 
-      player.status = player.stack > 0 ? 'active' : 'out'
+      normalizePlayerStatusForActiveTable(player)
     }
 
     await syncUserBalancesFromPlayers(tx, players, { autoResetWhenZero: true })
@@ -481,10 +494,10 @@ export async function startHandByDealer({ roomCode, dealerSecret }: DealerAuth) 
     for (const player of players) {
       player.currentBet = 0
       player.totalCommitted = 0
-      player.status = player.stack > 0 ? 'active' : 'out'
+      normalizePlayerStatusForActiveTable(player)
     }
 
-    const activePlayers = players.filter((player) => player.stack > 0)
+    const activePlayers = players.filter((player) => canParticipateInHand(player))
     const blindPositions = getBlindPositions(activePlayers, session.dealerButtonPlayerId)
 
     const smallBlind = settings.smallBlind ?? 5
@@ -1476,14 +1489,23 @@ export async function kickPlayerByDealer(input: {
     })
     const calcPlayers = toCalcPlayers(players)
     const target = calcPlayers.find((item) => item.id === player.id)
-    if (target && target.status !== 'folded' && target.status !== 'out' && target.status !== 'all-in') {
-      target.status = 'folded'
+    const shouldFoldForCurrentHand = hand?.status === 'active'
+    if (target && target.status !== 'out') {
+      if (shouldFoldForCurrentHand && target.status !== 'all-in') {
+        target.status = 'folded'
+      } else if (!shouldFoldForCurrentHand) {
+        target.status = 'out'
+      }
     }
 
     let nextPlayerId: string | null = session?.currentPlayerId ?? null
-    if (session && hand?.status === 'active' && session.currentPlayerId === player.id) {
-      const nextPlayer = getNextPlayerBySeat(players, calcPlayers, player.id)
-      nextPlayerId = nextPlayer?.id ?? null
+    if (session && session.currentPlayerId === player.id) {
+      if (hand?.status === 'active') {
+        const nextPlayer = getNextPlayerBySeat(players, calcPlayers, player.id)
+        nextPlayerId = nextPlayer?.id ?? null
+      } else {
+        nextPlayerId = null
+      }
     }
 
     await tx.player.update({
