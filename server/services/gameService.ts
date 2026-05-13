@@ -1215,7 +1215,18 @@ export async function distributePotByDealer(input: {
 
       if (updated.stack <= 0) {
         updated.stack = ACCOUNT_DEFAULT_BALANCE
-        updated.status = 'active'
+        updated.status = isConnectedTablePlayer(source) ? 'active' : 'out'
+      }
+    }
+
+    for (const updated of distribution.players) {
+      const source = roomPlayersById.get(updated.id)
+      if (!source) {
+        continue
+      }
+
+      if (!isConnectedTablePlayer(source)) {
+        updated.status = 'out'
       }
     }
 
