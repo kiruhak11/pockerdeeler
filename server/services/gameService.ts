@@ -17,6 +17,8 @@ interface DealerAuth {
   dealerSecret: string
 }
 
+const ACCOUNT_DEFAULT_BALANCE = 5000
+
 function parseSettings(settings: Prisma.JsonValue): {
   startingStack: number
   smallBlind?: number
@@ -49,6 +51,42 @@ function toCalcPlayers(players: DbPlayer[]): CalcPlayer[] {
     status: player.status as CalcPlayer['status'],
     seat: player.seat
   }))
+}
+
+async function syncUserBalancesFromPlayers(
+  tx: Prisma.TransactionClient,
+  players: DbPlayer[],
+  options?: { autoResetWhenZero?: boolean }
+) {
+  const withUsers = players.filter((player) => Boolean(player.userId))
+  if (!withUsers.length) {
+    return
+  }
+
+  const now = new Date()
+
+  for (const player of withUsers) {
+    if (!player.userId) {
+      continue
+    }
+
+    let nextBalance = player.stack
+    if (options?.autoResetWhenZero && nextBalance <= 0) {
+      nextBalance = ACCOUNT_DEFAULT_BALANCE
+      player.stack = ACCOUNT_DEFAULT_BALANCE
+      if (player.status === 'out') {
+        player.status = 'active'
+      }
+    }
+
+    await tx.user.update({
+      where: { id: player.userId },
+      data: {
+        balance: nextBalance,
+        updatedAt: now
+      }
+    })
+  }
 }
 
 async function lockRoomForUpdate(tx: Prisma.TransactionClient, roomCode: string) {
@@ -290,6 +328,124 @@ export async function startGameByDealer({ roomCode, dealerSecret }: DealerAuth) 
   return getRoomState(roomCode)
 }
 
+export async function restartGameSamePlayersByDealer({ roomCode, dealerSecret }: DealerAuth) {
+  await prisma.$transaction(async (tx) => {
+    const room = await lockRoomForUpdate(tx, roomCode)
+    ensureDealerSecretOrThrow(room.dealerSecretHash, dealerSecret)
+
+    const settings = parseSettings(room.settings)
+
+    const players = await tx.player.findMany({
+      where: { roomId: room.id },
+      orderBy: [{ seat: 'asc' }, { createdAt: 'asc' }]
+    })
+
+    if (!players.length) {
+      throw createError({ statusCode: 409, statusMessage: 'В комнате нет игроков для перезапуска' })
+    }
+
+    const playersWithChips = players.filter((player) => player.stack > 0)
+    if (playersWithChips.length !== 1) {
+      throw createError({
+        statusCode: 409,
+        statusMessage: 'Перезапуск доступен, когда в игре остался ровно один игрок'
+      })
+    }
+
+    const userIds = [...new Set(players.map((player) => player.userId).filter(Boolean) as string[])]
+    const users = userIds.length
+      ? await tx.user.findMany({ where: { id: { in: userIds } } })
+      : []
+    const usersById = new Map(users.map((user) => [user.id, user]))
+
+    for (const player of players) {
+      player.currentBet = 0
+      player.totalCommitted = 0
+
+      if (player.userId) {
+        const user = usersById.get(player.userId)
+        const nextStack = user && user.balance > 0 ? user.balance : ACCOUNT_DEFAULT_BALANCE
+        player.stack = nextStack
+      } else {
+        player.stack = settings.startingStack
+      }
+
+      player.status = player.stack > 0 ? 'active' : 'out'
+    }
+
+    await syncUserBalancesFromPlayers(tx, players, { autoResetWhenZero: true })
+    await savePlayers(tx, players)
+
+    const session = await tx.gameSession.findFirst({
+      where: { roomId: room.id },
+      orderBy: { createdAt: 'desc' }
+    })
+
+    if (!session) {
+      await tx.gameSession.create({
+        data: {
+          roomId: room.id,
+          status: 'playing',
+          handNumber: 0,
+          pot: 0,
+          currentBet: 0,
+          currentPlayerId: null
+        }
+      })
+    } else {
+      await tx.hand.updateMany({
+        where: {
+          sessionId: session.id,
+          status: { in: ['active', 'showdown'] }
+        },
+        data: {
+          status: 'finished',
+          finishedAt: new Date(),
+          pot: 0,
+          currentBet: 0
+        }
+      })
+
+      await tx.gameSession.update({
+        where: { id: session.id },
+        data: {
+          status: 'playing',
+          handNumber: 0,
+          pot: 0,
+          currentBet: 0,
+          currentPlayerId: null,
+          updatedAt: new Date()
+        }
+      })
+    }
+
+    await tx.room.update({
+      where: { id: room.id },
+      data: {
+        status: 'active',
+        updatedAt: new Date()
+      }
+    })
+
+    await tx.auditLog.create({
+      data: {
+        roomId: room.id,
+        actorParticipantId: room.dealerId,
+        actorRole: 'dealer',
+        eventType: 'game.restarted_same_players',
+        payload: {
+          players: players.map((player) => ({
+            playerId: player.id,
+            stack: player.stack
+          }))
+        } as unknown as Prisma.InputJsonValue
+      }
+    })
+  })
+
+  return getRoomState(roomCode)
+}
+
 export async function startHandByDealer({ roomCode, dealerSecret }: DealerAuth) {
   await prisma.$transaction(async (tx) => {
     const room = await lockRoomForUpdate(tx, roomCode)
@@ -425,6 +581,10 @@ export async function requestPlayerAction(input: {
     const participant = await tx.roomParticipant.findUnique({ where: { id: player.participantId } })
     if (!participant || !verifySecret(input.token, participant.sessionTokenHash)) {
       throw createError({ statusCode: 403, statusMessage: 'Неверный токен игрока' })
+    }
+
+    if (!participant.isConnected || !player.isConnected) {
+      throw createError({ statusCode: 403, statusMessage: 'Сессия игрока неактивна' })
     }
 
     const existingByKey = await tx.playerAction.findUnique({
@@ -642,6 +802,135 @@ export async function requestPlayerAction(input: {
     ...txResult,
     state: await getRoomState(input.roomCode)
   }
+}
+
+export async function dealerForceActionForPlayer(input: {
+  roomCode: string
+  dealerSecret: string
+  playerId: string
+  type: 'check' | 'bet' | 'call' | 'raise' | 'fold' | 'all-in'
+  amount: number
+}) {
+  await prisma.$transaction(async (tx) => {
+    const room = await lockRoomForUpdate(tx, input.roomCode)
+    ensureDealerSecretOrThrow(room.dealerSecretHash, input.dealerSecret)
+
+    const player = await tx.player.findUnique({ where: { id: input.playerId } })
+    if (!player || player.roomId !== room.id) {
+      throw createError({ statusCode: 404, statusMessage: 'Игрок не найден' })
+    }
+
+    const session = await tx.gameSession.findFirst({
+      where: { roomId: room.id },
+      orderBy: { createdAt: 'desc' }
+    })
+
+    if (!session || session.status !== 'playing') {
+      throw createError({ statusCode: 409, statusMessage: 'Сессия не активна' })
+    }
+
+    const hand = await tx.hand.findFirst({
+      where: {
+        sessionId: session.id,
+        status: { in: ['active', 'showdown'] }
+      },
+      orderBy: { startedAt: 'desc' }
+    })
+
+    if (!hand || hand.status !== 'active') {
+      throw createError({ statusCode: 409, statusMessage: 'Активная раздача не найдена' })
+    }
+
+    const players = await tx.player.findMany({
+      where: { roomId: room.id },
+      orderBy: [{ seat: 'asc' }, { createdAt: 'asc' }]
+    })
+    const calcPlayers = toCalcPlayers(players)
+
+    await createSnapshot(tx, room.id, hand.id, 'before_action', {
+      players: calcPlayers,
+      hand: {
+        pot: hand.pot,
+        currentBet: hand.currentBet,
+        status: hand.status
+      },
+      session: {
+        pot: session.pot,
+        currentBet: session.currentBet,
+        status: session.status,
+        currentPlayerId: session.currentPlayerId
+      }
+    })
+
+    const result = applyPlayerActionOrThrow(calcPlayers, hand.pot, hand.currentBet, {
+      playerId: player.id,
+      type: input.type,
+      amount: input.amount
+    })
+
+    const action = await tx.playerAction.create({
+      data: {
+        roomId: room.id,
+        handId: hand.id,
+        playerId: player.id,
+        type: result.action.type,
+        amount: result.action.amount,
+        status: 'approved',
+        clientRequestId: `dealer-force-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        appliedAt: new Date()
+      }
+    })
+
+    for (const updated of result.players) {
+      await tx.player.update({
+        where: { id: updated.id },
+        data: {
+          stack: updated.stack,
+          currentBet: updated.currentBet,
+          totalCommitted: updated.totalCommitted,
+          status: updated.status,
+          updatedAt: new Date()
+        }
+      })
+    }
+
+    const nextPlayer = getNextPlayerBySeat(players, result.players, player.id)
+
+    await tx.hand.update({
+      where: { id: hand.id },
+      data: {
+        pot: result.pot,
+        currentBet: result.currentBet
+      }
+    })
+
+    await tx.gameSession.update({
+      where: { id: session.id },
+      data: {
+        pot: result.pot,
+        currentBet: result.currentBet,
+        currentPlayerId: nextPlayer?.id ?? null,
+        updatedAt: new Date()
+      }
+    })
+
+    await tx.auditLog.create({
+      data: {
+        roomId: room.id,
+        actorParticipantId: room.dealerId,
+        actorRole: 'dealer',
+        eventType: 'action.forced_by_dealer',
+        payload: {
+          actionId: action.id,
+          playerId: player.id,
+          type: action.type,
+          amount: action.amount
+        }
+      }
+    })
+  })
+
+  return getRoomState(input.roomCode)
 }
 
 export async function dealerResolvePendingAction(input: {
@@ -903,9 +1192,22 @@ export async function distributePotByDealer(input: {
       players?: { id: string; stack: number }[]
     }).players || []
     const handStartStacks = new Map(handStartPlayers.map((player) => [player.id, player.stack]))
+    const roomPlayersById = new Map(players.map((player) => [player.id, player]))
+
+    for (const updated of distribution.players) {
+      const source = roomPlayersById.get(updated.id)
+      if (!source?.userId) {
+        continue
+      }
+
+      if (updated.stack <= 0) {
+        updated.stack = ACCOUNT_DEFAULT_BALANCE
+        updated.status = 'active'
+      }
+    }
 
     const deltas = distribution.players.map((player) => {
-      const startStack = handStartStacks.get(player.id) ?? player.stack
+      const startStack = handStartStacks.get(player.id) ?? 0
       return {
         playerId: player.id,
         delta: player.stack - startStack,
@@ -925,6 +1227,20 @@ export async function distributePotByDealer(input: {
         }
       })
     }
+
+    const syncedPlayersForUsers = players.map((player) => {
+      const calculated = distribution.players.find((item) => item.id === player.id)
+      if (!calculated) {
+        return player
+      }
+
+      return {
+        ...player,
+        stack: calculated.stack,
+        status: calculated.status
+      }
+    })
+    await syncUserBalancesFromPlayers(tx, syncedPlayersForUsers, { autoResetWhenZero: true })
 
     await tx.hand.update({
       where: { id: hand.id },
@@ -1113,46 +1429,78 @@ export async function undoLastDealerAction({ roomCode, dealerSecret }: DealerAut
   return getRoomState(roomCode)
 }
 
-export async function leaveRoom(input: {
+export async function kickPlayerByDealer(input: {
   roomCode: string
-  participantId?: string
-  playerId?: string
-  token?: string
-  dealerSecret?: string
+  dealerSecret: string
+  playerId: string
 }) {
+  let roomDeleted = false
+
   await prisma.$transaction(async (tx) => {
     const room = await lockRoomForUpdate(tx, input.roomCode)
+    ensureDealerSecretOrThrow(room.dealerSecretHash, input.dealerSecret)
 
-    if (input.dealerSecret) {
-      ensureDealerSecretOrThrow(room.dealerSecretHash, input.dealerSecret)
-      return
+    const player = await tx.player.findUnique({ where: { id: input.playerId } })
+    if (!player || player.roomId !== room.id) {
+      throw createError({ statusCode: 404, statusMessage: 'Игрок не найден' })
     }
 
-    if (!input.participantId || !input.token) {
-      throw createError({ statusCode: 400, statusMessage: 'Недостаточно данных для выхода' })
+    const session = await tx.gameSession.findFirst({
+      where: { roomId: room.id },
+      orderBy: { createdAt: 'desc' }
+    })
+
+    const hand = session
+      ? await tx.hand.findFirst({
+          where: {
+            sessionId: session.id,
+            status: { in: ['active', 'showdown'] }
+          },
+          orderBy: { startedAt: 'desc' }
+        })
+      : null
+
+    if (player.participantId) {
+      await tx.roomParticipant.updateMany({
+        where: { id: player.participantId, roomId: room.id },
+        data: {
+          isConnected: false,
+          lastSeenAt: new Date()
+        }
+      })
     }
 
-    const participant = await tx.roomParticipant.findUnique({ where: { id: input.participantId } })
-    if (!participant || participant.roomId !== room.id || !verifySecret(input.token, participant.sessionTokenHash)) {
-      throw createError({ statusCode: 403, statusMessage: 'Неверные данные сессии' })
+    const players = await tx.player.findMany({
+      where: { roomId: room.id },
+      orderBy: [{ seat: 'asc' }, { createdAt: 'asc' }]
+    })
+    const calcPlayers = toCalcPlayers(players)
+    const target = calcPlayers.find((item) => item.id === player.id)
+    if (target && target.status !== 'folded' && target.status !== 'out' && target.status !== 'all-in') {
+      target.status = 'folded'
     }
 
-    await tx.roomParticipant.update({
-      where: { id: participant.id },
+    let nextPlayerId: string | null = session?.currentPlayerId ?? null
+    if (session && hand?.status === 'active' && session.currentPlayerId === player.id) {
+      const nextPlayer = getNextPlayerBySeat(players, calcPlayers, player.id)
+      nextPlayerId = nextPlayer?.id ?? null
+    }
+
+    await tx.player.update({
+      where: { id: player.id },
       data: {
         isConnected: false,
-        lastSeenAt: new Date()
+        participantId: null,
+        status: target?.status ?? player.status,
+        updatedAt: new Date()
       }
     })
 
-    if (input.playerId) {
-      await tx.player.updateMany({
-        where: {
-          id: input.playerId,
-          participantId: participant.id
-        },
+    if (session && nextPlayerId !== session.currentPlayerId) {
+      await tx.gameSession.update({
+        where: { id: session.id },
         data: {
-          isConnected: false,
+          currentPlayerId: nextPlayerId,
           updatedAt: new Date()
         }
       })
@@ -1161,15 +1509,125 @@ export async function leaveRoom(input: {
     await tx.auditLog.create({
       data: {
         roomId: room.id,
-        actorParticipantId: participant.id,
-        actorRole: participant.role as 'player' | 'spectator' | 'dealer',
-        eventType: 'participant.left',
+        actorParticipantId: room.dealerId,
+        actorRole: 'dealer',
+        eventType: 'player.kicked',
         payload: {
-          participantId: participant.id
+          playerId: player.id
         }
       }
     })
+
+    const connectedPlayersCount = await tx.roomParticipant.count({
+      where: {
+        roomId: room.id,
+        role: 'player',
+        isConnected: true
+      }
+    })
+
+    if (connectedPlayersCount === 0) {
+      await tx.room.delete({
+        where: { id: room.id }
+      })
+      roomDeleted = true
+    }
   })
+
+  if (roomDeleted) {
+    return null
+  }
+
+  return getRoomState(input.roomCode)
+}
+
+export async function leaveRoom(input: {
+  roomCode: string
+  participantId?: string
+  playerId?: string
+  token?: string
+  dealerSecret?: string
+}) {
+  let roomDeleted = false
+
+  await prisma.$transaction(async (tx) => {
+    const room = await lockRoomForUpdate(tx, input.roomCode)
+
+    if (input.dealerSecret) {
+      ensureDealerSecretOrThrow(room.dealerSecretHash, input.dealerSecret)
+      if (room.dealerId) {
+        await tx.roomParticipant.updateMany({
+          where: { id: room.dealerId },
+          data: {
+            isConnected: false,
+            lastSeenAt: new Date()
+          }
+        })
+      }
+    } else {
+      if (!input.participantId || !input.token) {
+        throw createError({ statusCode: 400, statusMessage: 'Недостаточно данных для выхода' })
+      }
+
+      const participant = await tx.roomParticipant.findUnique({ where: { id: input.participantId } })
+      if (!participant || participant.roomId !== room.id || !verifySecret(input.token, participant.sessionTokenHash)) {
+        throw createError({ statusCode: 403, statusMessage: 'Неверные данные сессии' })
+      }
+
+      await tx.roomParticipant.update({
+        where: { id: participant.id },
+        data: {
+          isConnected: false,
+          lastSeenAt: new Date()
+        }
+      })
+
+      if (input.playerId) {
+        await tx.player.updateMany({
+          where: {
+            id: input.playerId,
+            participantId: participant.id
+          },
+          data: {
+            isConnected: false,
+            updatedAt: new Date(),
+            participantId: null
+          }
+        })
+      }
+
+      await tx.auditLog.create({
+        data: {
+          roomId: room.id,
+          actorParticipantId: participant.id,
+          actorRole: participant.role as 'player' | 'spectator' | 'dealer',
+          eventType: 'participant.left',
+          payload: {
+            participantId: participant.id
+          }
+        }
+      })
+    }
+
+    const connectedPlayersCount = await tx.roomParticipant.count({
+      where: {
+        roomId: room.id,
+        role: 'player',
+        isConnected: true
+      }
+    })
+
+    if (connectedPlayersCount === 0) {
+      await tx.room.delete({
+        where: { id: room.id }
+      })
+      roomDeleted = true
+    }
+  })
+
+  if (roomDeleted) {
+    return null
+  }
 
   return getRoomState(input.roomCode)
 }

@@ -15,6 +15,7 @@ export interface CreateRoomResponse {
 export interface JoinRoomInput {
   name: string
   role?: 'player' | 'spectator'
+  authToken?: string
 }
 
 export interface JoinRoomResponse {

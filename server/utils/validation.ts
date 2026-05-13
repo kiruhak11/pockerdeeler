@@ -16,7 +16,8 @@ export const createRoomSchema = z.object({
 
 export const joinRoomSchema = z.object({
   name: z.string().min(1).max(32),
-  role: z.enum(['player', 'spectator']).optional()
+  role: z.enum(['player', 'spectator']).optional(),
+  authToken: z.string().min(16).optional()
 })
 
 export const playerActionSchema = z.object({
@@ -52,4 +53,33 @@ export const updateRoomSettingsSchema = z.object({
   allowLateJoin: z.boolean().optional(),
   requireDealerActionApproval: z.boolean().optional(),
   allowSpectators: z.boolean().optional()
+})
+
+export const registerSchema = z.object({
+  username: z.string().min(3).max(32),
+  password: z.string().min(6).max(128)
+})
+
+export const loginSchema = registerSchema
+
+export const authTokenSchema = z.object({
+  token: z.string().min(16)
+})
+
+export const resetBalanceSchema = z.object({
+  token: z.string().min(16),
+  roomCode: z.string().min(3).max(8).optional(),
+  playerId: z.string().uuid().optional()
+})
+
+export const dealerForceActionSchema = z.object({
+  dealerSecret: z.string().min(8),
+  playerId: z.string().uuid(),
+  type: z.enum(['check', 'bet', 'call', 'raise', 'fold', 'all-in']),
+  amount: z.number().int().nonnegative().default(0)
+})
+
+export const dealerKickPlayerSchema = z.object({
+  dealerSecret: z.string().min(8),
+  playerId: z.string().uuid()
 })

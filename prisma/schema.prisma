@@ -31,9 +31,25 @@ model Room {
   @@map("rooms")
 }
 
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  username     String   @unique @db.VarChar(64)
+  passwordHash String   @map("password_hash") @db.Text
+  balance      Int      @default(5000)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  participants RoomParticipant[]
+  players      Player[]
+
+  @@index([username])
+  @@map("users")
+}
+
 model RoomParticipant {
   id               String   @id @default(uuid()) @db.Uuid
   roomId           String   @map("room_id") @db.Uuid
+  userId           String?  @map("user_id") @db.Uuid
   role             String   @db.VarChar(32)
   name             String   @db.Text
   sessionTokenHash String   @map("session_token_hash") @db.Text
@@ -42,16 +58,19 @@ model RoomParticipant {
   lastSeenAt       DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
 
   room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
   player Player?
   actorAuditLogs AuditLog[]
 
   @@index([roomId])
+  @@index([userId])
   @@map("room_participants")
 }
 
 model Player {
   id             String   @id @default(uuid()) @db.Uuid
   roomId         String   @map("room_id") @db.Uuid
+  userId         String?  @map("user_id") @db.Uuid
   participantId  String?  @unique @map("participant_id") @db.Uuid
   name           String   @db.Text
   seat           Int
@@ -64,6 +83,7 @@ model Player {
   updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
 
   room            Room              @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user            User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
   participant     RoomParticipant?  @relation(fields: [participantId], references: [id], onDelete: SetNull)
   currentSessions GameSession[]     @relation("CurrentPlayerSession")
   dealerSessions  GameSession[]     @relation("DealerButtonSession")
@@ -73,6 +93,7 @@ model Player {
   handResults     HandResult[]
 
   @@index([roomId])
+  @@index([userId])
   @@unique([roomId, seat])
   @@map("players")
 }

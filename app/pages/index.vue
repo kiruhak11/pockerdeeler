@@ -1,13 +1,31 @@
 <script setup lang="ts">
 import { useGameStore } from '~/stores/game'
+import { useAccountStore } from '~/stores/account'
+import { useAccountAuth } from '~/composables/useAccountAuth'
+import { getHttpErrorMessage } from '~/utils/httpError'
 
 const gameStore = useGameStore()
+const accountStore = useAccountStore()
+const { register, login, loadMe, logout } = useAccountAuth()
 
 const roomCode = ref('')
+const authForm = reactive({
+  username: '',
+  password: ''
+})
+const authError = ref('')
+const authLoading = ref(false)
 
 onMounted(() => {
   if (!gameStore.hydrated) {
     gameStore.loadFromLocalStorage()
+  }
+
+  accountStore.loadSession()
+  if (accountStore.token) {
+    loadMe().catch(() => {
+      accountStore.clearSession()
+    })
   }
 })
 
@@ -35,6 +53,30 @@ async function joinByCode() {
   }
 
   await navigateTo(`/room/${code}/join`)
+}
+
+async function registerAccount() {
+  authLoading.value = true
+  authError.value = ''
+  try {
+    await register(authForm.username, authForm.password)
+  } catch (error) {
+    authError.value = getHttpErrorMessage(error, 'Ошибка регистрации')
+  } finally {
+    authLoading.value = false
+  }
+}
+
+async function loginAccount() {
+  authLoading.value = true
+  authError.value = ''
+  try {
+    await login(authForm.username, authForm.password)
+  } catch (error) {
+    authError.value = getHttpErrorMessage(error, 'Ошибка входа')
+  } finally {
+    authLoading.value = false
+  }
 }
 </script>
 
@@ -64,6 +106,27 @@ async function joinByCode() {
           <button type="button" class="btn" @click="joinByCode">Войти</button>
         </div>
       </div>
+
+      <section class="home-page__account panel">
+        <h2>Аккаунт</h2>
+        <p v-if="accountStore.user" class="home-page__hint">
+          Вы вошли как <strong>{{ accountStore.user.username }}</strong>. Баланс: <strong>{{ accountStore.user.balance }}</strong>
+        </p>
+
+        <template v-if="!accountStore.user">
+          <div class="home-page__account-row">
+            <input v-model="authForm.username" class="input" type="text" placeholder="Логин">
+            <input v-model="authForm.password" class="input" type="password" placeholder="Пароль">
+          </div>
+          <div class="home-page__actions">
+            <button type="button" class="btn" :disabled="authLoading" @click="loginAccount">Войти</button>
+            <button type="button" class="btn btn--ghost" :disabled="authLoading" @click="registerAccount">Создать аккаунт</button>
+          </div>
+          <p v-if="authError" class="home-page__error">{{ authError }}</p>
+        </template>
+
+        <button v-else type="button" class="btn btn--ghost" @click="logout">Выйти</button>
+      </section>
 
       <p v-if="!hasSaved" class="home-page__hint">Нет сохраненной локальной игры.</p>
     </section>
@@ -107,10 +170,33 @@ async function joinByCode() {
     }
   }
 
+  &__account {
+    display: grid;
+    gap: 0.6rem;
+    text-align: left;
+
+    h2 {
+      margin: 0;
+      font-size: 1.1rem;
+    }
+  }
+
+  &__error {
+    margin: 0;
+    color: var(--danger);
+    font-size: var(--text-sm);
+  }
+
   &__join-row {
     display: grid;
     gap: 0.6rem;
     grid-template-columns: 1fr auto;
+  }
+
+  &__account-row {
+    display: grid;
+    gap: 0.6rem;
+    grid-template-columns: 1fr 1fr;
   }
 }
 
@@ -121,7 +207,8 @@ async function joinByCode() {
     }
 
     &__actions,
-    &__join-row {
+    &__join-row,
+    &__account-row {
       grid-template-columns: 1fr;
     }
   }

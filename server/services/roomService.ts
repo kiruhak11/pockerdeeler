@@ -11,6 +11,7 @@ import { createError } from 'h3'
 import { prisma } from '../db/client'
 import { generateSecret, hashSecret, verifySecret } from './authService'
 import { generateRoomCode } from '../utils/roomCode'
+import { verifyUserAuthToken } from './userAccountService'
 
 export interface CreateRoomPayload {
   name: string
@@ -377,9 +378,15 @@ export async function updateRoomSettingsByDealer(roomCode: string, payload: Upda
   return getRoomState(roomCode)
 }
 
-export async function joinRoom(roomCode: string, name: string, role: 'player' | 'spectator' = 'player') {
+export async function joinRoom(
+  roomCode: string,
+  name: string,
+  role: 'player' | 'spectator' = 'player',
+  authToken?: string
+) {
   const token = generateSecret('player')
   const tokenHash = hashSecret(token)
+  const verifiedUser = authToken ? verifyUserAuthToken(authToken) : null
 
   const result = await prisma.$transaction(async (tx) => {
     const room = await tx.room.findUnique({ where: { code: roomCode } })
@@ -388,10 +395,18 @@ export async function joinRoom(roomCode: string, name: string, role: 'player' | 
     }
 
     const settings = parseSettings(room.settings)
+    const user = verifiedUser
+      ? await tx.user.findUnique({ where: { id: verifiedUser.userId } })
+      : null
+
+    if (verifiedUser && !user) {
+      throw createError({ statusCode: 401, statusMessage: 'Аккаунт не найден' })
+    }
 
     const duplicateName = await tx.roomParticipant.findFirst({
       where: {
         roomId: room.id,
+        isConnected: true,
         name: { equals: name, mode: 'insensitive' }
       }
     })
@@ -409,15 +424,66 @@ export async function joinRoom(roomCode: string, name: string, role: 'player' | 
         throw createError({ statusCode: 409, statusMessage: 'Игра уже началась, поздний вход запрещен' })
       }
 
-      const playerCount = await tx.player.count({ where: { roomId: room.id } })
+      const playerCount = await tx.player.count({
+        where: {
+          roomId: room.id,
+          isConnected: true
+        }
+      })
       if (playerCount >= settings.maxPlayers) {
         throw createError({ statusCode: 409, statusMessage: 'Комната заполнена' })
+      }
+    }
+
+    if (user && role === 'player') {
+      const rejoinParticipant = await tx.roomParticipant.findFirst({
+        where: {
+          roomId: room.id,
+          userId: user.id,
+          role: 'player'
+        }
+      })
+
+      if (rejoinParticipant) {
+        const existingPlayer = await tx.player.findFirst({
+          where: {
+            roomId: room.id,
+            participantId: rejoinParticipant.id
+          }
+        })
+
+        if (existingPlayer) {
+          await tx.roomParticipant.update({
+            where: { id: rejoinParticipant.id },
+            data: {
+              name,
+              sessionTokenHash: tokenHash,
+              isConnected: true,
+              lastSeenAt: new Date()
+            }
+          })
+
+          await tx.player.update({
+            where: { id: existingPlayer.id },
+            data: {
+              isConnected: true,
+              updatedAt: new Date()
+            }
+          })
+
+          return {
+            room,
+            participant: { ...rejoinParticipant, isConnected: true, name, sessionTokenHash: tokenHash },
+            player: { ...existingPlayer, isConnected: true }
+          }
+        }
       }
     }
 
     const participant = await tx.roomParticipant.create({
       data: {
         roomId: room.id,
+        userId: user?.id ?? null,
         role,
         name,
         sessionTokenHash: tokenHash,
@@ -427,6 +493,21 @@ export async function joinRoom(roomCode: string, name: string, role: 'player' | 
 
     let player: DbPlayer | null = null
     if (role === 'player') {
+      const accountBalance = user?.balance ?? null
+      const initialStack = accountBalance !== null
+        ? (accountBalance > 0 ? accountBalance : 5000)
+        : settings.startingStack
+
+      if (user && accountBalance !== null && accountBalance <= 0) {
+        await tx.user.update({
+          where: { id: user.id },
+          data: {
+            balance: 5000,
+            updatedAt: new Date()
+          }
+        })
+      }
+
       const maxSeat = await tx.player.aggregate({
         where: { roomId: room.id },
         _max: { seat: true }
@@ -435,10 +516,11 @@ export async function joinRoom(roomCode: string, name: string, role: 'player' | 
       player = await tx.player.create({
         data: {
           roomId: room.id,
+          userId: user?.id ?? null,
           participantId: participant.id,
           name,
           seat: (maxSeat._max.seat ?? 0) + 1,
-          stack: settings.startingStack,
+          stack: initialStack,
           currentBet: 0,
           totalCommitted: 0,
           status: room.status === 'lobby' ? 'waiting' : 'active',

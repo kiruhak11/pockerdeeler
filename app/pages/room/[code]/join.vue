@@ -1,20 +1,34 @@
 <script setup lang="ts">
 import { useRoomStore } from "~/stores/room"
 import { usePlayerSessionStore } from "~/stores/playerSession"
+import { useAccountStore } from '~/stores/account'
+import { useAccountAuth } from '~/composables/useAccountAuth'
 import { getHttpErrorMessage } from '~/utils/httpError'
 const route = useRoute()
 const roomStore = useRoomStore()
 const sessionStore = usePlayerSessionStore()
+const accountStore = useAccountStore()
+const { loadMe } = useAccountAuth()
 
 const code = computed(() => String(route.params.code || '').toUpperCase())
 const name = ref('')
 const asSpectator = ref(false)
+const useAccount = ref(true)
 const isLoading = ref(false)
 const errorMessage = ref('')
 
 const { joinRoom } = usePlayerRoom(code)
 
 onMounted(async () => {
+  accountStore.loadSession()
+  if (accountStore.token) {
+    await loadMe().catch(() => accountStore.clearSession())
+  }
+
+  if (accountStore.user && !name.value) {
+    name.value = accountStore.user.username
+  }
+
   try {
     const state = await $fetch(`/api/rooms/${code.value}/state`)
     roomStore.setRoomState(state)
@@ -30,7 +44,8 @@ async function submit() {
   try {
     const response = await joinRoom({
       name: name.value,
-      role: asSpectator.value ? 'spectator' : 'player'
+      role: asSpectator.value ? 'spectator' : 'player',
+      authToken: !asSpectator.value && useAccount.value ? (accountStore.token || undefined) : undefined
     }) as {
       roomCode: string
       playerId?: string
@@ -69,6 +84,10 @@ async function submit() {
     </header>
 
     <section class="panel join-room-page__form">
+      <p v-if="accountStore.user" class="join-room-page__account-info">
+        Аккаунт: <strong>{{ accountStore.user.username }}</strong> · Баланс: <strong>{{ accountStore.user.balance }}</strong>
+      </p>
+
       <label>
         <span>Имя</span>
         <input v-model="name" class="input" type="text" required>
@@ -77,6 +96,11 @@ async function submit() {
       <label class="check">
         <input v-model="asSpectator" type="checkbox">
         <span>Войти как зритель</span>
+      </label>
+
+      <label v-if="accountStore.user && !asSpectator" class="check">
+        <input v-model="useAccount" type="checkbox">
+        <span>Войти с аккаунт-балансом</span>
       </label>
 
       <button type="button" class="btn" :disabled="isLoading || !name.trim()" @click="submit">
@@ -98,6 +122,11 @@ async function submit() {
     display: grid;
     gap: 0.8rem;
   }
+}
+
+.join-room-page__account-info {
+  margin: 0;
+  color: var(--text-muted);
 }
 
 .check {

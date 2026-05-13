@@ -86,6 +86,22 @@ export function useDealerRoom(roomCode: MaybeRefOrGetter<string | undefined>) {
     return callDealerRoute('undo')
   }
 
+  async function restartGame() {
+    return callDealerRoute('restart-game')
+  }
+
+  async function forceAction(payload: {
+    playerId: string
+    type: 'check' | 'bet' | 'call' | 'raise' | 'fold' | 'all-in'
+    amount: number
+  }) {
+    return callDealerRoute('force-action', payload)
+  }
+
+  async function kickPlayer(playerId: string) {
+    return callDealerRoute('kick-player', { playerId })
+  }
+
   async function updateSettings(payload: {
     startingStack?: number
     smallBlind?: number
@@ -122,6 +138,9 @@ export function useDealerRoom(roomCode: MaybeRefOrGetter<string | undefined>) {
     finishHand,
     distributePot,
     undo,
+    restartGame,
+    forceAction,
+    kickPlayer,
     updateSettings,
     leaveAsDealer
   }

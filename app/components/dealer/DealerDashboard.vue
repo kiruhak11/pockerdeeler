@@ -17,12 +17,14 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'start-game': []
+  'restart-game': []
   'start-hand': []
   'finish-hand': []
   'undo': []
   approve: [actionId: string]
   reject: [actionId: string]
   distribute: [winnerIds: string[]]
+  selectPlayer: [playerId: string]
 }>()
 
 const currentPlayer = computed(() => {
@@ -56,6 +58,8 @@ const bigBlindPlayer = computed(() => {
 
   return props.players.find((player) => player.id === props.currentSession?.bigBlindPlayerId) ?? null
 })
+
+const canRestartGame = computed(() => props.players.filter((player) => player.stack > 0).length === 1)
 </script>
 
 <template>
@@ -67,7 +71,9 @@ const bigBlindPlayer = computed(() => {
     </section>
 
     <DealerControls
+      :can-restart-game="canRestartGame"
       @start-game="emit('start-game')"
+      @restart-game="emit('restart-game')"
       @start-hand="emit('start-hand')"
       @finish-hand="emit('finish-hand')"
       @undo="emit('undo')"
@@ -88,6 +94,7 @@ const bigBlindPlayer = computed(() => {
         :is-dealer-button="currentSession?.dealerButtonPlayerId === player.id"
         :is-small-blind="currentSession?.smallBlindPlayerId === player.id"
         :is-big-blind="currentSession?.bigBlindPlayerId === player.id"
+        @select="emit('selectPlayer', $event)"
       />
     </section>
 

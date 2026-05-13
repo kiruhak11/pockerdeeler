@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { useRoomStore } from "~/stores/room"
 import { usePlayerSessionStore } from "~/stores/playerSession"
+import { useAccountStore } from '~/stores/account'
+import { useAccountAuth } from '~/composables/useAccountAuth'
 import { getHttpErrorMessage } from '~/utils/httpError'
 
 import ConnectionStatus from '~/components/room/ConnectionStatus.vue'
@@ -10,6 +12,8 @@ import HandResultModal from '~/components/player/HandResultModal.vue'
 const route = useRoute()
 const roomStore = useRoomStore()
 const sessionStore = usePlayerSessionStore()
+const accountStore = useAccountStore()
+const { loadMe, resetBalance } = useAccountAuth()
 
 const code = computed(() => String(route.params.code || '').toUpperCase())
 const { sendAction } = usePlayerRoom(code)
@@ -35,6 +39,15 @@ const selfPlayer = computed(() => {
   return roomStore.players.find((player) => player.id === sessionStore.playerId) ?? null
 })
 
+const canResetBalance = computed(() => {
+  return Boolean(
+    accountStore.token
+    && accountStore.user
+    && selfPlayer.value
+    && roomStore.room?.status === 'lobby'
+  )
+})
+
 watch(
   () => roomStore.pendingActions,
   (pendingActions) => {
@@ -56,6 +69,11 @@ onBeforeUnmount(() => {
 })
 
 onMounted(async () => {
+  accountStore.loadSession()
+  if (accountStore.token) {
+    await loadMe().catch(() => accountStore.clearSession())
+  }
+
   sessionStore.loadSession()
   if (sessionStore.role !== 'player' || sessionStore.roomCode !== code.value || !sessionStore.playerId) {
     await navigateTo(`/room/${code.value}/join`)
@@ -103,6 +121,10 @@ watch(
     modalTimer = setTimeout(() => {
       handResultModal.visible = false
     }, 3000)
+
+    if (accountStore.token) {
+      loadMe().catch(() => undefined)
+    }
   },
   { deep: true }
 )
@@ -115,6 +137,23 @@ async function onAction(payload: { type: 'check' | 'bet' | 'call' | 'raise' | 'f
   } catch (error) {
     waitingApproval.value = false
     roomStore.setError(getHttpErrorMessage(error, 'Ошибка отправки действия'))
+  }
+}
+
+async function onResetBalance() {
+  if (!canResetBalance.value || !selfPlayer.value) {
+    return
+  }
+
+  try {
+    await resetBalance({
+      roomCode: code.value,
+      playerId: selfPlayer.value.id
+    })
+    const state = await $fetch(`/api/rooms/${code.value}/state`)
+    roomStore.setRoomState(state)
+  } catch (error) {
+    roomStore.setError(getHttpErrorMessage(error, 'Не удалось обновить баланс'))
   }
 }
 </script>
@@ -137,6 +176,21 @@ async function onAction(payload: { type: 'check' | 'bet' | 'call' | 'raise' | 'f
       :waiting-approval="waitingApproval"
       @action="onAction"
     />
+
+    <section v-if="accountStore.user" class="panel player-room-page__profile">
+      <h3>Профиль</h3>
+      <p>Логин: {{ accountStore.user.username }}</p>
+      <p>Баланс аккаунта: {{ accountStore.user.balance }}</p>
+      <button
+        type="button"
+        class="btn btn--ghost"
+        :disabled="!canResetBalance"
+        @click="onResetBalance"
+      >
+        Обновить баланс до 5000
+      </button>
+      <p class="page-subtitle">Кнопка доступна только в лобби, до старта раздачи.</p>
+    </section>
 
     <NuxtLink class="btn btn--ghost" to="/">На главную</NuxtLink>
 
@@ -166,6 +220,16 @@ async function onAction(payload: { type: 'check' | 'bet' | 'call' | 'raise' | 'f
   &__error {
     margin: 0;
     color: var(--danger);
+  }
+
+  &__profile {
+    display: grid;
+    gap: 0.4rem;
+
+    h3,
+    p {
+      margin: 0;
+    }
   }
 }
 </style>

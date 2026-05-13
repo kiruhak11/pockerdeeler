@@ -1,5 +1,6 @@
 import { readBody } from 'h3'
-import { leaveRoom } from '../../../services/gameService'
+import { kickPlayerByDealer } from '../../../services/gameService'
+import { dealerKickPlayerSchema } from '../../../utils/validation'
 import { broadcastRoomState } from '../../../ws/roomHub'
 
 export default defineEventHandler(async (event) => {
@@ -9,13 +10,15 @@ export default defineEventHandler(async (event) => {
   }
 
   const body = await readBody(event)
+  const parsed = dealerKickPlayerSchema.safeParse(body)
+  if (!parsed.success) {
+    throw createError({ statusCode: 400, statusMessage: parsed.error.issues[0]?.message ?? 'Некорректный payload' })
+  }
 
-  const state = await leaveRoom({
+  const state = await kickPlayerByDealer({
     roomCode: code,
-    participantId: body?.participantId,
-    playerId: body?.playerId,
-    token: body?.token,
-    dealerSecret: body?.dealerSecret
+    dealerSecret: parsed.data.dealerSecret,
+    playerId: parsed.data.playerId
   })
 
   if (state) {

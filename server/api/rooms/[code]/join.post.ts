@@ -15,5 +15,5 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: parsed.error.issues[0]?.message ?? 'Некорректный payload' })
   }
 
-  return joinRoom(code, parsed.data.name.trim(), parsed.data.role ?? 'player')
+  return joinRoom(code, parsed.data.name.trim(), parsed.data.role ?? 'player', parsed.data.authToken)
 })

@@ -9,7 +9,7 @@ export function usePlayerRoom(roomCode: MaybeRefOrGetter<string | undefined>) {
 
   const code = computed(() => toValue(roomCode)?.trim().toUpperCase())
 
-  async function joinRoom(payload: { name: string; role?: 'player' | 'spectator' }) {
+  async function joinRoom(payload: { name: string; role?: 'player' | 'spectator'; authToken?: string }) {
     const currentCode = code.value
     if (!currentCode) {
       throw new Error('Код комнаты отсутствует')

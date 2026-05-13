@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import type { Player } from '~/types/game'
 
+const emit = defineEmits<{
+  select: [playerId: string]
+}>()
+
 defineProps<{
   player: Player
   isCurrentPlayer?: boolean
@@ -17,6 +21,7 @@ defineProps<{
       `dealer-player-card--${player.status}`,
       { 'dealer-player-card--current': isCurrentPlayer }
     ]"
+    @click="emit('select', player.id)"
   >
     <header>
       <strong>{{ player.name }}</strong>
@@ -75,5 +80,7 @@ defineProps<{
     background: rgba(255, 196, 0, 0.22);
     color: #fff8c7;
   }
+
+  cursor: pointer;
 }
 </style>

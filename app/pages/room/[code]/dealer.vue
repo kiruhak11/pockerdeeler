@@ -5,9 +5,11 @@ import QRCodeInvite from '~/components/room/QRCodeInvite.vue'
 import PlayerLobbyList from '~/components/room/PlayerLobbyList.vue'
 import DealerDashboard from '~/components/dealer/DealerDashboard.vue'
 import DealerRoomSettings from '~/components/dealer/DealerRoomSettings.vue'
+import DealerPlayerActionModal from '~/components/dealer/DealerPlayerActionModal.vue'
 import { useRoomStore } from '~/stores/room'
 import { usePlayerSessionStore } from '~/stores/playerSession'
 import { getHttpErrorMessage } from '~/utils/httpError'
+import type { PlayerActionType } from '~/types/game'
 
 const route = useRoute()
 const roomStore = useRoomStore()
@@ -22,10 +24,31 @@ const inviteUrl = computed<string>(() => {
   return `${window.location.origin}/room/${code.value}/join`
 })
 
-const { startGame, startHand, finishHand, approveAction, rejectAction, distributePot, undo, updateSettings } = useDealerRoom(code)
+const {
+  startGame,
+  restartGame,
+  startHand,
+  finishHand,
+  approveAction,
+  rejectAction,
+  distributePot,
+  undo,
+  forceAction,
+  kickPlayer,
+  updateSettings
+} = useDealerRoom(code)
 useRoomRealtime(code)
 
 const isLoading = ref(false)
+const selectedPlayerId = ref<string | null>(null)
+
+const selectedPlayer = computed(() => {
+  if (!selectedPlayerId.value) {
+    return null
+  }
+
+  return roomStore.players.find((player) => player.id === selectedPlayerId.value) ?? null
+})
 
 onMounted(async () => {
   sessionStore.loadSession()
@@ -61,6 +84,32 @@ async function run(action: () => Promise<unknown>) {
     isLoading.value = false
   }
 }
+
+async function onForceAction(payload: { type: PlayerActionType; amount: number }) {
+  if (!selectedPlayer.value) {
+    return
+  }
+
+  await run(() => forceAction({
+    playerId: selectedPlayer.value!.id,
+    type: payload.type,
+    amount: payload.amount
+  }))
+  selectedPlayerId.value = null
+}
+
+async function onKickPlayer() {
+  if (!selectedPlayer.value) {
+    return
+  }
+
+  if (!confirm(`Выгнать игрока ${selectedPlayer.value.name} из комнаты?`)) {
+    return
+  }
+
+  await run(() => kickPlayer(selectedPlayer.value!.id))
+  selectedPlayerId.value = null
+}
 </script>
 
 <template>
@@ -95,12 +144,14 @@ async function run(action: () => Promise<unknown>) {
       :current-session="roomStore.currentSession"
       :current-hand="roomStore.currentHand"
       @start-game="run(startGame)"
+      @restart-game="run(restartGame)"
       @start-hand="run(startHand)"
       @finish-hand="run(finishHand)"
       @undo="run(undo)"
       @approve="run(() => approveAction($event))"
       @reject="run(() => rejectAction($event))"
       @distribute="run(() => distributePot($event))"
+      @select-player="selectedPlayerId = $event"
     />
 
     <div class="dealer-room-page__footer">
@@ -109,6 +160,15 @@ async function run(action: () => Promise<unknown>) {
     </div>
 
     <p v-if="isLoading" class="page-subtitle">Выполняем команду...</p>
+
+    <DealerPlayerActionModal
+      :visible="Boolean(selectedPlayer)"
+      :player-name="selectedPlayer?.name || ''"
+      :player-stack="selectedPlayer?.stack || 0"
+      @close="selectedPlayerId = null"
+      @force-action="onForceAction"
+      @kick="onKickPlayer"
+    />
   </main>
 </template>
 
