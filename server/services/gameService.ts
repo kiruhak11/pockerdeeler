@@ -1209,18 +1209,6 @@ export async function distributePotByDealer(input: {
 
     for (const updated of distribution.players) {
       const source = roomPlayersById.get(updated.id)
-      if (!source?.userId) {
-        continue
-      }
-
-      if (updated.stack <= 0) {
-        updated.stack = ACCOUNT_DEFAULT_BALANCE
-        updated.status = isConnectedTablePlayer(source) ? 'active' : 'out'
-      }
-    }
-
-    for (const updated of distribution.players) {
-      const source = roomPlayersById.get(updated.id)
       if (!source) {
         continue
       }
@@ -1264,7 +1252,7 @@ export async function distributePotByDealer(input: {
         status: calculated.status
       }
     })
-    await syncUserBalancesFromPlayers(tx, syncedPlayersForUsers, { autoResetWhenZero: true })
+    await syncUserBalancesFromPlayers(tx, syncedPlayersForUsers, { autoResetWhenZero: false })
 
     await tx.hand.update({
       where: { id: hand.id },

@@ -31,9 +31,7 @@ const connectedPlayers = computed(() =>
   props.players.filter((player) => player.isConnected !== false && Boolean(player.participantId))
 )
 
-const tablePlayers = computed(() =>
-  props.players.filter((player) => player.isConnected !== false || player.status !== 'out')
-)
+const tablePlayers = computed(() => connectedPlayers.value)
 
 const currentPlayer = computed(() => {
   if (!props.currentSession?.currentPlayerId) {

@@ -154,8 +154,26 @@ export async function resetUserBalanceToDefault(input: {
   playerId?: string
 }) {
   const user = await getUserByToken(input.token)
+  if (user.balance >= DEFAULT_BALANCE) {
+    throw createError({ statusCode: 409, statusMessage: 'Сброс доступен только если баланс меньше 5000' })
+  }
 
   return prisma.$transaction(async (tx) => {
+    const activeSession = await tx.player.findFirst({
+      where: {
+        userId: user.id,
+        isConnected: true,
+        room: {
+          status: { not: 'lobby' }
+        }
+      },
+      select: { id: true }
+    })
+
+    if (activeSession) {
+      throw createError({ statusCode: 409, statusMessage: 'Сброс баланса доступен только в лобби' })
+    }
+
     const updatedUser = await tx.user.update({
       where: { id: user.id },
       data: {

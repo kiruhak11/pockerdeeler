@@ -45,6 +45,7 @@ const canResetBalance = computed(() => {
   return Boolean(
     accountStore.token
     && accountStore.user
+    && accountStore.user.balance < 5000
     && selfPlayer.value
     && roomStore.room?.status === 'lobby'
   )
@@ -210,7 +211,7 @@ async function onResetBalance() {
       >
         Обновить баланс до 5000
       </button>
-      <p class="page-subtitle">Кнопка доступна только в лобби, до старта раздачи.</p>
+      <p class="page-subtitle">Кнопка доступна только в лобби и если баланс аккаунта меньше 5000.</p>
     </section>
 
     <NuxtLink class="btn btn--ghost" to="/">На главную</NuxtLink>

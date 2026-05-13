@@ -1,13 +1,17 @@
 <script setup lang="ts">
 import type { Player } from '~/types/game'
 
-defineProps<{
+const props = defineProps<{
   players: Player[]
   selfPlayerId: string | null
   currentPlayerId: string | null
   smallBlindPlayerId: string | null
   bigBlindPlayerId: string | null
 }>()
+
+const visiblePlayers = computed(() =>
+  props.players.filter((player) => player.isConnected !== false && Boolean(player.participantId))
+)
 </script>
 
 <template>
@@ -15,19 +19,19 @@ defineProps<{
     <h3>Стол</h3>
     <ul>
       <li
-        v-for="player in players"
+        v-for="player in visiblePlayers"
         :key="player.id"
         :class="{
-          'player-table-view__row--current': currentPlayerId === player.id,
-          'player-table-view__row--self': selfPlayerId === player.id
+          'player-table-view__row--current': props.currentPlayerId === player.id,
+          'player-table-view__row--self': props.selfPlayerId === player.id
         }"
       >
         <span>{{ player.seat }}.</span>
         <span class="name">
           {{ player.name }}
-          <small v-if="selfPlayerId === player.id">(вы)</small>
-          <small v-if="smallBlindPlayerId === player.id">SB</small>
-          <small v-if="bigBlindPlayerId === player.id">BB</small>
+          <small v-if="props.selfPlayerId === player.id">(вы)</small>
+          <small v-if="props.smallBlindPlayerId === player.id">SB</small>
+          <small v-if="props.bigBlindPlayerId === player.id">BB</small>
         </span>
         <span>{{ player.stack }}</span>
         <span class="tag">{{ player.status }}</span>

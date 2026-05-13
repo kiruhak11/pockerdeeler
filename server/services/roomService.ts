@@ -403,18 +403,6 @@ export async function joinRoom(
       throw createError({ statusCode: 401, statusMessage: 'Аккаунт не найден' })
     }
 
-    const duplicateName = await tx.roomParticipant.findFirst({
-      where: {
-        roomId: room.id,
-        isConnected: true,
-        name: { equals: name, mode: 'insensitive' }
-      }
-    })
-
-    if (duplicateName) {
-      throw createError({ statusCode: 409, statusMessage: 'Имя уже занято' })
-    }
-
     if (role === 'spectator' && !settings.allowSpectators) {
       throw createError({ statusCode: 403, statusMessage: 'Зрители запрещены в этой комнате' })
     }
@@ -480,6 +468,17 @@ export async function joinRoom(
       }
     }
 
+    const duplicateName = await tx.roomParticipant.findFirst({
+      where: {
+        roomId: room.id,
+        name: { equals: name, mode: 'insensitive' }
+      }
+    })
+
+    if (duplicateName && (!user || duplicateName.userId !== user.id)) {
+      throw createError({ statusCode: 409, statusMessage: 'Имя уже использовалось в этой комнате, выберите другое' })
+    }
+
     const participant = await tx.roomParticipant.create({
       data: {
         roomId: room.id,
@@ -495,18 +494,8 @@ export async function joinRoom(
     if (role === 'player') {
       const accountBalance = user?.balance ?? null
       const initialStack = accountBalance !== null
-        ? (accountBalance > 0 ? accountBalance : 5000)
+        ? Math.max(0, accountBalance)
         : settings.startingStack
-
-      if (user && accountBalance !== null && accountBalance <= 0) {
-        await tx.user.update({
-          where: { id: user.id },
-          data: {
-            balance: 5000,
-            updatedAt: new Date()
-          }
-        })
-      }
 
       const maxSeat = await tx.player.aggregate({
         where: { roomId: room.id },

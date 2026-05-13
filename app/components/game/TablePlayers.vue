@@ -1,12 +1,16 @@
 <script setup lang="ts">
 import type { Player } from '~/types/game'
 
-defineProps<{
+const props = defineProps<{
   players: Player[]
   currentPlayerId?: string | null
   smallBlindPlayerId?: string | null
   bigBlindPlayerId?: string | null
 }>()
+
+const visiblePlayers = computed(() =>
+  props.players.filter((player) => player.isConnected !== false && Boolean(player.participantId))
+)
 </script>
 
 <template>
@@ -14,15 +18,15 @@ defineProps<{
     <h3>Игроки за столом</h3>
     <ul>
       <li
-        v-for="player in players"
+        v-for="player in visiblePlayers"
         :key="player.id"
-        :class="{ 'is-current': currentPlayerId === player.id }"
+        :class="{ 'is-current': props.currentPlayerId === player.id }"
       >
         {{ player.seat }}. {{ player.name }} — {{ player.stack }} ({{ player.status }})
         <span class="marks">
-          <span v-if="smallBlindPlayerId === player.id" class="tag">SB</span>
-          <span v-if="bigBlindPlayerId === player.id" class="tag">BB</span>
-          <span v-if="currentPlayerId === player.id" class="tag">Ход</span>
+          <span v-if="props.smallBlindPlayerId === player.id" class="tag">SB</span>
+          <span v-if="props.bigBlindPlayerId === player.id" class="tag">BB</span>
+          <span v-if="props.currentPlayerId === player.id" class="tag">Ход</span>
         </span>
       </li>
     </ul>
