@@ -5,7 +5,8 @@ import type {
   Hand as DbHand,
   PlayerAction as DbPlayerAction,
   GameSession as DbGameSession,
-  AuditLog as DbAuditLog
+  AuditLog as DbAuditLog,
+  RoomChatMessage as DbRoomChatMessage
 } from '@prisma/client'
 import { createError } from 'h3'
 import { prisma } from '../db/client'
@@ -23,6 +24,7 @@ export interface CreateRoomPayload {
   allowLateJoin: boolean
   requireDealerActionApproval: boolean
   allowSpectators: boolean
+  authToken?: string
 }
 
 interface RoomSettings {
@@ -57,6 +59,7 @@ export interface RoomState {
   currentHand: ReturnType<typeof mapHand> | null
   actions: ReturnType<typeof mapAction>[]
   pendingActions: ReturnType<typeof mapAction>[]
+  chatMessages: ReturnType<typeof mapChatMessage>[]
   lastDistribution: ReturnType<typeof mapLastDistribution> | null
 }
 
@@ -107,6 +110,7 @@ function mapPlayer(player: DbPlayer) {
   return {
     id: player.id,
     roomId: player.roomId,
+    userId: player.userId ?? undefined,
     participantId: player.participantId ?? '',
     name: player.name,
     seat: player.seat,
@@ -163,6 +167,18 @@ function mapAction(action: DbPlayerAction) {
     clientRequestId: action.clientRequestId,
     createdAt: action.createdAt.toISOString(),
     appliedAt: action.appliedAt?.toISOString()
+  }
+}
+
+function mapChatMessage(message: DbRoomChatMessage) {
+  return {
+    id: message.id,
+    roomId: message.roomId,
+    participantId: message.participantId ?? undefined,
+    userId: message.userId ?? undefined,
+    senderName: message.senderName,
+    text: message.text,
+    createdAt: message.createdAt.toISOString()
   }
 }
 
@@ -236,8 +252,17 @@ export async function createRoom(payload: CreateRoomPayload, appUrl: string) {
   const settings = normalizeSettings(payload)
   const dealerSecret = generateSecret('dealer')
   const dealerSecretHash = hashSecret(dealerSecret)
+  const verifiedUser = payload.authToken ? verifyUserAuthToken(payload.authToken) : null
 
   const created = await prisma.$transaction(async (tx) => {
+    const dealerUser = verifiedUser
+      ? await tx.user.findUnique({ where: { id: verifiedUser.userId } })
+      : null
+
+    if (verifiedUser && !dealerUser) {
+      throw createError({ statusCode: 401, statusMessage: 'Аккаунт дилера не найден' })
+    }
+
     const code = await createUniqueRoomCode(tx)
 
     const room = await tx.room.create({
@@ -253,8 +278,9 @@ export async function createRoom(payload: CreateRoomPayload, appUrl: string) {
     const dealerParticipantFinal = await tx.roomParticipant.create({
       data: {
         roomId: room.id,
+        userId: dealerUser?.id ?? null,
         role: 'dealer',
-        name: 'Dealer',
+        name: dealerUser?.username || 'Dealer',
         sessionTokenHash: hashSecret(generateSecret('dealer')),
         isConnected: true
       }
@@ -607,6 +633,11 @@ export async function getRoomState(roomCode: string): Promise<RoomState> {
     : []
 
   const pendingActions = actions.filter((action) => action.status === 'pending')
+  const chatMessages = await prisma.roomChatMessage.findMany({
+    where: { roomId: room.id },
+    orderBy: { createdAt: 'desc' },
+    take: 120
+  })
 
   const lastDistributionLog = await prisma.auditLog.findFirst({
     where: {
@@ -636,6 +667,7 @@ export async function getRoomState(roomCode: string): Promise<RoomState> {
     currentHand: currentHand ? mapHand(currentHand) : null,
     actions: actions.map(mapAction),
     pendingActions: pendingActions.map(mapAction),
+    chatMessages: chatMessages.reverse().map(mapChatMessage),
     lastDistribution
   }
 }

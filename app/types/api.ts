@@ -3,6 +3,7 @@ import type { Room, RoomSettings, RoomState } from './room'
 
 export interface CreateRoomInput extends RoomSettings {
   name: string
+  authToken?: string
 }
 
 export interface CreateRoomResponse {
@@ -33,6 +34,7 @@ export interface RoomStateResponse {
   currentHand: import('./game').OnlineHand | null
   actions: import('./game').OnlinePlayerAction[]
   pendingActions: import('./game').OnlinePlayerAction[]
+  chatMessages: import('./social').RoomChatMessage[]
   lastDistribution: import('./room').RoomState['lastDistribution']
 }
 

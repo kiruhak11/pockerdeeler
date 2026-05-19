@@ -5,6 +5,7 @@ import ConnectionStatus from '~/components/room/ConnectionStatus.vue'
 import GamePotSummary from '~/components/game/PotSummary.vue'
 import TablePlayers from '~/components/game/TablePlayers.vue'
 import ActionHistory from '~/components/game/ActionHistory.vue'
+import RoomChatPanel from '~/components/room/RoomChatPanel.vue'
 
 const route = useRoute()
 const roomStore = useRoomStore()
@@ -49,6 +50,7 @@ onMounted(async () => {
       :big-blind-player-id="roomStore.currentSession?.bigBlindPlayerId || null"
     />
     <ActionHistory :actions="roomStore.actions.slice(-15)" />
+    <RoomChatPanel :room-code="code" role="viewer" title="Чат комнаты" />
   </main>
 </template>
 

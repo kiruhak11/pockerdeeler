@@ -1,5 +1,6 @@
 import type { OnlineGameSession, OnlineHand, OnlinePlayerAction, Player } from '~/types/game'
 import type { Room } from '~/types/room'
+import type { RoomChatMessage } from '~/types/social'
 
 interface RoomStoreState {
   room: Room | null
@@ -8,6 +9,7 @@ interface RoomStoreState {
   currentHand: OnlineHand | null
   actions: OnlinePlayerAction[]
   pendingActions: OnlinePlayerAction[]
+  chatMessages: RoomChatMessage[]
   lastDistribution: import('~/types/room').RoomState['lastDistribution']
   connectionStatus: 'disconnected' | 'connecting' | 'connected'
   error: string | null
@@ -22,6 +24,7 @@ export const useRoomStore = defineStore('room', {
     currentHand: null,
     actions: [],
     pendingActions: [],
+    chatMessages: [],
     lastDistribution: null,
     connectionStatus: 'disconnected',
     error: null,
@@ -36,6 +39,7 @@ export const useRoomStore = defineStore('room', {
       currentHand: OnlineHand | null
       actions: OnlinePlayerAction[]
       pendingActions: OnlinePlayerAction[]
+      chatMessages: RoomChatMessage[]
       lastDistribution: import('~/types/room').RoomState['lastDistribution']
     }) {
       this.room = payload.room
@@ -44,6 +48,7 @@ export const useRoomStore = defineStore('room', {
       this.currentHand = payload.currentHand
       this.actions = payload.actions
       this.pendingActions = payload.pendingActions
+      this.chatMessages = payload.chatMessages
       this.lastDistribution = payload.lastDistribution
       this.error = null
     },
@@ -80,6 +85,7 @@ export const useRoomStore = defineStore('room', {
       this.currentHand = null
       this.actions = []
       this.pendingActions = []
+      this.chatMessages = []
       this.lastDistribution = null
       this.connectionStatus = 'disconnected'
       this.error = null

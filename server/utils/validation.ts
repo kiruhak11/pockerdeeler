@@ -11,7 +11,8 @@ export const createRoomSchema = z.object({
   quickBetSteps: quickBetStepsSchema.optional(),
   allowLateJoin: z.boolean(),
   requireDealerActionApproval: z.boolean(),
-  allowSpectators: z.boolean()
+  allowSpectators: z.boolean(),
+  authToken: z.string().min(16).optional()
 })
 
 export const joinRoomSchema = z.object({
@@ -82,4 +83,44 @@ export const dealerForceActionSchema = z.object({
 export const dealerKickPlayerSchema = z.object({
   dealerSecret: z.string().min(8),
   playerId: z.string().uuid()
+})
+
+export const updateUsernameSchema = z.object({
+  token: z.string().min(16),
+  username: z.string().min(3).max(32)
+})
+
+export const changePasswordSchema = z.object({
+  token: z.string().min(16),
+  currentPassword: z.string().min(6).max(128),
+  newPassword: z.string().min(6).max(128)
+})
+
+export const sendFriendRequestSchema = z.object({
+  token: z.string().min(16),
+  username: z.string().min(3).max(32)
+})
+
+export const respondFriendRequestSchema = z.object({
+  token: z.string().min(16),
+  requestId: z.string().uuid(),
+  decision: z.enum(['accept', 'reject'])
+})
+
+export const inviteFriendToRoomSchema = z.object({
+  token: z.string().min(16),
+  friendUserId: z.string().uuid()
+})
+
+export const respondRoomInviteSchema = z.object({
+  token: z.string().min(16),
+  inviteId: z.string().uuid(),
+  decision: z.enum(['accept', 'decline'])
+})
+
+export const roomChatMessageSchema = z.object({
+  message: z.string().min(1).max(300),
+  participantId: z.string().uuid().optional(),
+  token: z.string().min(8).optional(),
+  dealerSecret: z.string().min(8).optional()
 })

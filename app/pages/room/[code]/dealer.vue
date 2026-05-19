@@ -3,6 +3,8 @@ import ConnectionStatus from '~/components/room/ConnectionStatus.vue'
 import RoomCodeCard from '~/components/room/RoomCodeCard.vue'
 import QRCodeInvite from '~/components/room/QRCodeInvite.vue'
 import PlayerLobbyList from '~/components/room/PlayerLobbyList.vue'
+import FriendInvitePanel from '~/components/room/FriendInvitePanel.vue'
+import RoomChatPanel from '~/components/room/RoomChatPanel.vue'
 import DealerDashboard from '~/components/dealer/DealerDashboard.vue'
 import DealerRoomSettings from '~/components/dealer/DealerRoomSettings.vue'
 import DealerPlayerActionModal from '~/components/dealer/DealerPlayerActionModal.vue'
@@ -49,6 +51,14 @@ const selectedPlayer = computed(() => {
 
   return roomStore.players.find((player) => player.id === selectedPlayerId.value) ?? null
 })
+
+const connectedUserIds = computed(() => [
+  ...new Set(
+    roomStore.players
+      .filter((player) => player.isConnected && player.userId)
+      .map((player) => player.userId as string)
+  )
+])
 
 onMounted(async () => {
   sessionStore.loadSession()
@@ -128,6 +138,11 @@ async function onKickPlayer() {
       <RoomCodeCard :code="code" :invite-url="inviteUrl" />
       <QRCodeInvite :url="inviteUrl" />
       <PlayerLobbyList :players="roomStore.players" />
+    </section>
+
+    <section class="dealer-room-page__top">
+      <FriendInvitePanel :room-code="code" :connected-user-ids="connectedUserIds" />
+      <RoomChatPanel :room-code="code" role="dealer" title="Чат лобби" />
     </section>
 
     <DealerRoomSettings

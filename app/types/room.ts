@@ -42,6 +42,7 @@ export interface RoomState {
   currentHand: import('./game').OnlineHand | null
   actions: import('./game').OnlinePlayerAction[]
   pendingActions: import('./game').OnlinePlayerAction[]
+  chatMessages: import('./social').RoomChatMessage[]
   lastDistribution: {
     eventId: string
     handId: string

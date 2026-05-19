@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { usePlayerSessionStore } from "~/stores/playerSession"
+import { useAccountStore } from '~/stores/account'
+import { useAccountAuth } from '~/composables/useAccountAuth'
 import { parseQuickBetSteps, formatQuickBetSteps } from '~/utils/quickBetSteps'
 const sessionStore = usePlayerSessionStore()
+const accountStore = useAccountStore()
+const { loadMe } = useAccountAuth()
 
 const form = reactive({
   name: 'Домашняя игра',
@@ -17,6 +21,13 @@ const form = reactive({
 
 const isSubmitting = ref(false)
 
+onMounted(async () => {
+  accountStore.loadSession()
+  if (accountStore.token) {
+    await loadMe().catch(() => accountStore.clearSession())
+  }
+})
+
 async function submit() {
   isSubmitting.value = true
   try {
@@ -29,7 +40,8 @@ async function submit() {
       method: 'POST',
       body: {
         ...form,
-        quickBetSteps: parseQuickBetSteps(form.quickBetStepsText)
+        quickBetSteps: parseQuickBetSteps(form.quickBetStepsText),
+        authToken: accountStore.token || undefined
       }
     })
 
@@ -56,6 +68,9 @@ async function submit() {
     <header>
       <h1 class="page-title">Создать онлайн-комнату</h1>
       <p class="page-subtitle">Запустите мультиплеерный стол и пригласите игроков по коду.</p>
+      <p v-if="accountStore.user" class="page-subtitle">
+        Комната будет связана с аккаунтом: <strong>{{ accountStore.user.username }}</strong>
+      </p>
     </header>
 
     <form class="panel create-room-page__form" @submit.prevent="submit">

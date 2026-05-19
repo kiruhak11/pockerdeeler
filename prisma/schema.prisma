@@ -26,6 +26,8 @@ model Room {
   actions      PlayerAction[]
   snapshots    GameSnapshot[]
   auditLogs    AuditLog[]
+  invites      RoomInvite[]
+  chatMessages RoomChatMessage[]
 
   @@index([code])
   @@map("rooms")
@@ -41,6 +43,13 @@ model User {
 
   participants RoomParticipant[]
   players      Player[]
+  sentFriendRequests     FriendRequest[]   @relation("FriendRequestSender")
+  receivedFriendRequests FriendRequest[]   @relation("FriendRequestReceiver")
+  friendshipsA           Friendship[]      @relation("FriendshipA")
+  friendshipsB           Friendship[]      @relation("FriendshipB")
+  sentRoomInvites        RoomInvite[]      @relation("RoomInviteSender")
+  receivedRoomInvites    RoomInvite[]      @relation("RoomInviteReceiver")
+  roomChatMessages       RoomChatMessage[]
 
   @@index([username])
   @@map("users")
@@ -61,6 +70,7 @@ model RoomParticipant {
   user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
   player Player?
   actorAuditLogs AuditLog[]
+  chatMessages RoomChatMessage[]
 
   @@index([roomId])
   @@index([userId])
@@ -207,4 +217,74 @@ model AuditLog {
 
   @@index([roomId, createdAt])
   @@map("audit_logs")
+}
+
+model FriendRequest {
+  id         String   @id @default(uuid()) @db.Uuid
+  fromUserId String   @map("from_user_id") @db.Uuid
+  toUserId   String   @map("to_user_id") @db.Uuid
+  status     String   @db.VarChar(32)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  fromUser User @relation("FriendRequestSender", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser   User @relation("FriendRequestReceiver", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@unique([fromUserId, toUserId])
+  @@index([toUserId, status])
+  @@index([fromUserId, status])
+  @@map("friend_requests")
+}
+
+model Friendship {
+  id        String   @id @default(uuid()) @db.Uuid
+  userAId   String   @map("user_a_id") @db.Uuid
+  userBId   String   @map("user_b_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  userA User @relation("FriendshipA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB User @relation("FriendshipB", fields: [userBId], references: [id], onDelete: Cascade)
+
+  @@unique([userAId, userBId])
+  @@index([userAId])
+  @@index([userBId])
+  @@map("friendships")
+}
+
+model RoomInvite {
+  id         String   @id @default(uuid()) @db.Uuid
+  roomId     String   @map("room_id") @db.Uuid
+  fromUserId String   @map("from_user_id") @db.Uuid
+  toUserId   String   @map("to_user_id") @db.Uuid
+  status     String   @db.VarChar(32)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  room     Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  fromUser User @relation("RoomInviteSender", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser   User @relation("RoomInviteReceiver", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, fromUserId, toUserId])
+  @@index([roomId, status])
+  @@index([toUserId, status])
+  @@map("room_invites")
+}
+
+model RoomChatMessage {
+  id            String   @id @default(uuid()) @db.Uuid
+  roomId        String   @map("room_id") @db.Uuid
+  participantId String?  @map("participant_id") @db.Uuid
+  userId        String?  @map("user_id") @db.Uuid
+  senderName    String   @map("sender_name") @db.Text
+  text          String   @db.Text
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  room        Room             @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  participant RoomParticipant? @relation(fields: [participantId], references: [id], onDelete: SetNull)
+  user        User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([roomId, createdAt])
+  @@index([participantId])
+  @@index([userId])
+  @@map("room_chat_messages")
 }

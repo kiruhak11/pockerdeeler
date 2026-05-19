@@ -129,6 +129,96 @@ export async function loginUser(input: { username: string; password: string }) {
   }
 }
 
+export async function updateUsername(input: { token: string; username: string }) {
+  const user = await getUserByToken(input.token)
+  const nextUsername = normalizeUsername(input.username)
+
+  if (nextUsername.length < 3 || nextUsername.length > 32) {
+    throw createError({ statusCode: 400, statusMessage: 'Логин должен быть длиной от 3 до 32 символов' })
+  }
+
+  if (nextUsername === user.username) {
+    return toPublicUser(user)
+  }
+
+  const exists = await prisma.user.findUnique({
+    where: { username: nextUsername },
+    select: { id: true }
+  })
+
+  if (exists) {
+    throw createError({ statusCode: 409, statusMessage: 'Пользователь с таким логином уже существует' })
+  }
+
+  const now = new Date()
+  const updatedUser = await prisma.$transaction(async (tx) => {
+    const saved = await tx.user.update({
+      where: { id: user.id },
+      data: {
+        username: nextUsername,
+        updatedAt: now
+      }
+    })
+
+    await tx.roomParticipant.updateMany({
+      where: {
+        userId: user.id,
+        role: 'player',
+        isConnected: true
+      },
+      data: {
+        name: nextUsername,
+        lastSeenAt: now
+      }
+    })
+
+    await tx.player.updateMany({
+      where: {
+        userId: user.id,
+        isConnected: true
+      },
+      data: {
+        name: nextUsername,
+        updatedAt: now
+      }
+    })
+
+    return saved
+  })
+
+  return toPublicUser(updatedUser)
+}
+
+export async function changePassword(input: {
+  token: string
+  currentPassword: string
+  newPassword: string
+}) {
+  const user = await getUserByToken(input.token)
+
+  if (input.newPassword.length < 6 || input.newPassword.length > 128) {
+    throw createError({ statusCode: 400, statusMessage: 'Новый пароль должен быть длиной от 6 до 128 символов' })
+  }
+
+  if (!verifyPassword(input.currentPassword, user.passwordHash)) {
+    throw createError({ statusCode: 401, statusMessage: 'Текущий пароль указан неверно' })
+  }
+
+  if (input.currentPassword === input.newPassword) {
+    throw createError({ statusCode: 409, statusMessage: 'Новый пароль должен отличаться от текущего' })
+  }
+
+  const updatedUser = await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      passwordHash: hashPassword(input.newPassword),
+      updatedAt: new Date()
+    }
+  })
+
+  return toPublicUser(updatedUser)
+}
+
 export async function getUserByToken(token: string) {
   const verified = verifyUserAuthToken(token)
   if (!verified) {

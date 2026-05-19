@@ -43,6 +43,7 @@ export function useDealerRoom(roomCode: MaybeRefOrGetter<string | undefined>) {
     allowLateJoin: boolean
     requireDealerActionApproval: boolean
     allowSpectators: boolean
+    authToken?: string
   }) {
     return $fetch('/api/rooms/create', {
       method: 'POST',

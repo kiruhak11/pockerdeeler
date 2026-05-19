@@ -8,6 +8,7 @@ import { getHttpErrorMessage } from '~/utils/httpError'
 import ConnectionStatus from '~/components/room/ConnectionStatus.vue'
 import PlayerDashboard from '~/components/player/PlayerDashboard.vue'
 import HandResultModal from '~/components/player/HandResultModal.vue'
+import RoomChatPanel from '~/components/room/RoomChatPanel.vue'
 
 const route = useRoute()
 const roomStore = useRoomStore()
@@ -197,6 +198,12 @@ async function onResetBalance() {
       :quick-bet-steps="roomStore.room?.settings.quickBetSteps || []"
       :waiting-approval="waitingApproval"
       @action="onAction"
+    />
+
+    <RoomChatPanel
+      :room-code="code"
+      :role="sessionStore.role === 'spectator' ? 'spectator' : 'player'"
+      title="Чат комнаты"
     />
 
     <section v-if="accountStore.user" class="panel player-room-page__profile">

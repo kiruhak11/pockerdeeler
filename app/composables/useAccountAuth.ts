@@ -63,6 +63,38 @@ export function useAccountAuth() {
     return response.user
   }
 
+  async function updateUsername(username: string) {
+    if (!accountStore.token) {
+      throw new Error('Нет токена аккаунта')
+    }
+
+    const response = await $fetch<{ user: AccountUser }>('/api/auth/update-username', {
+      method: 'POST',
+      body: {
+        token: accountStore.token,
+        username
+      }
+    })
+
+    accountStore.setUser(response.user)
+    return response.user
+  }
+
+  async function changePassword(currentPassword: string, newPassword: string) {
+    if (!accountStore.token) {
+      throw new Error('Нет токена аккаунта')
+    }
+
+    return $fetch<{ success: boolean }>('/api/auth/change-password', {
+      method: 'POST',
+      body: {
+        token: accountStore.token,
+        currentPassword,
+        newPassword
+      }
+    })
+  }
+
   function logout() {
     accountStore.clearSession()
   }
@@ -72,6 +104,8 @@ export function useAccountAuth() {
     login,
     loadMe,
     resetBalance,
+    updateUsername,
+    changePassword,
     logout
   }
 }

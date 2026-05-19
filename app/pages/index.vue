@@ -126,6 +126,7 @@ async function loginAccount() {
         </template>
 
         <button v-else type="button" class="btn btn--ghost" @click="logout">Выйти</button>
+        <NuxtLink v-if="accountStore.user" class="btn" to="/profile">Личный кабинет</NuxtLink>
       </section>
 
       <p v-if="!hasSaved" class="home-page__hint">Нет сохраненной локальной игры.</p>
