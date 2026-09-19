@@ -22,3 +22,17 @@ logs
 .env
 .env.*
 !.env.example
+
+# Android local tools, credentials and build artifacts
+android/local.properties
+*.jks
+*.keystore
+keystore.properties
+android-signing.properties
+docs/android-audit/baseline.patch
+artifacts/android/
+
+# Local audit and generated release artifacts
+/output/
+/artifacts/
+/docs/android-audit/

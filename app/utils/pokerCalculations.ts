@@ -57,6 +57,7 @@ function applyContribution(player: Player, requestedAmount: number): number {
 }
 
 function validateActionAvailability(player: Player, action: ActionInput): void {
+  if (player.status === 'waiting' || player.status === 'all-in') throw new Error('Игрок не может действовать в этой раздаче.')
   if (action.type === 'fold') {
     if (player.status === 'folded' || player.status === 'out') {
       throw new Error('Этот игрок уже не участвует в раздаче.')
@@ -279,7 +280,8 @@ function mergeResults(items: WinnerResult[]): WinnerResult[] {
 
 export function distributePot(
   playersBefore: Player[],
-  selectedWinnerIds: string[]
+  selectedWinnerIds: string[],
+  potWinners?: Record<string, string[]>
 ): { players: Player[]; result: PotDistributionResult } {
   const players = clonePlayers(playersBefore)
   if (!selectedWinnerIds.length) {
@@ -288,6 +290,9 @@ export function distributePot(
 
   const winnerSet = new Set(selectedWinnerIds)
   const playersById = new Map(players.map((player) => [player.id, player]))
+  if (selectedWinnerIds.some(id => !playersById.has(id) || ['folded', 'out', 'waiting'].includes(playersById.get(id)!.status))) {
+    throw new Error('Победитель должен участвовать в текущей раздаче.')
+  }
   const pots = calculatePots(players)
 
   if (!pots.length) {
@@ -298,19 +303,22 @@ export function distributePot(
   const returnedPayouts: WinnerResult[] = []
 
   for (const pot of pots) {
-    const eligibleWinners = pot.eligiblePlayerIds.filter((playerId) => winnerSet.has(playerId))
+    const contributors = players.filter(player => player.totalCommitted >= pot.cap).map(player => player.id)
+    if (contributors.length === 1) {
+      returnedPayouts.push(...splitEvenly(pot.amount, contributors, playersById))
+      continue
+    }
+    const selected = potWinners?.[String(pot.id)]
+    if (selected?.some(id => !pot.eligiblePlayerIds.includes(id))) throw new Error(`Игрок не может выиграть банк №${pot.id}.`)
+    const eligibleWinners = pot.eligiblePlayerIds.length === 1 ? pot.eligiblePlayerIds : pot.eligiblePlayerIds.filter(playerId => selected ? selected.includes(playerId) : winnerSet.has(playerId))
 
     if (eligibleWinners.length > 0) {
       winnerPayouts.push(...splitEvenly(pot.amount, eligibleWinners, playersById))
       continue
     }
 
-    // If no selected winner can claim this pot, return it to its last contributors.
-    // This protects chips from being lost because of an incorrect manual winner selection.
-    const contributors = players.filter((player) => player.totalCommitted >= pot.cap).map((player) => player.id)
-    if (contributors.length > 0) {
-      returnedPayouts.push(...splitEvenly(pot.amount, contributors, playersById))
-    }
+    // A contested side pot cannot be silently refunded or awarded to an ineligible all-in.
+    throw new Error(`Выберите победителя для банка №${pot.id}.`)
   }
 
   const mergedWinners = mergeResults(winnerPayouts)
@@ -416,9 +424,11 @@ export function getAvailableActions(
     currentBet: number
     handActive: boolean
     isCurrentPlayer: boolean
+    bettingState?: import('./bettingRounds').BettingState | null
   }
 ): AvailableActions {
-  const inactive = player.status === 'folded' || player.status === 'all-in' || player.status === 'out'
+  const inactive = player.isAway || player.status === 'folded' || player.status === 'all-in' || player.status === 'out' || player.status === 'waiting'
+  const minRaise = gameState.currentBet + (gameState.bettingState?.lastFullRaise ?? 1)
   if (!gameState.handActive) {
     return {
       canCheck: false,
@@ -467,9 +477,11 @@ export function getAvailableActions(
   const canCheck = player.currentBet === gameState.currentBet
   const canCall = callAmount > 0 && player.stack > 0
   const canBet = gameState.currentBet === 0 && player.stack > 0
-  const canRaise = gameState.currentBet > 0 && player.stack > callAmount
+  const actedAt = gameState.bettingState?.actedAtBet[player.id]
+  const raiseReopened = actedAt === undefined || gameState.currentBet - actedAt >= (gameState.bettingState?.lastFullRaise ?? 1)
+  const canRaise = gameState.currentBet > 0 && player.stack > callAmount && raiseReopened
   const canFold = player.status === 'active' || player.status === 'checked' || player.status === 'waiting'
-  const canAllIn = player.stack > 0
+  const canAllIn = player.stack > 0 && (player.stack <= callAmount || raiseReopened)
 
   return {
     canCheck,
@@ -479,6 +491,6 @@ export function getAvailableActions(
     canFold,
     canAllIn,
     callAmount,
-    minRaiseAmount: Math.max(gameState.currentBet + 1, player.currentBet + 1)
+    minRaiseAmount: Math.max(minRaise, player.currentBet + 1)
   }
 }

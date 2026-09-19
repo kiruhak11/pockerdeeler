@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <title>Poker Dealer Desk</title>
+  <rect width="512" height="512" rx="104" fill="#0c2d20"/>
+  <circle cx="256" cy="256" r="182" fill="#17231f" stroke="#f2b451" stroke-width="14"/>
+  <circle cx="256" cy="256" r="156" fill="none" stroke="#f2b451" stroke-width="18" stroke-dasharray="30 51.68" transform="rotate(-5 256 256)"/>
+  <circle cx="256" cy="256" r="130" fill="#133826" stroke="#f2b451" stroke-width="3"/>
+  <path d="M256 158C233 195 174 222 174 267c0 43 53 58 76 20-2 27-12 48-27 64h66c-15-16-25-37-27-64 23 38 76 23 76-20 0-45-59-72-82-109Z" fill="#f2b451"/>
+</svg>

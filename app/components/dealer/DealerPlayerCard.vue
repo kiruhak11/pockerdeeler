@@ -1,5 +1,16 @@
 <script setup lang="ts">
 import type { Player } from '~/types/game'
+import AchievementBadge from '~/components/achievement/AchievementBadge.vue'
+
+const statusLabels: Record<Player['status'], string> = {
+  waiting: 'Ожидает',
+  active: 'В игре',
+  checked: 'Чек',
+  folded: 'Сбросил карты',
+  'all-in': 'Ва-банк',
+  winner: 'Победитель',
+  out: 'Выбыл'
+}
 
 const emit = defineEmits<{
   select: [playerId: string]
@@ -24,14 +35,15 @@ defineProps<{
     @click="emit('select', player.id)"
   >
     <header>
-      <strong>{{ player.name }}</strong>
+      <strong>{{ player.name }} <small v-if="player.achievementIcon" class="player-achievement"><AchievementBadge :code="player.achievementIcon" :size="18"/></small></strong>
       <div class="dealer-player-card__badges">
         <span v-if="isDealerButton" class="tag">D</span>
         <span v-if="isSmallBlind" class="tag">SB</span>
         <span v-if="isBigBlind" class="tag">BB</span>
         <span v-if="isCurrentPlayer" class="tag tag--turn">Ход</span>
         <span v-if="player.isConnected === false" class="tag tag--offline">Отключен</span>
-        <span class="tag">{{ player.status }}</span>
+        <span v-if="player.isAway" class="tag tag--offline">Отошёл</span>
+        <span class="tag">{{ statusLabels[player.status] }}</span>
       </div>
     </header>
     <p>Место: {{ player.seat }}</p>

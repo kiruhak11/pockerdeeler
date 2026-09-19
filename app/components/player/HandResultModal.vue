@@ -5,6 +5,8 @@ defineProps<{
   delta: number
   finalStack: number
   handNumber: number
+  predictionGrant?: number
+  predictionBalance?: number
 }>()
 
 function deltaLabel(delta: number): string {
@@ -24,6 +26,12 @@ function deltaLabel(delta: number): string {
           <p>Раздача #{{ handNumber }}</p>
           <p>Изменение: <strong>{{ deltaLabel(delta) }}</strong></p>
           <p>Текущий баланс: <strong>{{ finalStack }}</strong></p>
+          <div v-if="predictionGrant" class="hand-result-modal__prediction">
+            <strong>Игра продолжается в режиме зрителя</strong>
+            <span>Выдано для прогнозов: {{ predictionGrant }}</span>
+            <span>Текущий прогнозный баланс: {{ predictionBalance }}</span>
+            <span>Вернуться за стол можно только на прибыль сверх стартовой выдачи.</span>
+          </div>
         </div>
       </div>
     </transition>
@@ -60,6 +68,20 @@ function deltaLabel(delta: number): string {
 
     strong {
       color: var(--text);
+    }
+  }
+
+  &__prediction {
+    display: grid;
+    gap: 0.3rem;
+    margin-top: 0.35rem;
+    padding: 0.75rem;
+    border: 1px solid rgba(240, 188, 79, 0.3);
+    border-radius: var(--radius-md);
+    background: rgba(240, 188, 79, 0.08);
+
+    span {
+      color: var(--text-muted);
     }
   }
 }

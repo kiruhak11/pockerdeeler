@@ -61,7 +61,7 @@ onBeforeUnmount(() => {
 .toast-list {
   position: fixed;
   right: 1rem;
-  bottom: 1rem;
+  bottom: calc(90px + env(safe-area-inset-bottom, 0px));
   z-index: 1000;
   width: min(90vw, 28rem);
 

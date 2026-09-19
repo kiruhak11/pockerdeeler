@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Player } from '~/types/game'
+import AchievementBadge from '~/components/achievement/AchievementBadge.vue'
 
 const props = defineProps<{
   players: Player[]
@@ -8,10 +9,14 @@ const props = defineProps<{
   smallBlindPlayerId: string | null
   bigBlindPlayerId: string | null
 }>()
+const emit = defineEmits<{ selectPlayer: [player: Player] }>()
 
 const visiblePlayers = computed(() =>
-  props.players.filter((player) => player.isConnected !== false && Boolean(player.participantId))
+  props.players.filter((player) => Boolean(player.participantId) || player.totalCommitted > 0)
 )
+const statusLabels: Record<Player['status'], string> = {
+  waiting: 'Ждёт раздачи', active: 'В игре', checked: 'Чек', folded: 'Пас', 'all-in': 'Ва-банк', winner: 'Победитель', out: 'Выбыл'
+}
 </script>
 
 <template>
@@ -25,16 +30,22 @@ const visiblePlayers = computed(() =>
           'player-table-view__row--current': props.currentPlayerId === player.id,
           'player-table-view__row--self': props.selfPlayerId === player.id
         }"
+        role="button"
+        tabindex="0"
+        :aria-label="`Открыть профиль игрока ${player.name}`"
+        @click="emit('selectPlayer', player)"
+        @keydown.enter="emit('selectPlayer', player)"
       >
         <span>{{ player.seat }}.</span>
         <span class="name">
-          {{ player.name }}
+          {{ player.name }} <small v-if="player.achievementIcon" class="player-achievement"><AchievementBadge :code="player.achievementIcon" :size="18"/></small>
           <small v-if="props.selfPlayerId === player.id">(вы)</small>
-          <small v-if="props.smallBlindPlayerId === player.id">SB</small>
-          <small v-if="props.bigBlindPlayerId === player.id">BB</small>
+          <small v-if="player.isAway">Отошёл</small>
+          <small v-if="props.smallBlindPlayerId === player.id" title="Малый обязательный взнос">Малый блайнд</small>
+          <small v-if="props.bigBlindPlayerId === player.id" title="Большой обязательный взнос">Большой блайнд</small>
         </span>
         <span>{{ player.stack }}</span>
-        <span class="tag">{{ player.status }}</span>
+        <span class="tag">{{ statusLabels[player.status] }}</span>
       </li>
     </ul>
   </section>
@@ -56,11 +67,12 @@ const visiblePlayers = computed(() =>
 
   li {
     display: grid;
-    grid-template-columns: auto 1fr auto auto;
+    grid-template-columns: auto minmax(0, 1fr) minmax(3rem, auto);
     gap: 0.4rem;
     align-items: center;
     padding: 0.35rem 0.45rem;
     border-radius: var(--radius-sm);
+    cursor: pointer;
   }
 
   &__row--current {
@@ -73,6 +85,9 @@ const visiblePlayers = computed(() =>
 
   .name {
     display: flex;
+    flex-wrap: wrap;
+    min-width: 0;
+    overflow-wrap: anywhere;
     gap: 0.35rem;
     align-items: baseline;
 
@@ -83,5 +98,6 @@ const visiblePlayers = computed(() =>
       letter-spacing: 0.02em;
     }
   }
+  .tag { grid-column: 2 / -1; justify-self: start; }
 }
 </style>

@@ -1,76 +1,47 @@
 import { getRoomState } from '../../../services/roomService'
-import { registerRoomPeer, unregisterRoomPeer } from '../../../ws/roomHub'
+import { authorizeRoomRead } from '../../../services/roomAccessService'
+import { finishRoomPeerSync, registerRoomPeer, unregisterRoomPeer } from '../../../ws/roomHub'
+import type { Peer } from 'crossws'
 
-function extractRoomCodeFromUrl(url: string): string {
-  const parsed = new URL(url, 'http://localhost')
-  const parts = parsed.pathname.split('/').filter(Boolean)
-  const code = parts[parts.length - 1] ?? ''
-  return code.toUpperCase()
-}
+const authenticated = new WeakSet<Peer>()
+const authenticating = new WeakSet<Peer>()
+const closed = new WeakSet<Peer>()
+const timers = new WeakMap<Peer, ReturnType<typeof setTimeout>>()
+function codeOf(url: string) { return new URL(url, 'http://localhost').pathname.split('/').pop()!.toUpperCase() }
 
 export default defineWebSocketHandler({
-  async upgrade(request) {
-    const code = extractRoomCodeFromUrl(request.url)
-    if (!code) {
-      throw createError({ statusCode: 400, statusMessage: 'Код комнаты обязателен' })
-    }
+  open(peer) {
+    timers.set(peer, setTimeout(() => { if (!authenticated.has(peer)) peer.close(4003, 'Требуется вход') }, 10_000))
   },
-
-  async open(peer) {
-    const code = extractRoomCodeFromUrl(peer.request.url)
-    if (!code) {
-      peer.close(1008, 'Некорректный код комнаты')
-      return
-    }
-
-    registerRoomPeer(code, peer)
-
+  async message(peer, message) {
+    if (message.text() === 'ping' && authenticated.has(peer)) { peer.send(JSON.stringify({ type: 'pong' })); return }
+    if (closed.has(peer) || authenticating.has(peer) || authenticated.has(peer) || message.text().length > 2048) return
+    authenticating.add(peer)
     try {
+      const payload = JSON.parse(message.text()) as { type?: string; token?: string }
+      if (payload.type !== 'authenticate' || typeof payload.token !== 'string') { peer.close(4003, 'Требуется вход'); return }
+      const code = codeOf(peer.request.url)
+      const access = await authorizeRoomRead(code, payload.token)
+      if (closed.has(peer)) return
+      registerRoomPeer(code, peer, access.participantId, true)
+      // Recheck after registration so revocation during the first DB read cannot
+      // leave a newly registered, unauthorized socket subscribed indefinitely.
+      await authorizeRoomRead(code, payload.token)
       const state = await getRoomState(code)
-      peer.send(
-        JSON.stringify({
-          type: 'room:joined',
-          roomCode: code,
-          state,
-          timestamp: new Date().toISOString()
-        })
-      )
-    } catch {
-      peer.send(
-        JSON.stringify({
-          type: 'room:error',
-          roomCode: code,
-          message: 'Не удалось загрузить состояние комнаты',
-          timestamp: new Date().toISOString()
-        })
-      )
-    }
+      if (closed.has(peer)) return
+      authenticated.add(peer)
+      clearTimeout(timers.get(peer))
+      finishRoomPeerSync(code, peer, state)
+    } catch (error) {
+      unregisterRoomPeer(codeOf(peer.request.url), peer)
+      const status = (error as { statusCode?: number }).statusCode
+      peer.close(status === 404 ? 4004 : status === 401 || status === 403 ? 4003 : 1011, 'Не удалось подключиться к комнате')
+    } finally { authenticating.delete(peer) }
   },
-
   close(peer) {
-    const code = extractRoomCodeFromUrl(peer.request.url)
-    if (!code) {
-      return
-    }
-
-    unregisterRoomPeer(code, peer)
-  },
-
-  message(peer, message) {
-    const code = extractRoomCodeFromUrl(peer.request.url)
-    if (!code) {
-      return
-    }
-
-    const raw = message.text()
-    if (raw === 'ping') {
-      peer.send(
-        JSON.stringify({
-          type: 'pong',
-          roomCode: code,
-          timestamp: new Date().toISOString()
-        })
-      )
-    }
+    clearTimeout(timers.get(peer))
+    authenticated.delete(peer)
+    closed.add(peer)
+    unregisterRoomPeer(codeOf(peer.request.url), peer)
   }
 })

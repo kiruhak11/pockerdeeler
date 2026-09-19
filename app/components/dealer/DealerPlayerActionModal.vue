@@ -1,10 +1,17 @@
 <script setup lang="ts">
 import type { PlayerActionType } from '~/types/game'
+import AchievementBadge from '~/components/achievement/AchievementBadge.vue'
 
 const props = defineProps<{
   visible: boolean
   playerName: string
   playerStack: number
+  playerStatus?: string
+  canAct: boolean
+  tableRating?: number
+  predictionRating?: number
+  achievementCount?: number
+  achievementIcons?: string[]
 }>()
 
 const emit = defineEmits<{
@@ -14,6 +21,10 @@ const emit = defineEmits<{
 }>()
 
 const amount = ref(0)
+const { preferences } = useGamePreferences()
+const actionLabels = computed(() => preferences.actionLanguage === 'ru'
+  ? { check: 'Чек', call: 'Поддержать', bet: 'Поставить', raise: 'Повысить', fold: 'Сбросить', allIn: 'Ва-банк' }
+  : { check: 'Check', call: 'Call', bet: 'Bet', raise: 'Raise', fold: 'Fold', allIn: 'All-in' })
 
 watch(
   () => props.visible,
@@ -25,6 +36,7 @@ watch(
 )
 
 function submit(type: PlayerActionType) {
+  if (!props.canAct) return
   emit('forceAction', {
     type,
     amount: Math.max(0, Math.trunc(amount.value || 0))
@@ -42,21 +54,24 @@ function submit(type: PlayerActionType) {
             <button type="button" class="btn btn--ghost" @click="emit('close')">Закрыть</button>
           </header>
 
-          <p>Стек игрока: {{ playerStack }}</p>
+          <p>Стек игрока: {{ playerStack }} · Статус: {{ playerStatus || '—' }}</p>
+          <div class="dealer-player-action-modal__profile"><span>Игра <strong>{{ tableRating || '—' }}</strong></span><span>Прогнозы <strong>{{ predictionRating || '—' }}</strong></span><span>Достижения <strong>{{ achievementCount || 0 }}</strong></span></div>
+          <div v-if="achievementIcons?.length" class="dealer-player-action-modal__icons"><span v-for="(icon, index) in achievementIcons" :key="`${icon}-${index}`"><AchievementBadge :code="icon" :size="26"/></span></div>
 
           <label>
             <span>Сумма</span>
             <input v-model.number="amount" class="input" type="number" min="0">
           </label>
 
-          <div class="dealer-player-action-modal__grid">
-            <button type="button" class="btn" @click="submit('check')">Чек</button>
-            <button type="button" class="btn" @click="submit('call')">Колл</button>
-            <button type="button" class="btn" @click="submit('bet')">Ставка</button>
-            <button type="button" class="btn" @click="submit('raise')">Рейз</button>
-            <button type="button" class="btn btn--danger" @click="submit('fold')">Пас</button>
-            <button type="button" class="btn btn--success" @click="submit('all-in')">Ва-банк</button>
-          </div>
+          <p v-if="!canAct">Сейчас не ход этого игрока. Можно удалить игрока, но сделать ход за него можно только в его очередь.</p>
+          <fieldset class="dealer-player-action-modal__grid" :disabled="!canAct">
+            <button type="button" class="btn" @click="submit('check')">{{ actionLabels.check }}</button>
+            <button type="button" class="btn" @click="submit('call')">{{ actionLabels.call }}</button>
+            <button type="button" class="btn" @click="submit('bet')">{{ actionLabels.bet }}</button>
+            <button type="button" class="btn" @click="submit('raise')">{{ actionLabels.raise }}</button>
+            <button type="button" class="btn btn--danger" @click="submit('fold')">{{ actionLabels.fold }}</button>
+            <button type="button" class="btn btn--success" @click="submit('all-in')">{{ actionLabels.allIn }}</button>
+          </fieldset>
 
           <button type="button" class="btn btn--danger" @click="emit('kick')">Выгнать игрока</button>
         </div>
@@ -116,6 +131,8 @@ function submit(type: PlayerActionType) {
       font-size: var(--text-sm);
     }
   }
+  &__profile { display: grid; grid-template-columns: repeat(3, 1fr); gap: .4rem; span { display: grid; gap: .15rem; padding: .55rem; border-radius: var(--radius-sm); color: var(--text-muted); background: #ffffff0a; text-align: center; } strong { color: var(--accent); } }
+  &__icons { display: flex; flex-wrap: wrap; gap: .3rem; span { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: rgba(242,180,81,.12); } }
 }
 
 .dealer-action-fade-enter-active,

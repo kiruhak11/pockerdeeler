@@ -1,5 +1,6 @@
 import { useRoomStore } from "~/stores/room"
 import { usePlayerSessionStore } from "~/stores/playerSession"
+import type { BuyInSettings, PredictionSettings, RosterSettings } from '~/types/room'
 
 export function useDealerRoom(roomCode: MaybeRefOrGetter<string | undefined>) {
   const roomStore = useRoomStore()
@@ -77,9 +78,9 @@ export function useDealerRoom(roomCode: MaybeRefOrGetter<string | undefined>) {
     return callDealerRoute('finish-hand')
   }
 
-  async function distributePot(winners: string[]) {
+  async function distributePot(winners: string[], potWinners?: Record<string, string[]>) {
     return callDealerRoute('distribute-pot', {
-      winners
+      winners, potWinners
     })
   }
 
@@ -112,6 +113,9 @@ export function useDealerRoom(roomCode: MaybeRefOrGetter<string | undefined>) {
     allowLateJoin?: boolean
     requireDealerActionApproval?: boolean
     allowSpectators?: boolean
+    buyIn?: Pick<BuyInSettings, 'enabled' | 'minBuyIn' | 'maxBuyIn' | 'allowTopUp'>
+    predictions?: Omit<PredictionSettings, 'question' | 'marketOpenStreet' | 'hidePredictionsFromPlayers'>
+    roster?: RosterSettings
   }) {
     return callDealerRoute('update-settings', payload)
   }
@@ -131,6 +135,7 @@ export function useDealerRoom(roomCode: MaybeRefOrGetter<string | undefined>) {
   }
 
   return {
+    deleteRoom: () => callDealerRoute('delete'),
     createRoom,
     startGame,
     startHand,

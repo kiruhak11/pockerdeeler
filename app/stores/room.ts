@@ -1,6 +1,7 @@
 import type { OnlineGameSession, OnlineHand, OnlinePlayerAction, Player } from '~/types/game'
 import type { Room } from '~/types/room'
 import type { RoomChatMessage } from '~/types/social'
+import type { ConnectionStatus, UncertainPlayerAction } from '~/types/realtime'
 
 interface RoomStoreState {
   room: Room | null
@@ -11,7 +12,14 @@ interface RoomStoreState {
   pendingActions: OnlinePlayerAction[]
   chatMessages: RoomChatMessage[]
   lastDistribution: import('~/types/room').RoomState['lastDistribution']
-  connectionStatus: 'disconnected' | 'connecting' | 'connected'
+  connectionStatus: ConnectionStatus
+  isStateFresh: boolean
+  actionBusy: boolean
+  uncertainAction: UncertainPlayerAction | null
+  recoveryMessage: string | null
+  retryConnectionRequest: number
+  retryActionRequest: number
+  retryActionDeliveryRequest: number
   error: string | null
   isLoading: boolean
 }
@@ -27,6 +35,13 @@ export const useRoomStore = defineStore('room', {
     chatMessages: [],
     lastDistribution: null,
     connectionStatus: 'disconnected',
+    isStateFresh: false,
+    actionBusy: false,
+    uncertainAction: null,
+    recoveryMessage: null,
+    retryConnectionRequest: 0,
+    retryActionRequest: 0,
+    retryActionDeliveryRequest: 0,
     error: null,
     isLoading: false
   }),
@@ -42,6 +57,8 @@ export const useRoomStore = defineStore('room', {
       chatMessages: RoomChatMessage[]
       lastDistribution: import('~/types/room').RoomState['lastDistribution']
     }) {
+      if (!Number.isSafeInteger(payload.room.revision)) return false
+      if (this.room?.id === payload.room.id && this.room.revision > payload.room.revision) return false
       this.room = payload.room
       this.players = payload.players
       this.currentSession = payload.currentSession
@@ -51,6 +68,7 @@ export const useRoomStore = defineStore('room', {
       this.chatMessages = payload.chatMessages
       this.lastDistribution = payload.lastDistribution
       this.error = null
+      return true
     },
 
     updatePlayer(player: Player) {
@@ -72,6 +90,7 @@ export const useRoomStore = defineStore('room', {
 
     setConnectionStatus(status: RoomStoreState['connectionStatus']) {
       this.connectionStatus = status
+      this.isStateFresh = status === 'connected'
     },
 
     setError(message: string | null) {
@@ -88,6 +107,10 @@ export const useRoomStore = defineStore('room', {
       this.chatMessages = []
       this.lastDistribution = null
       this.connectionStatus = 'disconnected'
+      this.isStateFresh = false
+      this.actionBusy = false
+      this.uncertainAction = null
+      this.recoveryMessage = null
       this.error = null
       this.isLoading = false
     }

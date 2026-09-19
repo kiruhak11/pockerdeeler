@@ -21,7 +21,9 @@ export default defineEventHandler(async (event) => {
     token: parsed.data.token,
     type: parsed.data.type,
     amount: parsed.data.amount,
-    clientRequestId: parsed.data.clientRequestId
+    clientRequestId: parsed.data.clientRequestId,
+    handId: parsed.data.handId,
+    expectedRevision: parsed.data.expectedRevision
   })
 
   if (result.state) {

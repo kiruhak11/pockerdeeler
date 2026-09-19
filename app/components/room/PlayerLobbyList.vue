@@ -15,7 +15,7 @@ const visiblePlayers = computed(() => props.players.filter((player) => player.is
     <ul v-else>
       <li v-for="player in visiblePlayers" :key="player.id">
         <span>{{ player.seat }}.</span>
-        <span>{{ player.name }}</span>
+        <span>{{ player.name }} <small v-if="player.isAway">· Отошёл</small></span>
         <span class="stack">{{ player.stack }}</span>
       </li>
     </ul>

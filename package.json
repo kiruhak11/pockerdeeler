@@ -8,6 +8,9 @@
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "typecheck": "nuxt typecheck",
+    "test": "tsx --test tests/bettingRounds.test.ts tests/predictionCalculations.test.ts tests/ratingCalculations.test.ts tests/minigameEconomy.test.ts tests/crashMath.test.ts tests/legalAcceptance.test.ts tests/premium.test.ts tests/refundEligibility.test.ts tests/auditPackage.test.ts tests/telegramLifecycle.test.ts tests/adminRoomNotifications.test.ts",
+    "test:overhaul": "tsx --test tests/overhaul.integration.test.ts",
+    "test:integration": "tsx --test tests/online.integration.test.ts",
     "postinstall": "nuxt prepare && prisma generate",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
@@ -22,6 +25,7 @@
     "nuxt": "^4.4.4",
     "pinia": "^3.0.4",
     "qrcode": "^1.5.4",
+    "undici": "^7.29.1",
     "vue": "^3.5.33",
     "vue-router": "^5.0.6",
     "zod": "^3.23.8"

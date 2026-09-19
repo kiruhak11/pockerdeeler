@@ -1,8 +1,22 @@
-import type { Player as DbPlayer, Prisma } from '@prisma/client'
+import type { Player as DbPlayer, Hand, GameSession, Prisma, Room } from '@prisma/client'
+import { randomUUID } from 'node:crypto'
+import { recordAdminRoomMutation } from '../utils/adminContext'
 import { createError } from 'h3'
 import { prisma } from '../db/client'
-import { verifySecret } from './authService'
-import { getRoomState } from './roomService'
+import { verifySecret, generateSecret, hashSecret } from './authService'
+import { verifyUserAuthToken } from './userAccountService'
+import { getRoomState, parseRoomSettings } from './roomService'
+import { adjustUserWallet, recordRoomLedger, lockUserWallet } from './walletService'
+import { openTokenRound, lockTokenRound, settleTokenRound, voidTokenRounds } from './tokenPredictionService'
+import {
+  ensurePredictionMarketLockedForReveal,
+  issuePredictionGrantForEliminated,
+  openPredictionMarketForHand,
+  refreshPredictionMarketAfterAction,
+  settlePredictionMarket,
+  updateBehaviorStatsForHand,
+  voidPredictionMarket
+} from './predictionService'
 import {
   applyPlayerAction,
   distributePot,
@@ -11,34 +25,35 @@ import {
   assertChipConservation
 } from '../../app/utils/pokerCalculations'
 import type { Player as CalcPlayer } from '../../app/types/game'
+import { revokeRoomParticipant, closeRoomPeers } from '../ws/roomHub'
+import { startBetting, afterAction, nextActor, revealNextStreet, validateRoundAction, removeFromBetting, type BettingState } from '../../app/utils/bettingRounds'
+import { unlockAchievement, updateTableRatingAndAchievements } from './achievementService'
+import { notifyAdminTelegram } from './adminTelegramNotificationService'
+
+function roundState(hand: Hand, players: CalcPlayer[], bigBlind = 10): BettingState {
+  return hand.bettingState ? hand.bettingState as unknown as BettingState : startBetting(players, bigBlind, 'preflop', hand.currentBet)
+}
+
+async function persistBettingProgress(tx: Prisma.TransactionClient, room: Room, hand: Hand, session: GameSession, players: CalcPlayer[], actorId: string, pot: number, currentBet: number) {
+  await lockTokenRound(tx, hand.id)
+  const state = afterAction(roundState(hand, players), players, actorId, hand.currentBet, currentBet)
+  const currentPlayerId = state.phase === 'betting' ? nextActor(players, state.pending, actorId) : null
+  await tx.hand.update({ where: { id: hand.id }, data: { pot, currentBet, bettingState: state as unknown as Prisma.InputJsonValue } })
+  await tx.gameSession.update({ where: { id: session.id }, data: { pot, currentBet, currentPlayerId, currentTurnStartedAt: currentPlayerId ? new Date() : null, updatedAt: new Date() } })
+  const dbPlayers = await tx.player.findMany({ where: { roomId: room.id }, orderBy: { seat: 'asc' } })
+  await refreshPredictionMarketAfterAction(tx, room, hand, dbPlayers, state)
+}
+
+function validateRoundOrThrow(hand: Hand, players: CalcPlayer[], playerId: string, type: string, amount: number) {
+  const player = players.find(p => p.id === playerId)
+  if (!player) throw createError({ statusCode: 404, statusMessage: 'Игрок не найден' })
+  try { validateRoundAction(roundState(hand, players), player, type, amount, hand.currentBet) }
+  catch (error) { throw createError({ statusCode: 409, statusMessage: (error as Error).message }) }
+}
 
 interface DealerAuth {
   roomCode: string
   dealerSecret: string
-}
-
-const ACCOUNT_DEFAULT_BALANCE = 5000
-
-function parseSettings(settings: Prisma.JsonValue): {
-  startingStack: number
-  smallBlind?: number
-  bigBlind?: number
-  maxPlayers: number
-  quickBetSteps?: number[]
-  allowLateJoin: boolean
-  requireDealerActionApproval: boolean
-  allowSpectators: boolean
-} {
-  return settings as {
-    startingStack: number
-    smallBlind?: number
-    bigBlind?: number
-    maxPlayers: number
-    quickBetSteps?: number[]
-    allowLateJoin: boolean
-    requireDealerActionApproval: boolean
-    allowSpectators: boolean
-  }
 }
 
 function toCalcPlayers(players: DbPlayer[]): CalcPlayer[] {
@@ -53,42 +68,6 @@ function toCalcPlayers(players: DbPlayer[]): CalcPlayer[] {
   }))
 }
 
-async function syncUserBalancesFromPlayers(
-  tx: Prisma.TransactionClient,
-  players: DbPlayer[],
-  options?: { autoResetWhenZero?: boolean }
-) {
-  const withUsers = players.filter((player) => Boolean(player.userId))
-  if (!withUsers.length) {
-    return
-  }
-
-  const now = new Date()
-
-  for (const player of withUsers) {
-    if (!player.userId) {
-      continue
-    }
-
-    let nextBalance = player.stack
-    if (options?.autoResetWhenZero && nextBalance <= 0) {
-      nextBalance = ACCOUNT_DEFAULT_BALANCE
-      player.stack = ACCOUNT_DEFAULT_BALANCE
-      if (player.status === 'out') {
-        player.status = 'active'
-      }
-    }
-
-    await tx.user.update({
-      where: { id: player.userId },
-      data: {
-        balance: nextBalance,
-        updatedAt: now
-      }
-    })
-  }
-}
-
 async function lockRoomForUpdate(tx: Prisma.TransactionClient, roomCode: string) {
   await tx.$queryRaw`SELECT id FROM "rooms" WHERE "code" = ${roomCode} FOR UPDATE`
 
@@ -97,9 +76,12 @@ async function lockRoomForUpdate(tx: Prisma.TransactionClient, roomCode: string)
     throw createError({ statusCode: 404, statusMessage: 'Комната не найдена' })
   }
 
+  await recordAdminRoomMutation(tx, room)
+
   await tx.$queryRaw`SELECT id FROM "game_sessions" WHERE "room_id" = CAST(${room.id} AS uuid) FOR UPDATE`
   await tx.$queryRaw`SELECT id FROM "players" WHERE "room_id" = CAST(${room.id} AS uuid) FOR UPDATE`
   await tx.$queryRaw`SELECT id FROM "hands" WHERE "room_id" = CAST(${room.id} AS uuid) FOR UPDATE`
+  await tx.room.update({ where: { id: room.id }, data: { revision: { increment: 1 }, updatedAt: new Date() } })
 
   return room
 }
@@ -175,11 +157,11 @@ function isConnectedTablePlayer(player: Pick<DbPlayer, 'isConnected' | 'particip
   return player.isConnected && Boolean(player.participantId)
 }
 
-function canParticipateInHand(player: Pick<DbPlayer, 'stack' | 'isConnected' | 'participantId'>): boolean {
-  return player.stack > 0 && isConnectedTablePlayer(player)
+function canParticipateInHand(player: Pick<DbPlayer, 'stack' | 'isConnected' | 'participantId' | 'isAway'>): boolean {
+  return player.stack > 0 && !player.isAway && isConnectedTablePlayer(player)
 }
 
-function normalizePlayerStatusForActiveTable(player: Pick<DbPlayer, 'stack' | 'isConnected' | 'participantId' | 'status'>) {
+function normalizePlayerStatusForActiveTable(player: Pick<DbPlayer, 'stack' | 'isConnected' | 'participantId' | 'status' | 'isAway'>) {
   player.status = canParticipateInHand(player) ? 'active' : 'out'
 }
 
@@ -274,6 +256,8 @@ export async function startGameByDealer({ roomCode, dealerSecret }: DealerAuth) 
     const room = await lockRoomForUpdate(tx, roomCode)
     ensureDealerSecretOrThrow(room.dealerSecretHash, dealerSecret)
 
+    if (room.status !== 'lobby') throw createError({ statusCode: 409, statusMessage: 'Игра уже запущена' })
+
     const players = await tx.player.findMany({
       where: { roomId: room.id },
       orderBy: [{ seat: 'asc' }, { createdAt: 'asc' }]
@@ -345,11 +329,14 @@ export async function restartGameSamePlayersByDealer({ roomCode, dealerSecret }:
   await prisma.$transaction(async (tx) => {
     const room = await lockRoomForUpdate(tx, roomCode)
     ensureDealerSecretOrThrow(room.dealerSecretHash, dealerSecret)
+    if (await tx.hand.count({ where: { roomId: room.id, status: { in: ['active', 'showdown'] } } })) {
+      throw createError({ statusCode: 409, statusMessage: 'Сначала распределите банк текущей раздачи' })
+    }
 
-    const settings = parseSettings(room.settings)
+    const settings = parseRoomSettings(room.settings)
 
     const players = await tx.player.findMany({
-      where: { roomId: room.id },
+      where: { roomId: room.id, participantId: { not: null }, isConnected: true },
       orderBy: [{ seat: 'asc' }, { createdAt: 'asc' }]
     })
 
@@ -357,7 +344,7 @@ export async function restartGameSamePlayersByDealer({ roomCode, dealerSecret }:
       throw createError({ statusCode: 409, statusMessage: 'В комнате нет игроков для перезапуска' })
     }
 
-    const playersWithChips = players.filter((player) => canParticipateInHand(player))
+    const playersWithChips = players.filter((player) => player.stack > 0)
     if (playersWithChips.length !== 1) {
       throw createError({
         statusCode: 409,
@@ -365,28 +352,19 @@ export async function restartGameSamePlayersByDealer({ roomCode, dealerSecret }:
       })
     }
 
-    const userIds = [...new Set(players.map((player) => player.userId).filter(Boolean) as string[])]
-    const users = userIds.length
-      ? await tx.user.findMany({ where: { id: { in: userIds } } })
-      : []
-    const usersById = new Map(users.map((user) => [user.id, user]))
+    if (settings.predictions.enabled) {
+      throw createError({ statusCode: 409, statusMessage: 'В этой комнате выбывшие возвращаются через прогнозы. Начните следующую раздачу или создайте новую комнату.' })
+    }
 
     for (const player of players) {
       player.currentBet = 0
       player.totalCommitted = 0
 
-      if (player.userId) {
-        const user = usersById.get(player.userId)
-        const nextStack = user && user.balance > 0 ? user.balance : ACCOUNT_DEFAULT_BALANCE
-        player.stack = nextStack
-      } else {
-        player.stack = settings.startingStack
-      }
+      player.stack = settings.startingStack
 
       normalizePlayerStatusForActiveTable(player)
     }
 
-    await syncUserBalancesFromPlayers(tx, players, { autoResetWhenZero: true })
     await savePlayers(tx, players)
 
     const session = await tx.gameSession.findFirst({
@@ -464,7 +442,7 @@ export async function startHandByDealer({ roomCode, dealerSecret }: DealerAuth) 
     const room = await lockRoomForUpdate(tx, roomCode)
     ensureDealerSecretOrThrow(room.dealerSecretHash, dealerSecret)
 
-    const settings = parseSettings(room.settings)
+    const settings = parseRoomSettings(room.settings)
 
     const session = await tx.gameSession.findFirst({
       where: { roomId: room.id },
@@ -509,8 +487,8 @@ export async function startHandByDealer({ roomCode, dealerSecret }: DealerAuth) 
     const pot = sumCommitted(toCalcPlayers(players))
     const currentBet = Math.max(...players.map((player) => player.currentBet), 0)
 
-    const bigBlindIndex = activePlayers.findIndex((player) => player.id === blindPositions.bigBlind.id)
-    const firstToAct = activePlayers[nextIndex(bigBlindIndex, activePlayers.length)]
+    const bettingState = startBetting(toCalcPlayers(players), bigBlind, 'preflop', currentBet)
+    const firstToAct = nextActor(toCalcPlayers(players), bettingState.pending, blindPositions.bigBlind.id)
 
     await savePlayers(tx, players)
 
@@ -523,7 +501,8 @@ export async function startHandByDealer({ roomCode, dealerSecret }: DealerAuth) 
         handNumber,
         status: 'active',
         pot,
-        currentBet
+        currentBet,
+        bettingState: bettingState as unknown as Prisma.InputJsonValue
       }
     })
 
@@ -533,13 +512,17 @@ export async function startHandByDealer({ roomCode, dealerSecret }: DealerAuth) 
         handNumber,
         pot,
         currentBet,
-        currentPlayerId: firstToAct?.id ?? null,
+        currentPlayerId: firstToAct,
+        currentTurnStartedAt: firstToAct ? new Date() : null,
         dealerButtonPlayerId: blindPositions.dealer.id,
         smallBlindPlayerId: blindPositions.smallBlind.id,
         bigBlindPlayerId: blindPositions.bigBlind.id,
         updatedAt: new Date()
       }
     })
+
+    await openPredictionMarketForHand(tx, room, hand, players)
+    await openTokenRound(tx, room, hand, players)
 
     await tx.auditLog.create({
       data: {
@@ -559,7 +542,7 @@ export async function startHandByDealer({ roomCode, dealerSecret }: DealerAuth) 
 
     await createSnapshot(tx, room.id, hand.id, 'manual', {
       reason: 'hand_start',
-      players: toCalcPlayers(players),
+      players: toCalcPlayers(players).map(p => ({ ...p, stack: p.stack + p.totalCommitted, currentBet: 0, totalCommitted: 0 })),
       hand: {
         pot,
         currentBet,
@@ -578,6 +561,8 @@ export async function requestPlayerAction(input: {
   type: 'check' | 'bet' | 'call' | 'raise' | 'fold' | 'all-in'
   amount: number
   clientRequestId: string
+  handId?: string
+  expectedRevision?: number
 }) {
   const txResult = await prisma.$transaction(async (tx) => {
     const room = await lockRoomForUpdate(tx, input.roomCode)
@@ -594,6 +579,11 @@ export async function requestPlayerAction(input: {
     const participant = await tx.roomParticipant.findUnique({ where: { id: player.participantId } })
     if (!participant || !verifySecret(input.token, participant.sessionTokenHash)) {
       throw createError({ statusCode: 403, statusMessage: 'Неверный токен игрока' })
+    }
+
+    if (participant.userId) {
+      const user = await tx.user.findUnique({ where: { id: participant.userId }, select: { blockedAt: true, deletedAt: true } })
+      if (!user || user.blockedAt || user.deletedAt) throw createError({ statusCode: 403, statusMessage: 'Аккаунт недоступен' })
     }
 
     if (!participant.isConnected || !player.isConnected) {
@@ -617,6 +607,13 @@ export async function requestPlayerAction(input: {
       }
     }
 
+    if (player.isAway) throw createError({ statusCode: 403, statusMessage: 'Игрок отошёл от стола' })
+    // lockRoomForUpdate returns the committed revision BEFORE its increment.
+    // Authenticate and resolve duplicates first, even for a previous hand.
+    if (input.expectedRevision !== undefined && input.expectedRevision !== room.revision) {
+      throw createError({ statusCode: 409, statusMessage: 'Состояние игры изменилось. Обновите игру перед действием.', data: { code: 'STALE_ACTION' } })
+    }
+
     const session = await tx.gameSession.findFirst({
       where: { roomId: room.id },
       orderBy: { createdAt: 'desc' }
@@ -638,11 +635,15 @@ export async function requestPlayerAction(input: {
       throw createError({ statusCode: 409, statusMessage: 'Активная раздача не найдена' })
     }
 
-    if (session.currentPlayerId && session.currentPlayerId !== player.id) {
+    if (input.handId !== undefined && input.handId !== hand.id) {
+      throw createError({ statusCode: 409, statusMessage: 'Эта команда относится к другой раздаче.', data: { code: 'STALE_ACTION' } })
+    }
+
+    if (session.currentPlayerId !== player.id) {
       throw createError({ statusCode: 409, statusMessage: 'Сейчас ход другого игрока' })
     }
 
-    const settings = parseSettings(room.settings)
+    const settings = parseRoomSettings(room.settings)
 
     const players = await tx.player.findMany({
       where: { roomId: room.id },
@@ -674,6 +675,15 @@ export async function requestPlayerAction(input: {
       throw createError({ statusCode: 409, statusMessage: availability.disabledReason || 'Действие недоступно' })
     }
 
+    validateRoundOrThrow(hand, calcPlayers, player.id, input.type, input.amount)
+    applyPlayerActionOrThrow(calcPlayers, hand.pot, hand.currentBet, input)
+    await lockTokenRound(tx, hand.id)
+    const requestedAt = new Date()
+    const decisionTimeMs = session.currentTurnStartedAt
+      ? Math.max(0, requestedAt.getTime() - session.currentTurnStartedAt.getTime())
+      : null
+    const street = roundState(hand, calcPlayers).street
+
     if (settings.requireDealerActionApproval) {
       const existingPending = await tx.playerAction.findFirst({
         where: {
@@ -686,10 +696,7 @@ export async function requestPlayerAction(input: {
       })
 
       if (existingPending) {
-        return {
-          success: true,
-          action: existingPending
-        }
+        throw createError({ statusCode: 409, statusMessage: 'Предыдущее действие ожидает подтверждения дилера' })
       }
 
       const pending = await tx.playerAction.create({
@@ -700,7 +707,11 @@ export async function requestPlayerAction(input: {
           type: input.type,
           amount: input.amount,
           status: 'pending',
-          clientRequestId: input.clientRequestId
+          clientRequestId: input.clientRequestId,
+          street,
+          turnStartedAt: session.currentTurnStartedAt,
+          requestedAt,
+          decisionTimeMs
         }
       })
 
@@ -729,7 +740,8 @@ export async function requestPlayerAction(input: {
       hand: {
         pot: hand.pot,
         currentBet: hand.currentBet,
-        status: hand.status
+        status: hand.status,
+        bettingState: hand.bettingState
       },
       session: {
         pot: session.pot,
@@ -754,7 +766,11 @@ export async function requestPlayerAction(input: {
         amount: result.action.amount,
         status: 'applied',
         clientRequestId: input.clientRequestId,
-        appliedAt: new Date()
+        appliedAt: new Date(),
+        street,
+        turnStartedAt: session.currentTurnStartedAt,
+        requestedAt,
+        decisionTimeMs
       }
     })
 
@@ -771,25 +787,7 @@ export async function requestPlayerAction(input: {
       })
     }
 
-    const nextPlayer = getNextPlayerBySeat(players, result.players, player.id)
-
-    await tx.hand.update({
-      where: { id: hand.id },
-      data: {
-        pot: result.pot,
-        currentBet: result.currentBet
-      }
-    })
-
-    await tx.gameSession.update({
-      where: { id: session.id },
-      data: {
-        pot: result.pot,
-        currentBet: result.currentBet,
-        currentPlayerId: nextPlayer?.id ?? null,
-        updatedAt: new Date()
-      }
-    })
+    await persistBettingProgress(tx, room, hand, session, result.players, player.id, result.pot, result.currentBet)
 
     await tx.auditLog.create({
       data: {
@@ -815,6 +813,29 @@ export async function requestPlayerAction(input: {
     ...txResult,
     state: await getRoomState(input.roomCode)
   }
+}
+
+export async function getPlayerActionStatus(input: { roomCode: string; playerId: string; token: string; clientRequestId: string }) {
+  const result = await prisma.$transaction(async tx => {
+    // Serialize the read behind any in-flight action without advancing revision.
+    await tx.$queryRaw`SELECT id FROM "rooms" WHERE "code" = ${input.roomCode} FOR UPDATE`
+    const room = await tx.room.findUnique({ where: { code: input.roomCode } })
+    if (!room) throw createError({ statusCode: 404, statusMessage: 'Комната не найдена' })
+    const player = await tx.player.findUnique({ where: { id: input.playerId } })
+    const participant = player?.participantId ? await tx.roomParticipant.findUnique({ where: { id: player.participantId } }) : null
+    if (!player || player.roomId !== room.id || !player.isConnected || !participant?.isConnected || !verifySecret(input.token, participant.sessionTokenHash)) {
+      throw createError({ statusCode: 403, statusMessage: 'Нет доступа к действиям игрока' })
+    }
+    if (participant.userId) {
+      const user = await tx.user.findUnique({ where: { id: participant.userId }, select: { blockedAt: true, deletedAt: true } })
+      if (!user || user.blockedAt || user.deletedAt) throw createError({ statusCode: 403, statusMessage: 'Аккаунт недоступен' })
+    }
+    const action = await tx.playerAction.findUnique({ where: { roomId_playerId_clientRequestId: {
+      roomId: room.id, playerId: player.id, clientRequestId: input.clientRequestId
+    } } })
+    return { action, checkedRevision: room.revision }
+  })
+  return { ...result, state: await getRoomState(input.roomCode) }
 }
 
 export async function dealerForceActionForPlayer(input: {
@@ -859,13 +880,17 @@ export async function dealerForceActionForPlayer(input: {
       orderBy: [{ seat: 'asc' }, { createdAt: 'asc' }]
     })
     const calcPlayers = toCalcPlayers(players)
+    if (!player.participantId || !player.isConnected || player.isAway || session.currentPlayerId !== player.id) throw createError({ statusCode: 409, statusMessage: 'Можно сделать ход только за текущего игрока' })
+    validateRoundOrThrow(hand, calcPlayers, player.id, input.type, input.amount)
+    await tx.playerAction.updateMany({ where: { handId: hand.id, playerId: player.id, status: 'pending' }, data: { status: 'rejected' } })
 
     await createSnapshot(tx, room.id, hand.id, 'before_action', {
       players: calcPlayers,
       hand: {
         pot: hand.pot,
         currentBet: hand.currentBet,
-        status: hand.status
+        status: hand.status,
+        bettingState: hand.bettingState
       },
       session: {
         pot: session.pot,
@@ -890,7 +915,10 @@ export async function dealerForceActionForPlayer(input: {
         amount: result.action.amount,
         status: 'approved',
         clientRequestId: `dealer-force-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        appliedAt: new Date()
+        appliedAt: new Date(),
+        street: roundState(hand, calcPlayers).street,
+        turnStartedAt: session.currentTurnStartedAt,
+        requestedAt: new Date()
       }
     })
 
@@ -907,25 +935,7 @@ export async function dealerForceActionForPlayer(input: {
       })
     }
 
-    const nextPlayer = getNextPlayerBySeat(players, result.players, player.id)
-
-    await tx.hand.update({
-      where: { id: hand.id },
-      data: {
-        pot: result.pot,
-        currentBet: result.currentBet
-      }
-    })
-
-    await tx.gameSession.update({
-      where: { id: session.id },
-      data: {
-        pot: result.pot,
-        currentBet: result.currentBet,
-        currentPlayerId: nextPlayer?.id ?? null,
-        updatedAt: new Date()
-      }
-    })
+    await persistBettingProgress(tx, room, hand, session, result.players, player.id, result.pot, result.currentBet)
 
     await tx.auditLog.create({
       data: {
@@ -966,6 +976,10 @@ export async function dealerResolvePendingAction(input: {
         where: { id: pending.id },
         data: { status: 'rejected' }
       })
+      await tx.gameSession.updateMany({
+        where: { roomId: room.id, currentPlayerId: pending.playerId },
+        data: { currentTurnStartedAt: new Date(), updatedAt: new Date() }
+      })
 
       await tx.auditLog.create({
         data: {
@@ -990,7 +1004,7 @@ export async function dealerResolvePendingAction(input: {
       throw createError({ statusCode: 409, statusMessage: 'Раздача не активна' })
     }
 
-    if (session.currentPlayerId && session.currentPlayerId !== pending.playerId) {
+    if (session.currentPlayerId !== pending.playerId) {
       throw createError({ statusCode: 409, statusMessage: 'Ожидающее действие уже не актуально: сменился ход' })
     }
 
@@ -1000,13 +1014,15 @@ export async function dealerResolvePendingAction(input: {
     })
 
     const calcPlayers = toCalcPlayers(players)
+    validateRoundOrThrow(hand, calcPlayers, pending.playerId, pending.type, pending.amount)
 
     await createSnapshot(tx, room.id, hand.id, 'before_action', {
       players: calcPlayers,
       hand: {
         pot: hand.pot,
         currentBet: hand.currentBet,
-        status: hand.status
+        status: hand.status,
+        bettingState: hand.bettingState
       },
       session: {
         pot: session.pot,
@@ -1045,25 +1061,7 @@ export async function dealerResolvePendingAction(input: {
       }
     })
 
-    const nextPlayer = getNextPlayerBySeat(players, result.players, pending.playerId)
-
-    await tx.hand.update({
-      where: { id: hand.id },
-      data: {
-        pot: result.pot,
-        currentBet: result.currentBet
-      }
-    })
-
-    await tx.gameSession.update({
-      where: { id: session.id },
-      data: {
-        pot: result.pot,
-        currentBet: result.currentBet,
-        currentPlayerId: nextPlayer?.id ?? null,
-        updatedAt: new Date()
-      }
-    })
+    await persistBettingProgress(tx, room, hand, session, result.players, pending.playerId, result.pot, result.currentBet)
 
     await tx.auditLog.create({
       data: {
@@ -1105,6 +1103,10 @@ export async function finishHandByDealer({ roomCode, dealerSecret }: DealerAuth)
       throw createError({ statusCode: 409, statusMessage: 'Активная раздача не найдена' })
     }
 
+    if (hand.bettingState && (hand.bettingState as unknown as BettingState).phase !== 'showdown') {
+      throw createError({ statusCode: 409, statusMessage: 'Сначала завершите круг ставок и откройте общие карты' })
+    }
+
     await tx.hand.update({
       where: { id: hand.id },
       data: {
@@ -1116,6 +1118,7 @@ export async function finishHandByDealer({ roomCode, dealerSecret }: DealerAuth)
       where: { id: session.id },
       data: {
         status: 'hand_finished',
+        currentPlayerId: null,
         updatedAt: new Date()
       }
     })
@@ -1136,10 +1139,40 @@ export async function finishHandByDealer({ roomCode, dealerSecret }: DealerAuth)
   return getRoomState(roomCode)
 }
 
+export async function revealCardsByDealer(input: DealerAuth & { handId: string; street: string }) {
+  await prisma.$transaction(async tx => {
+    const room = await lockRoomForUpdate(tx, input.roomCode)
+    ensureDealerSecretOrThrow(room.dealerSecretHash, input.dealerSecret)
+    const hand = await tx.hand.findFirst({ where: { id: input.handId, roomId: room.id, status: 'active' } })
+    if (!hand) throw createError({ statusCode: 409, statusMessage: 'Раздача уже изменилась' })
+    const session = await tx.gameSession.findUniqueOrThrow({ where: { id: hand.sessionId } })
+    const players = await tx.player.findMany({ where: { roomId: room.id }, orderBy: { seat: 'asc' } })
+    const current = roundState(hand, toCalcPlayers(players))
+    if (current.street !== input.street || current.phase !== 'reveal') throw createError({ statusCode: 409, statusMessage: 'Эти карты уже открыты или ставки ещё не завершены' })
+    await lockTokenRound(tx, hand.id)
+    if (current.street === 'preflop') await ensurePredictionMarketLockedForReveal(tx, room, hand)
+    for (const p of players) {
+      p.currentBet = 0
+      if (p.status === 'checked') p.status = 'active'
+    }
+    const next = revealNextStreet(current, toCalcPlayers(players), parseRoomSettings(room.settings).bigBlind ?? 10)
+    await refreshPredictionMarketAfterAction(tx, room, hand, players, next)
+    const nextPlayerId = next.phase === 'betting' ? nextActor(toCalcPlayers(players), next.pending, session.dealerButtonPlayerId) : null
+    await savePlayers(tx, players)
+    await tx.hand.update({ where: { id: hand.id }, data: { currentBet: 0, bettingState: next as unknown as Prisma.InputJsonValue } })
+    await tx.gameSession.update({ where: { id: session.id }, data: { currentBet: 0, currentPlayerId: nextPlayerId, currentTurnStartedAt: nextPlayerId ? new Date() : null, updatedAt: new Date() } })
+    // Physical cards cannot be hidden again: undo stops at the street boundary.
+    await tx.gameSnapshot.deleteMany({ where: { handId: hand.id, snapshotType: 'before_action' } })
+    await tx.auditLog.create({ data: { roomId: room.id, actorParticipantId: room.dealerId, actorRole: 'dealer', eventType: 'cards.revealed', payload: { handId: hand.id, street: next.street } } })
+  })
+  return getRoomState(input.roomCode)
+}
+
 export async function distributePotByDealer(input: {
   roomCode: string
   dealerSecret: string
   winners: string[]
+  potWinners?: Record<string, string[]>
 }) {
   await prisma.$transaction(async (tx) => {
     const room = await lockRoomForUpdate(tx, input.roomCode)
@@ -1179,7 +1212,8 @@ export async function distributePotByDealer(input: {
       hand: {
         pot: hand.pot,
         currentBet: hand.currentBet,
-        status: hand.status
+        status: hand.status,
+        bettingState: hand.bettingState
       },
       session: {
         pot: session.pot,
@@ -1189,8 +1223,23 @@ export async function distributePotByDealer(input: {
       }
     })
 
-    const distribution = distributePot(calcPlayers, input.winners)
+    let distribution: ReturnType<typeof distributePot>
+    try { distribution = distributePot(calcPlayers, input.winners, input.potWinners) }
+    catch (error) { throw createError({ statusCode: 409, statusMessage: (error as Error).message }) }
     assertChipConservation(distribution.players, totalBefore)
+    const predictors = await tx.tokenPrediction.findMany({ where: { round: { handId: hand.id } }, select: { userId: true } })
+    for (const id of [...new Set([...players.map(p=>p.userId), ...predictors.map(p=>p.userId)].filter((id): id is string=>Boolean(id)))].sort()) await lockUserWallet(tx,id)
+    const predictionPaid = await settleTokenRound(tx, room, hand, players, distribution.players, distribution.result.winners.map(w=>w.playerId))
+    if (distribution.players.reduce((sum,p)=>sum+p.stack,0) + Number(predictionPaid) !== totalBefore) throw new Error('Poker/token chip conservation violated')
+    const rewardRound = await tx.tokenPredictionRound.findUnique({ where: { handId: hand.id } })
+    const rewardDeductions = (rewardRound?.deductions || {}) as Record<string,number>
+    for (const winner of distribution.result.winners) winner.amountWon -= rewardDeductions[winner.playerId] || 0
+    const mainPot = distribution.result.pots[0]
+    const requestedMainWinners = input.potWinners?.['1'] || input.winners
+    const mainPotWinnerIds = mainPot
+      ? [...new Set((mainPot.eligiblePlayerIds.length === 1 ? mainPot.eligiblePlayerIds : requestedMainWinners)
+        .filter(playerId => mainPot.eligiblePlayerIds.includes(playerId)))]
+      : []
 
     const handStartSnapshot = await tx.gameSnapshot.findFirst({
       where: {
@@ -1240,19 +1289,21 @@ export async function distributePotByDealer(input: {
       })
     }
 
-    const syncedPlayersForUsers = players.map((player) => {
-      const calculated = distribution.players.find((item) => item.id === player.id)
-      if (!calculated) {
-        return player
-      }
-
-      return {
-        ...player,
-        stack: calculated.stack,
-        status: calculated.status
-      }
-    })
-    await syncUserBalancesFromPlayers(tx, syncedPlayersForUsers, { autoResetWhenZero: false })
+    for (const source of players.filter(player => !player.participantId && !player.balanceSettled && player.userId)) {
+      const final = distribution.players.find(player => player.id === source.id)
+      if (!final || final.stack <= 0) continue
+      const transferId = randomUUID()
+      await adjustUserWallet(tx, {
+        userId: source.userId!, delta: BigInt(final.stack), entryType: 'TABLE_CASH_OUT',
+        idempotencyKey: `cashout:distribution:${hand.id}:${source.id}`, transferId, roomId: room.id,
+        memberId: source.memberId || undefined, metadata: { playerId: source.id, reason: 'detached_after_distribution' }
+      })
+      await recordRoomLedger(tx, {
+        roomId: room.id, memberId: source.memberId || undefined, transferId, accountType: 'table_stack', entryType: 'TABLE_CASH_OUT_DEBIT',
+        amount: -BigInt(final.stack), balanceAfter: 0n, idempotencyKey: `cashout-table:distribution:${hand.id}:${source.id}`
+      })
+      await tx.player.update({ where: { id: source.id }, data: { stack: 0, balanceSettled: true, status: 'out' } })
+    }
 
     await tx.hand.update({
       where: { id: hand.id },
@@ -1260,7 +1311,9 @@ export async function distributePotByDealer(input: {
         status: 'finished',
         finishedAt: new Date(),
         pot: 0,
-        currentBet: 0
+        currentBet: 0,
+        mainPotWinnerId: mainPotWinnerIds.length === 1 ? mainPotWinnerIds[0] : null,
+        mainPotSplit: mainPotWinnerIds.length !== 1
       }
     })
 
@@ -1271,6 +1324,7 @@ export async function distributePotByDealer(input: {
         pot: 0,
         currentBet: 0,
         currentPlayerId: null,
+        currentTurnStartedAt: null,
         updatedAt: new Date()
       }
     })
@@ -1299,6 +1353,21 @@ export async function distributePotByDealer(input: {
       })
     }
 
+    await settlePredictionMarket(tx, room, hand, mainPotWinnerIds)
+    await updateBehaviorStatsForHand(tx, room.id, hand.id, mainPotWinnerIds, players)
+    await updateTableRatingAndAchievements(tx, hand.id, players, mainPotWinnerIds)
+
+    for (const calculated of distribution.players) {
+      const source = players.find(player => player.id === calculated.id)
+      if (!source?.memberId) continue
+      if (calculated.stack <= 0 && source.participantId) {
+        if (source.userId) await unlockAchievement(tx, source.userId, 'busted_at_table')
+        await issuePredictionGrantForEliminated(tx, room, { ...source, stack: calculated.stack, status: calculated.status })
+      } else if (calculated.stack > 0) {
+        await tx.roomMember.updateMany({ where: { id: source.memberId, state: { in: ['playing', 'spectating'] } }, data: { state: 'playing', updatedAt: new Date() } })
+      }
+    }
+
     await tx.auditLog.create({
       data: {
         roomId: room.id,
@@ -1325,7 +1394,7 @@ export async function undoLastDealerAction({ roomCode, dealerSecret }: DealerAut
     ensureDealerSecretOrThrow(room.dealerSecretHash, dealerSecret)
 
     const snapshot = await tx.gameSnapshot.findFirst({
-      where: { roomId: room.id },
+      where: { roomId: room.id, snapshotType: 'before_action', hand: { status: 'active' } },
       orderBy: { createdAt: 'desc' }
     })
 
@@ -1333,11 +1402,23 @@ export async function undoLastDealerAction({ roomCode, dealerSecret }: DealerAut
       throw createError({ statusCode: 409, statusMessage: 'Нет snapshot для отката' })
     }
 
+    const market = snapshot.handId ? await tx.predictionMarket.findUnique({ where: { handId: snapshot.handId } }) : null
+    if (snapshot.handId) await voidTokenRounds(tx, room.id, snapshot.handId)
+    if (market?.status === 'locked') {
+      throw createError({ statusCode: 409, statusMessage: 'Прогнозы уже зафиксированы; отмените раздачу целиком' })
+    }
+    if (market?.pricingMode === 'fixed_odds' && market.status === 'open' && await tx.predictionBet.count({ where: { marketId: market.id } })) {
+      // Rewinding public information invalidates the forecast contract. Refund
+      // tickets rather than silently reprice them or leave exploitable stale odds.
+      await voidPredictionMarket(tx, market, 'poker_action_undone')
+    }
+
     const data = snapshot.data as {
       players?: CalcPlayer[]
       hand?: {
         pot: number
         currentBet: number
+        bettingState?: Prisma.InputJsonValue
         status?: 'active' | 'showdown' | 'finished'
       }
       session?: {
@@ -1378,6 +1459,7 @@ export async function undoLastDealerAction({ roomCode, dealerSecret }: DealerAut
           pot: data.hand.pot,
           currentBet: data.hand.currentBet,
           status: handStatus,
+          bettingState: data.hand.bettingState ?? undefined,
           finishedAt: handStatus === 'finished' ? new Date() : null
         }
       })
@@ -1394,7 +1476,7 @@ export async function undoLastDealerAction({ roomCode, dealerSecret }: DealerAut
             pot: data.session?.pot ?? data.hand.pot,
             currentBet: data.session?.currentBet ?? data.hand.currentBet,
             status: data.session?.status ?? (snapshot.snapshotType === 'before_distribution' ? 'hand_finished' : 'playing'),
-            currentPlayerId: data.session?.currentPlayerId ?? session.currentPlayerId,
+            currentPlayerId: data.session?.currentPlayerId ?? null,
             updatedAt: new Date()
           }
         })
@@ -1411,8 +1493,8 @@ export async function undoLastDealerAction({ roomCode, dealerSecret }: DealerAut
       })
 
       if (lastAppliedAction) {
-        await tx.playerAction.delete({
-          where: { id: lastAppliedAction.id }
+        await tx.playerAction.update({
+          where: { id: lastAppliedAction.id }, data: { status: 'rejected' }
         })
       }
     }
@@ -1424,6 +1506,13 @@ export async function undoLastDealerAction({ roomCode, dealerSecret }: DealerAut
     }
 
     await tx.gameSnapshot.delete({ where: { id: snapshot.id } })
+    await tx.playerAction.updateMany({ where: { roomId: room.id, status: 'pending' }, data: { status: 'rejected' } })
+
+    if (market?.status === 'open' && snapshot.handId) {
+      const restoredHand = await tx.hand.findUniqueOrThrow({ where: { id: snapshot.handId } })
+      const restoredPlayers = await tx.player.findMany({ where: { roomId: room.id }, orderBy: { seat: 'asc' } })
+      await refreshPredictionMarketAfterAction(tx, room, restoredHand, restoredPlayers, roundState(restoredHand, toCalcPlayers(restoredPlayers)))
+    }
 
     await tx.auditLog.create({
       data: {
@@ -1441,214 +1530,238 @@ export async function undoLastDealerAction({ roomCode, dealerSecret }: DealerAut
   return getRoomState(roomCode)
 }
 
-export async function kickPlayerByDealer(input: {
-  roomCode: string
-  dealerSecret: string
-  playerId: string
-}) {
-  let roomDeleted = false
+async function departParticipant(tx: Prisma.TransactionClient, roomId: string, participantId: string) {
+  const player = await tx.player.findUnique({ where: { participantId } })
+  const participant = await tx.roomParticipant.findUnique({ where: { id: participantId } })
+  const session = await tx.gameSession.findFirst({ where: { roomId }, orderBy: { createdAt: 'desc' } })
+  const hand = session && await tx.hand.findFirst({ where: { sessionId: session.id, status: { in: ['active', 'showdown'] } }, orderBy: { startedAt: 'desc' } })
+  await tx.roomParticipant.update({ where: { id: participantId }, data: { isConnected: false, lastSeenAt: new Date() } })
+  if (!player) {
+    if (participant?.memberId) await tx.roomMember.update({ where: { id: participant.memberId }, data: { state: 'left', updatedAt: new Date() } })
+    return
+  }
+  const betting = hand?.bettingState as unknown as BettingState | null
+  const unresolved = Boolean(hand && (player.status === 'all-in' || hand.status === 'showdown' || betting?.phase === 'showdown') && player.totalCommitted > 0)
+  const status = unresolved ? player.status : hand && player.status !== 'waiting' && player.status !== 'out' ? 'folded' : 'out'
+  let stackAfterDeparture = player.stack
+  if (player.userId && !unresolved && player.stack > 0) {
+    const transferId = randomUUID()
+    await adjustUserWallet(tx, {
+      userId: player.userId, delta: BigInt(player.stack), entryType: 'TABLE_CASH_OUT',
+      idempotencyKey: `cashout:departure:${player.id}`, transferId, roomId, memberId: player.memberId || undefined,
+      metadata: { playerId: player.id, reason: 'participant_left' }
+    })
+    await recordRoomLedger(tx, {
+      roomId, memberId: player.memberId || undefined, transferId, accountType: 'table_stack', entryType: 'TABLE_CASH_OUT_DEBIT',
+      amount: -BigInt(player.stack), balanceAfter: 0n, idempotencyKey: `cashout-table:departure:${player.id}`
+    })
+    stackAfterDeparture = 0
+  }
+  // Keep the financial record for pot calculation/history, but detach the live seat.
+  await tx.player.update({ where: { id: player.id }, data: { participantId: null, isConnected: false, stack: stackAfterDeparture, status, balanceSettled: !unresolved } })
+  if (player.memberId) await tx.roomMember.update({ where: { id: player.memberId }, data: { state: 'left', updatedAt: new Date() } })
+  await tx.playerAction.updateMany({ where: { roomId, playerId: player.id, status: 'pending' }, data: { status: 'rejected' } })
+  await tx.gameSnapshot.deleteMany({ where: { roomId, snapshotType: 'before_action' } })
+  if (session && hand?.status === 'active') {
+    const players = toCalcPlayers(await tx.player.findMany({ where: { roomId }, orderBy: { seat: 'asc' } }))
+    const state = removeFromBetting(roundState(hand, players), players, player.id, hand.currentBet)
+    const predictionRoom = await tx.room.findUniqueOrThrow({ where: { id: roomId } })
+    const dbPlayers = await tx.player.findMany({ where: { roomId }, orderBy: { seat: 'asc' } })
+    await refreshPredictionMarketAfterAction(tx, predictionRoom, hand, dbPlayers, state)
+    const currentPlayerId = state.phase !== 'betting' ? null : session.currentPlayerId && state.pending.includes(session.currentPlayerId)
+      ? session.currentPlayerId : nextActor(players, state.pending, player.id)
+    await tx.hand.update({ where: { id: hand.id }, data: { bettingState: state as unknown as Prisma.InputJsonValue } })
+    await tx.gameSession.update({ where: { id: session.id }, data: { currentPlayerId, currentTurnStartedAt: currentPlayerId ? new Date() : null, updatedAt: new Date() } })
+  }
+}
 
-  await prisma.$transaction(async (tx) => {
+async function deleteEmptyRoom(tx: Prisma.TransactionClient, roomId: string) {
+  if (await tx.player.count({ where: { roomId, participantId: { not: null } } })) return false
+  await cancelAndDeleteRoom(tx, roomId)
+  return true
+}
+
+async function cancelAndDeleteRoom(tx: Prisma.TransactionClient, roomId: string, archive = false) {
+  await voidTokenRounds(tx, roomId)
+  if (archive) {
+    const players = await tx.player.findMany({ where: { roomId } })
+    await tx.gameSnapshot.create({ data: { roomId, snapshotType: 'admin_archive', data: JSON.parse(JSON.stringify({ players })) as Prisma.InputJsonValue } })
+  }
+  const markets = await tx.predictionMarket.findMany({ where: { roomId, status: { in: ['scheduled', 'open', 'locked'] } }, orderBy: { createdAt: 'asc' } })
+  for (const market of markets) await voidPredictionMarket(tx, market, 'room_deleted')
+
+  const players = await tx.player.findMany({ where: { roomId, userId: { not: null } } })
+  const userIds = [...new Set(players.map(p => p.userId!))].sort()
+  for (const userId of userIds) {
+    const records = players.filter(p => p.userId === userId)
+    const refund = records.reduce((sum, player) => sum + player.totalCommitted + (player.balanceSettled ? 0 : player.stack), 0)
+    if (refund <= 0) continue
+    const memberId = records.find(player => player.memberId)?.memberId || undefined
+    const transferId = randomUUID()
+    await adjustUserWallet(tx, {
+      userId, delta: BigInt(refund), entryType: 'ROOM_CANCEL_REFUND', idempotencyKey: `room-cancel-refund:${roomId}:${userId}`,
+      transferId, roomId, memberId, metadata: { playerIds: records.map(player => player.id) }
+    })
+    await recordRoomLedger(tx, {
+      roomId, memberId, transferId, accountType: 'table_stack', entryType: 'ROOM_CANCEL_REFUND_DEBIT',
+      amount: -BigInt(refund), balanceAfter: 0n, idempotencyKey: `room-cancel-table:${roomId}:${userId}`
+    })
+  }
+  if (archive) {
+    await tx.player.updateMany({ where: { roomId }, data: { stack: 0, currentBet: 0, totalCommitted: 0, status: 'out', balanceSettled: true, isConnected: false, participantId: null } })
+    await tx.roomParticipant.updateMany({ where: { roomId }, data: { isConnected: false, sessionTokenHash: hashSecret(generateSecret('player')) } })
+    await tx.roomMember.updateMany({ where: { roomId }, data: { state: 'left' } })
+    await tx.playerAction.updateMany({ where: { roomId, status: 'pending' }, data: { status: 'rejected' } })
+    await tx.hand.updateMany({ where: { roomId, status: { in: ['active', 'showdown'] } }, data: { status: 'cancelled', finishedAt: new Date(), pot: 0, currentBet: 0 } })
+    await tx.gameSession.updateMany({ where: { roomId }, data: { status: 'finished', pot: 0, currentBet: 0, currentPlayerId: null } })
+    await tx.room.update({ where: { id: roomId }, data: { status: 'finished', dealerSecretHash: hashSecret(generateSecret('dealer')) } })
+  } else await tx.room.delete({ where: { id: roomId } })
+}
+
+export async function archiveRoomByAdmin({ roomCode, dealerSecret }: DealerAuth) {
+  await prisma.$transaction(async tx => {
+    const room = await lockRoomForUpdate(tx, roomCode)
+    ensureDealerSecretOrThrow(room.dealerSecretHash, dealerSecret)
+    if (room.status === 'finished') throw createError({ statusCode: 409, message: 'Комната уже завершена' })
+    await cancelAndDeleteRoom(tx, room.id, true)
+  })
+  closeRoomPeers(roomCode)
+  const archived = await prisma.room.findUnique({ where: { code: roomCode }, select: { name: true, code: true, dealerId: true } })
+  const dealer = archived?.dealerId ? await prisma.roomParticipant.findUnique({ where: { id: archived.dealerId }, select: { name: true } }) : null
+  if (archived) void notifyAdminTelegram('games', `Закрыта игровая комната: ${dealer?.name || 'Dealer'}, «${archived.name}» (${archived.code}), ${new Date().toLocaleString('ru-RU')}.`)
+}
+
+export async function pauseRoomByAdmin(input: DealerAuth & { paused: boolean }) {
+  await prisma.$transaction(async tx => {
     const room = await lockRoomForUpdate(tx, input.roomCode)
     ensureDealerSecretOrThrow(room.dealerSecretHash, input.dealerSecret)
-
-    const player = await tx.player.findUnique({ where: { id: input.playerId } })
-    if (!player || player.roomId !== room.id) {
-      throw createError({ statusCode: 404, statusMessage: 'Игрок не найден' })
-    }
-
-    const session = await tx.gameSession.findFirst({
-      where: { roomId: room.id },
-      orderBy: { createdAt: 'desc' }
-    })
-
-    const hand = session
-      ? await tx.hand.findFirst({
-          where: {
-            sessionId: session.id,
-            status: { in: ['active', 'showdown'] }
-          },
-          orderBy: { startedAt: 'desc' }
-        })
-      : null
-
-    if (player.participantId) {
-      await tx.roomParticipant.updateMany({
-        where: { id: player.participantId, roomId: room.id },
-        data: {
-          isConnected: false,
-          lastSeenAt: new Date()
-        }
-      })
-    }
-
-    const players = await tx.player.findMany({
-      where: { roomId: room.id },
-      orderBy: [{ seat: 'asc' }, { createdAt: 'asc' }]
-    })
-    const calcPlayers = toCalcPlayers(players)
-    const target = calcPlayers.find((item) => item.id === player.id)
-    const shouldFoldForCurrentHand = hand?.status === 'active'
-    if (target && target.status !== 'out') {
-      if (shouldFoldForCurrentHand && target.status !== 'all-in') {
-        target.status = 'folded'
-      } else if (!shouldFoldForCurrentHand) {
-        target.status = 'out'
-      }
-    }
-
-    let nextPlayerId: string | null = session?.currentPlayerId ?? null
-    if (session && session.currentPlayerId === player.id) {
-      if (hand?.status === 'active') {
-        const nextPlayer = getNextPlayerBySeat(players, calcPlayers, player.id)
-        nextPlayerId = nextPlayer?.id ?? null
-      } else {
-        nextPlayerId = null
-      }
-    }
-
-    await tx.player.update({
-      where: { id: player.id },
-      data: {
-        isConnected: false,
-        participantId: null,
-        status: target?.status ?? player.status,
-        updatedAt: new Date()
-      }
-    })
-
-    if (session && nextPlayerId !== session.currentPlayerId) {
-      await tx.gameSession.update({
-        where: { id: session.id },
-        data: {
-          currentPlayerId: nextPlayerId,
-          updatedAt: new Date()
-        }
-      })
-    }
-
-    await tx.auditLog.create({
-      data: {
-        roomId: room.id,
-        actorParticipantId: room.dealerId,
-        actorRole: 'dealer',
-        eventType: 'player.kicked',
-        payload: {
-          playerId: player.id
-        }
-      }
-    })
-
-    const connectedPlayersCount = await tx.roomParticipant.count({
-      where: {
-        roomId: room.id,
-        role: 'player',
-        isConnected: true
-      }
-    })
-
-    if (connectedPlayersCount === 0) {
-      await tx.room.delete({
-        where: { id: room.id }
-      })
-      roomDeleted = true
-    }
+    if (!['active', 'paused'].includes(room.status)) throw createError({ statusCode: 409, message: 'Игра ещё не началась или завершена' })
+    await tx.room.update({ where: { id: room.id }, data: { status: input.paused ? 'paused' : 'active' } })
   })
-
-  if (roomDeleted) {
-    return null
-  }
-
   return getRoomState(input.roomCode)
 }
 
-export async function leaveRoom(input: {
-  roomCode: string
-  participantId?: string
-  playerId?: string
-  token?: string
-  dealerSecret?: string
-}) {
-  let roomDeleted = false
+export async function deleteRoomByDealer({ roomCode, dealerSecret }: DealerAuth) {
+  const closed = await prisma.$transaction(async tx => {
+    const room = await lockRoomForUpdate(tx, roomCode)
+    ensureDealerSecretOrThrow(room.dealerSecretHash, dealerSecret)
+    const dealer = room.dealerId ? await tx.roomParticipant.findUnique({ where: { id: room.dealerId }, select: { name: true } }) : null
+    await cancelAndDeleteRoom(tx, room.id)
+    return { name: room.name, code: room.code, dealer: dealer?.name || 'Dealer' }
+  })
+  closeRoomPeers(roomCode)
+  void notifyAdminTelegram('games', `Закрыта игровая комната: ${closed.dealer}, «${closed.name}» (${closed.code}), ${new Date().toLocaleString('ru-RU')}.`)
+}
 
-  await prisma.$transaction(async (tx) => {
+async function accountIdOrThrow(token: string): Promise<string> {
+  const auth = await verifyUserAuthToken(token)
+  if (!auth) throw createError({ statusCode: 401, statusMessage: 'Войдите в аккаунт повторно' })
+  return auth.userId
+}
+
+export async function getAccountRooms(token: string) {
+  const userId = await accountIdOrThrow(token)
+  const seats = await prisma.player.findMany({
+    where: { userId, participantId: { not: null }, isConnected: true },
+    include: { room: true }, orderBy: { createdAt: 'desc' }
+  })
+  return seats.map(p => ({ roomCode: p.room.code, name: p.room.name, status: p.room.status,
+    playerId: p.id, stack: p.stack, isAway: p.isAway }))
+}
+
+export async function setPlayerAway(roomCode: string, token: string) {
+  const userId = await accountIdOrThrow(token)
+  let participantId: string | null = null
+  await prisma.$transaction(async tx => {
+    const room = await lockRoomForUpdate(tx, roomCode)
+    const player = await tx.player.findFirst({ where: { roomId: room.id, userId, participantId: { not: null }, isConnected: true } })
+    if (!player) throw createError({ statusCode: 403, statusMessage: 'У аккаунта нет места в этой комнате' })
+    participantId = player.participantId
+    if (player.isAway) return
+    const session = await tx.gameSession.findFirst({ where: { roomId: room.id }, orderBy: { createdAt: 'desc' } })
+    const hand = session && await tx.hand.findFirst({ where: { sessionId: session.id, status: { in: ['active', 'showdown'] } }, orderBy: { startedAt: 'desc' } })
+    const playersBefore = await tx.player.findMany({ where: { roomId: room.id }, orderBy: { seat: 'asc' } })
+    const round = hand ? roundState(hand, toCalcPlayers(playersBefore)) : null
+    const canFold = hand?.status === 'active' && round?.phase !== 'showdown' && ['active', 'checked'].includes(player.status)
+    await tx.player.update({ where: { id: player.id }, data: { isAway: true, ...(canFold ? { status: 'folded' } : {}) } })
+    await tx.playerAction.updateMany({ where: { playerId: player.id, status: 'pending' }, data: { status: 'rejected' } })
+    // Presence changes are an undo boundary: restoring an old action must not revive an absent hand.
+    await tx.gameSnapshot.deleteMany({ where: { roomId: room.id, snapshotType: 'before_action' } })
+    if (hand?.status === 'active' && session && round && round.phase !== 'showdown') {
+      const players = toCalcPlayers(await tx.player.findMany({ where: { roomId: room.id }, orderBy: { seat: 'asc' } }))
+      const betting = removeFromBetting(round, players, player.id, hand.currentBet)
+      const dbPlayers = await tx.player.findMany({ where: { roomId: room.id }, orderBy: { seat: 'asc' } })
+      await refreshPredictionMarketAfterAction(tx, room, hand, dbPlayers, betting)
+      const currentPlayerId = betting.phase !== 'betting' ? null : session.currentPlayerId && betting.pending.includes(session.currentPlayerId)
+        ? session.currentPlayerId : nextActor(players, betting.pending, player.id)
+      await tx.hand.update({ where: { id: hand.id }, data: { bettingState: betting as unknown as Prisma.InputJsonValue } })
+      await tx.gameSession.update({ where: { id: session.id }, data: { currentPlayerId, currentTurnStartedAt: currentPlayerId ? new Date() : null } })
+    }
+    await tx.auditLog.create({ data: { roomId: room.id, actorParticipantId: player.participantId, actorRole: 'player', eventType: 'player.away', payload: { playerId: player.id, folded: canFold } } })
+  })
+  if (participantId) revokeRoomParticipant(roomCode, participantId, 4005)
+  return getRoomState(roomCode)
+}
+
+export async function resumeAccountRoom(roomCode: string, token: string) {
+  const userId = await accountIdOrThrow(token)
+  const playerSessionToken = generateSecret('player')
+  const player = await prisma.$transaction(async tx => {
+    const room = await lockRoomForUpdate(tx, roomCode)
+    const seat = await tx.player.findFirst({ where: { roomId: room.id, userId, participantId: { not: null }, isConnected: true } })
+    if (!seat?.participantId) throw createError({ statusCode: 403, statusMessage: 'Место не сохранено. Войдите в комнату заново.' })
+    // This restores membership, not a new buy-in. No password/late-join bypass for new players.
+    await tx.roomParticipant.update({ where: { id: seat.participantId }, data: { sessionTokenHash: hashSecret(playerSessionToken), lastSeenAt: new Date() } })
+    await tx.player.update({ where: { id: seat.id }, data: { isAway: false } })
+    await tx.auditLog.create({ data: { roomId: room.id, actorParticipantId: seat.participantId, actorRole: 'player', eventType: 'player.returned', payload: { playerId: seat.id } } })
+    return seat
+  })
+  revokeRoomParticipant(roomCode, player.participantId!, 4005)
+  return { roomCode, playerId: player.id, participantId: player.participantId!, playerSessionToken, playerUrl: `/room/${roomCode}/player`, state: await getRoomState(roomCode) }
+}
+
+export async function kickPlayerByDealer(input: { roomCode: string; dealerSecret: string; playerId: string }) {
+  let revoked: string | null = null
+  const deleted = await prisma.$transaction(async tx => {
     const room = await lockRoomForUpdate(tx, input.roomCode)
+    ensureDealerSecretOrThrow(room.dealerSecretHash, input.dealerSecret)
+    const player = await tx.player.findFirst({ where: { id: input.playerId, roomId: room.id } })
+    if (!player?.participantId) throw createError({ statusCode: 404, statusMessage: 'Игрок уже вышел из комнаты' })
+    revoked = player.participantId
+    await departParticipant(tx, room.id, player.participantId)
+    await tx.auditLog.create({ data: { roomId: room.id, actorParticipantId: room.dealerId, actorRole: 'dealer', eventType: 'player.kicked', payload: { playerId: player.id } } })
+    return deleteEmptyRoom(tx, room.id)
+  })
+  if (revoked) revokeRoomParticipant(input.roomCode, revoked)
+  if (deleted) { closeRoomPeers(input.roomCode); return null }
+  return getRoomState(input.roomCode)
+}
 
+export async function leaveRoom(input: { roomCode: string; participantId?: string; playerId?: string; token?: string; dealerSecret?: string; authToken?: string }) {
+  let revoked: string | null = null
+  const deleted = await prisma.$transaction(async tx => {
+    const room = await lockRoomForUpdate(tx, input.roomCode)
     if (input.dealerSecret) {
       ensureDealerSecretOrThrow(room.dealerSecretHash, input.dealerSecret)
-      if (room.dealerId) {
-        await tx.roomParticipant.updateMany({
-          where: { id: room.dealerId },
-          data: {
-            isConnected: false,
-            lastSeenAt: new Date()
-          }
-        })
-      }
+      if (room.dealerId) await tx.roomParticipant.update({ where: { id: room.dealerId }, data: { isConnected: false, lastSeenAt: new Date() } })
+    } else if (input.authToken) {
+      const userId = await accountIdOrThrow(input.authToken)
+      const player = await tx.player.findFirst({ where: { roomId: room.id, userId, participantId: { not: null }, isConnected: true } })
+      if (!player?.participantId) throw createError({ statusCode: 403, statusMessage: 'Место не сохранено' })
+      revoked = player.participantId
+      await departParticipant(tx, room.id, player.participantId)
+      await tx.auditLog.create({ data: { roomId: room.id, actorParticipantId: player.participantId, actorRole: 'player', eventType: 'participant.left', payload: { playerId: player.id } } })
     } else {
-      if (!input.participantId || !input.token) {
-        throw createError({ statusCode: 400, statusMessage: 'Недостаточно данных для выхода' })
-      }
-
+      if (!input.participantId || !input.token) throw createError({ statusCode: 400, statusMessage: 'Недостаточно данных для выхода' })
       const participant = await tx.roomParticipant.findUnique({ where: { id: input.participantId } })
-      if (!participant || participant.roomId !== room.id || !verifySecret(input.token, participant.sessionTokenHash)) {
-        throw createError({ statusCode: 403, statusMessage: 'Неверные данные сессии' })
-      }
-
-      await tx.roomParticipant.update({
-        where: { id: participant.id },
-        data: {
-          isConnected: false,
-          lastSeenAt: new Date()
-        }
-      })
-
-      if (input.playerId) {
-        await tx.player.updateMany({
-          where: {
-            id: input.playerId,
-            participantId: participant.id
-          },
-          data: {
-            isConnected: false,
-            updatedAt: new Date(),
-            participantId: null
-          }
-        })
-      }
-
-      await tx.auditLog.create({
-        data: {
-          roomId: room.id,
-          actorParticipantId: participant.id,
-          actorRole: participant.role as 'player' | 'spectator' | 'dealer',
-          eventType: 'participant.left',
-          payload: {
-            participantId: participant.id
-          }
-        }
-      })
+      if (!participant || participant.roomId !== room.id || !participant.isConnected || !verifySecret(input.token, participant.sessionTokenHash)) throw createError({ statusCode: 403, statusMessage: 'Сессия уже завершена' })
+      revoked = participant.id
+      await departParticipant(tx, room.id, participant.id)
+      await tx.auditLog.create({ data: { roomId: room.id, actorParticipantId: participant.id, actorRole: participant.role, eventType: 'participant.left', payload: { participantId: participant.id } } })
     }
-
-    const connectedPlayersCount = await tx.roomParticipant.count({
-      where: {
-        roomId: room.id,
-        role: 'player',
-        isConnected: true
-      }
-    })
-
-    if (connectedPlayersCount === 0) {
-      await tx.room.delete({
-        where: { id: room.id }
-      })
-      roomDeleted = true
-    }
+    return deleteEmptyRoom(tx, room.id)
   })
-
-  if (roomDeleted) {
-    return null
-  }
-
+  if (revoked) revokeRoomParticipant(input.roomCode, revoked)
+  if (deleted) { closeRoomPeers(input.roomCode); return null }
   return getRoomState(input.roomCode)
 }

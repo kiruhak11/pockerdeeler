@@ -1,6 +1,7 @@
 import { readBody } from 'h3'
 import { updateUsernameSchema } from '../../utils/validation'
 import { updateUsername } from '../../services/userAccountService'
+import { resolveAccountToken } from '../../utils/accountCookie'
 
 export default defineEventHandler(async (event) => {
   const body = await readBody(event)
@@ -10,6 +11,6 @@ export default defineEventHandler(async (event) => {
   }
 
   return {
-    user: await updateUsername(parsed.data)
+    user: await updateUsername({ ...parsed.data, token: resolveAccountToken(event, parsed.data.token) })
   }
 })

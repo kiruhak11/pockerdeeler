@@ -1,0 +1,1 @@
+ALTER TABLE "players" ADD COLUMN "is_away" BOOLEAN NOT NULL DEFAULT false;

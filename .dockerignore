@@ -10,3 +10,7 @@ docker-compose*.yml
 .env.*
 *.md
 coverage
+._*
+**/._*
+.DS_Store
+**/.DS_Store

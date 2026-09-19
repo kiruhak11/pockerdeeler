@@ -61,7 +61,21 @@ services:
       JWT_SECRET: ${JWT_SECRET:-change-me-jwt-secret}
       ROOM_SECRET_PEPPER: ${ROOM_SECRET_PEPPER:-change-me-room-pepper}
       NUXT_PUBLIC_APP_URL: ${NUXT_PUBLIC_APP_URL:-http://localhost:3000}
+      YOOKASSA_SHOP_ID: ${YOOKASSA_SHOP_ID:-1468251}
+      YOOKASSA_SECRET_KEY: ${YOOKASSA_SECRET_KEY:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      SMS_RU_API_ID: ${SMS_RU_API_ID:?SMS_RU_API_ID must be set in the production environment}
+      OWNER_PHONE: ${OWNER_PHONE:?OWNER_PHONE must be set in the production environment}
+      ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD:?ADMIN_BOOTSTRAP_PASSWORD must be set in the production environment}
+      SMS_RU_MODE: production
+      SELF_PROMO_REWARD_ENABLED: ${SELF_PROMO_REWARD_ENABLED:-true}
+      SELF_PROMO_REWARD_AMOUNT: ${SELF_PROMO_REWARD_AMOUNT:-5000}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-Pockerkiruhakbot}
+      TELEGRAM_PROXY_URL: ${TELEGRAM_PROXY_URL:-}
+      TELEGRAM_CHANNEL_CHAT_ID: ${TELEGRAM_CHANNEL_CHAT_ID:-}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      NUXT_PUBLIC_TELEGRAM_BOT_USERNAME: ${NUXT_PUBLIC_TELEGRAM_BOT_USERNAME:-Pockerkiruhakbot}
     ports:
       - '${APP_PORT:-3000}:3000'
     command: sh -c "./scripts/wait-for-db.sh && ./scripts/migrate.sh && node .output/server/index.mjs"

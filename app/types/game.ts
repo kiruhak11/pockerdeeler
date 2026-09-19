@@ -10,12 +10,20 @@ export interface Player {
   roomId?: string
   participantId?: string
   userId?: string
+  memberId?: string
   name: string
+  achievementIcon?: string | null
+  achievementIcons?: string[]
+  achievementCount?: number
+  tableRating?: number
+  predictionRating?: number
+  premiumType?: 'FREE' | 'PREMIUM'
   stack: number
   currentBet: number
   totalCommitted: number
   status: PlayerStatus
   isConnected?: boolean
+  isAway?: boolean
   createdAt?: string
   updatedAt?: string
   seat?: number
@@ -119,6 +127,7 @@ export interface OnlineGameSession {
   dealerButtonPlayerId?: string
   smallBlindPlayerId?: string
   bigBlindPlayerId?: string
+  currentTurnStartedAt?: string
   createdAt: string
   updatedAt: string
 }
@@ -131,6 +140,9 @@ export interface OnlineHand {
   status: OnlineHandStatus
   pot: number
   currentBet: number
+  bettingState: import('../utils/bettingRounds').BettingState | null
+  mainPotWinnerId?: string
+  mainPotSplit: boolean
   startedAt: string
   finishedAt?: string
 }
@@ -146,6 +158,10 @@ export interface OnlinePlayerAction {
   clientRequestId: string
   createdAt: string
   appliedAt?: string
+  street?: import('../utils/bettingRounds').Street
+  turnStartedAt?: string
+  requestedAt?: string
+  decisionTimeMs?: number
 }
 
 export interface AvailableActions {

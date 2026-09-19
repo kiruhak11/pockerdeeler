@@ -8,6 +8,7 @@ import DealerPlayerCard from './DealerPlayerCard.vue'
 import DealerActionLog from './DealerActionLog.vue'
 
 const props = defineProps<{
+  busy?: boolean
   players: Player[]
   actions: OnlinePlayerAction[]
   pendingActions: OnlinePlayerAction[]
@@ -23,7 +24,7 @@ const emit = defineEmits<{
   'undo': []
   approve: [actionId: string]
   reject: [actionId: string]
-  distribute: [winnerIds: string[]]
+  distribute: [winnerIds: string[], potWinners?: Record<string, string[]>]
   selectPlayer: [playerId: string]
 }>()
 
@@ -70,13 +71,23 @@ const canRestartGame = computed(() => connectedPlayers.value.filter((player) => 
 
 <template>
   <section class="dealer-dashboard">
+    <section class="panel dealer-dashboard__turn" :class="{ 'dealer-dashboard__turn--active': currentPlayer }">
+      <span class="eyebrow">Очередь хода</span>
+      <strong>{{ currentPlayer?.name || 'Раздача завершена' }}</strong>
+      <span v-if="currentPlayer">Игрок должен принять решение сейчас</span>
+      <span v-else>Запустите новую раздачу, чтобы начать круг ставок</span>
+    </section>
+
     <section class="panel dealer-dashboard__meta">
-      <p><strong>Сейчас ходит:</strong> {{ currentPlayer?.name || '—' }}</p>
       <p><strong>Дилер:</strong> {{ dealerButtonPlayer?.name || '—' }}</p>
-      <p><strong>SB/BB:</strong> {{ smallBlindPlayer?.name || '—' }} / {{ bigBlindPlayer?.name || '—' }}</p>
+      <p><strong>Малый блайнд:</strong> {{ smallBlindPlayer?.name || '—' }}</p>
+      <p><strong>Большой блайнд:</strong> {{ bigBlindPlayer?.name || '—' }}</p>
     </section>
 
     <DealerControls
+      :busy="busy"
+      :session="currentSession"
+      :hand="currentHand"
       :can-restart-game="canRestartGame"
       @start-game="emit('start-game')"
       @restart-game="emit('restart-game')"
@@ -89,7 +100,7 @@ const canRestartGame = computed(() => connectedPlayers.value.filter((player) => 
 
     <PotDistributionPreview :pot="currentHand?.pot || 0" :players="players" />
 
-    <DealerWinnerSelector :players="players" @distribute="emit('distribute', $event)" />
+    <DealerWinnerSelector v-if="currentHand?.status === 'showdown'" :key="currentHand.id" :players="players" :busy="busy" @distribute="(ids, pots) => emit('distribute', ids, pots)" />
 
     <section class="dealer-dashboard__players">
       <DealerPlayerCard
@@ -124,6 +135,27 @@ const canRestartGame = computed(() => connectedPlayers.value.filter((player) => 
 
     strong {
       color: var(--text);
+    }
+  }
+
+  &__turn {
+    display: grid;
+    gap: 0.25rem;
+    border-color: rgba(255, 255, 255, 0.14);
+
+    strong {
+      font-size: clamp(1.3rem, 3vw, 1.9rem);
+    }
+
+    span:last-child {
+      color: var(--text-muted);
+      font-size: var(--text-sm);
+    }
+
+    &--active {
+      border-color: rgba(245, 183, 77, 0.8);
+      background: linear-gradient(135deg, rgba(245, 183, 77, 0.2), rgba(17, 39, 31, 0.92));
+      box-shadow: 0 0 0 1px rgba(245, 183, 77, 0.18), 0 12px 28px rgba(0, 0, 0, 0.14);
     }
   }
 

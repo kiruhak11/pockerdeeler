@@ -13,6 +13,10 @@ const emit = defineEmits<{
 }>()
 
 const amount = ref<number>(10)
+const { preferences } = useGamePreferences()
+const actionLabels = computed(() => preferences.actionLanguage === 'ru'
+  ? { check: 'Чек', call: 'Поддержать', bet: 'Поставить', raise: 'Повысить', fold: 'Сбросить', allIn: 'Ва-банк' }
+  : { check: 'Check', call: 'Call', bet: 'Bet', raise: 'Raise', fold: 'Fold', allIn: 'All-in' })
 
 const effectiveQuickSteps = computed(() => {
   const source = props.quickRaiseSteps?.length ? props.quickRaiseSteps : [10, 25, 50, 100]
@@ -101,12 +105,12 @@ function setToCallAmount() {
     </div>
 
     <div class="action-panel__buttons">
-      <button type="button" class="btn btn--ghost" :disabled="disabled || !canCheck" @click="emitAction('check')">Чек</button>
-      <button type="button" class="btn" :disabled="disabled || !canBet" @click="emitAction('bet', true)">Ставка</button>
-      <button type="button" class="btn" :disabled="disabled || !canCall" @click="emitAction('call')">Колл</button>
-      <button type="button" class="btn" :disabled="disabled || !canRaise" @click="emitAction('raise', true)">Рейз</button>
-      <button type="button" class="btn btn--danger" :disabled="disabled || isInactive" @click="emitAction('fold')">Пас</button>
-      <button type="button" class="btn btn--success" :disabled="disabled || !canAllIn" @click="emitAction('all-in')">Ва-банк</button>
+      <button type="button" class="btn btn--ghost" :disabled="disabled || !canCheck" @click="emitAction('check')">{{ actionLabels.check }}</button>
+      <button type="button" class="btn" :disabled="disabled || !canBet" @click="emitAction('bet', true)">{{ actionLabels.bet }}</button>
+      <button type="button" class="btn" :disabled="disabled || !canCall" @click="emitAction('call')">{{ actionLabels.call }}</button>
+      <button type="button" class="btn" :disabled="disabled || !canRaise" @click="emitAction('raise', true)">{{ actionLabels.raise }}</button>
+      <button type="button" class="btn btn--danger" :disabled="disabled || isInactive" @click="emitAction('fold')">{{ actionLabels.fold }}</button>
+      <button type="button" class="btn btn--success" :disabled="disabled || !canAllIn" @click="emitAction('all-in')">{{ actionLabels.allIn }}</button>
     </div>
   </div>
 </template>

@@ -14,46 +14,31 @@ export const useAccountStore = defineStore('account', {
   }),
   actions: {
     saveSession(payload: AccountState) {
-      this.token = payload.token
+      this.token = payload.user ? 'cookie-session' : null
       this.user = payload.user
-
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
-      }
+      this.loadSession()
     },
     loadSession() {
       if (typeof localStorage === 'undefined') {
         return
       }
 
-      const raw = localStorage.getItem(STORAGE_KEY)
-      if (!raw) {
-        return
-      }
-
       try {
-        const parsed = JSON.parse(raw) as AccountState
-        this.token = parsed.token
-        this.user = parsed.user
+        // Authentication is restored from the HttpOnly cookie, never browser storage.
+        localStorage.removeItem(STORAGE_KEY)
       } catch {
-        // ignore broken session
+        // Storage may be disabled in private browsing.
       }
     },
     setUser(user: AccountUser | null) {
       this.user = user
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({
-          token: this.token,
-          user: this.user
-        }))
-      }
+      this.token = user ? 'cookie-session' : null
+      this.loadSession()
     },
     clearSession() {
       this.token = null
       this.user = null
-      if (typeof localStorage !== 'undefined') {
-        localStorage.removeItem(STORAGE_KEY)
-      }
+      this.loadSession()
     }
   }
 })

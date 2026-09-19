@@ -1,8 +1,10 @@
 import { getRequestHost, getRequestProtocol, readBody } from 'h3'
 import { createRoom } from '../../services/roomService'
 import { createRoomSchema } from '../../utils/validation'
+import { assertRateLimit } from '../../utils/rateLimit'
 
 export default defineEventHandler(async (event) => {
+  assertRateLimit(event, 'room-create', { limit: 30 })
   const body = await readBody(event)
   const parsed = createRoomSchema.safeParse(body)
 

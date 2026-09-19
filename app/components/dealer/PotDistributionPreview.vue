@@ -9,7 +9,8 @@ defineProps<{
 
 <template>
   <section class="panel">
-    <h3>Банк: {{ pot }}</h3>
-    <p>Игроков в раздаче: {{ players.filter((p) => p.status !== 'folded' && p.status !== 'out').length }}</p>
+    <h3>Итоговый банк: {{ pot }}</h3>
+    <p>В раздаче участвуют: {{ players.filter((p) => p.status !== 'folded' && p.status !== 'out').length }}</p>
+    <p class="page-subtitle">После выбора победителей система автоматически распределит доступные им фишки.</p>
   </section>
 </template>

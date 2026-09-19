@@ -42,4 +42,14 @@ export interface RoomChatMessage {
   senderName: string
   text: string
   createdAt: string
+  clientRequestId?: string
+  senderRole?: 'dealer' | 'player' | 'spectator'
+  deletedAt?: string | null
+}
+
+export interface RoomChatPage {
+  messages: RoomChatMessage[]
+  nextCursor: string | null
+  revision: number
+  deletedIds?: string[]
 }

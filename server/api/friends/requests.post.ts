@@ -1,6 +1,7 @@
 import { readBody } from 'h3'
 import { authTokenSchema } from '../../utils/validation'
 import { listFriendRequests } from '../../services/socialService'
+import { resolveAccountToken } from '../../utils/accountCookie'
 
 export default defineEventHandler(async (event) => {
   const body = await readBody(event)
@@ -9,5 +10,5 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: 'token обязателен' })
   }
 
-  return listFriendRequests(parsed.data.token)
+  return listFriendRequests(resolveAccountToken(event, parsed.data.token))
 })

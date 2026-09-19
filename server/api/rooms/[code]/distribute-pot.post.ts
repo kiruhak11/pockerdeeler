@@ -18,7 +18,8 @@ export default defineEventHandler(async (event) => {
   const state = await distributePotByDealer({
     roomCode: code,
     dealerSecret: parsed.data.dealerSecret,
-    winners: parsed.data.winners
+    winners: parsed.data.winners,
+    potWinners: parsed.data.potWinners
   })
   broadcastRoomState(code, state)
 

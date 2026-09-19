@@ -9,56 +9,469 @@ datasource db {
 }
 
 model Room {
-  id               String            @id @default(uuid()) @db.Uuid
-  code             String            @unique @db.VarChar(8)
-  name             String            @db.Text
-  status           String            @db.VarChar(32)
-  dealerId         String?           @map("dealer_id") @db.Uuid
-  dealerSecretHash String            @map("dealer_secret_hash") @db.Text
-  settings         Json              @db.JsonB
-  createdAt        DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime          @default(now()) @map("updated_at") @db.Timestamptz(6)
+  id               String   @id @default(uuid()) @db.Uuid
+  code             String   @unique @db.VarChar(8)
+  name             String   @db.Text
+  status           String   @db.VarChar(32)
+  revision         Int      @default(0)
+  dealerId         String?  @map("dealer_id") @db.Uuid
+  dealerSecretHash String   @map("dealer_secret_hash") @db.Text
+  passwordHash     String?  @map("password_hash") @db.Text
+  settings         Json     @db.JsonB
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
 
-  participants RoomParticipant[]
-  players      Player[]
-  sessions     GameSession[]
-  hands        Hand[]
-  actions      PlayerAction[]
-  snapshots    GameSnapshot[]
-  auditLogs    AuditLog[]
-  invites      RoomInvite[]
-  chatMessages RoomChatMessage[]
+  participants        RoomParticipant[]
+  players             Player[]
+  sessions            GameSession[]
+  hands               Hand[]
+  actions             PlayerAction[]
+  snapshots           GameSnapshot[]
+  auditLogs           AuditLog[]
+  invites             RoomInvite[]
+  chatMessages        RoomChatMessage[]
+  members             RoomMember[]
+  buyIns              BuyIn[]
+  walletLedgerEntries WalletLedgerEntry[]
+  roomLedgerEntries   RoomLedgerEntry[]
+  treasury            RoomTreasury?
+  predictionWallets   PredictionWallet[]
+  predictionMarkets   PredictionMarket[]
+  behaviorStats       PlayerBehaviorStat[]
+  reentryRequests     ReentryRequest[]
+  stackReturns        StackReturn[]
 
   @@index([code])
   @@map("rooms")
 }
 
 model User {
-  id           String   @id @default(uuid()) @db.Uuid
-  username     String   @unique @db.VarChar(64)
-  passwordHash String   @map("password_hash") @db.Text
-  balance      Int      @default(5000)
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt    DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  id                      String           @id @default(uuid()) @db.Uuid
+  username                String           @unique @db.VarChar(64)
+  passwordHash            String           @map("password_hash") @db.Text
+  phone                   String?          @unique @db.VarChar(16)
+  phoneVerifiedAt         DateTime?        @map("phone_verified_at") @db.Timestamptz(6)
+  role                    String           @default("USER") @db.VarChar(16)
+  blockedAt               DateTime?        @map("blocked_at") @db.Timestamptz(6)
+  deletedAt               DateTime?        @map("deleted_at") @db.Timestamptz(6)
+  mustChangePassword      Boolean          @default(false) @map("must_change_password")
+  accountSessions         AccountSession[]
+  rewardSessions          RewardSession[]
+  balance                 Int              @default(5000)
+  predictionRating        Int              @default(1000) @map("prediction_rating")
+  tableRating             Int              @default(1000) @map("table_rating")
+  tableHandsPlayed        Int              @default(0) @map("table_hands_played")
+  tableHandsWon           Int              @default(0) @map("table_hands_won")
+  tableCurrentStreak      Int              @default(0) @map("table_current_streak")
+  tableBestStreak         Int              @default(0) @map("table_best_streak")
+  predictionCount         Int              @default(0) @map("prediction_count")
+  predictionWins          Int              @default(0) @map("prediction_wins")
+  predictionSplitWins     Int              @default(0) @map("prediction_split_wins")
+  premiumType             String           @default("FREE") @map("premium_type") @db.VarChar(16)
+  premiumUntil            DateTime?        @map("premium_until") @db.Timestamptz(6)
+  selectedAchievementCode String?          @map("selected_achievement_code") @db.VarChar(64)
+  lastDailyBonusAt        DateTime?        @map("last_daily_bonus_at") @db.Timestamptz(6)
+  miniGameResetAt         DateTime?        @map("mini_game_reset_at") @db.Timestamptz(6)
+  createdAt               DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime         @default(now()) @map("updated_at") @db.Timestamptz(6)
 
-  participants RoomParticipant[]
-  players      Player[]
-  sentFriendRequests     FriendRequest[]   @relation("FriendRequestSender")
-  receivedFriendRequests FriendRequest[]   @relation("FriendRequestReceiver")
-  friendshipsA           Friendship[]      @relation("FriendshipA")
-  friendshipsB           Friendship[]      @relation("FriendshipB")
-  sentRoomInvites        RoomInvite[]      @relation("RoomInviteSender")
-  receivedRoomInvites    RoomInvite[]      @relation("RoomInviteReceiver")
+  participants           RoomParticipant[]
+  players                Player[]
+  sentFriendRequests     FriendRequest[]         @relation("FriendRequestSender")
+  receivedFriendRequests FriendRequest[]         @relation("FriendRequestReceiver")
+  friendshipsA           Friendship[]            @relation("FriendshipA")
+  friendshipsB           Friendship[]            @relation("FriendshipB")
+  sentRoomInvites        RoomInvite[]            @relation("RoomInviteSender")
+  receivedRoomInvites    RoomInvite[]            @relation("RoomInviteReceiver")
   roomChatMessages       RoomChatMessage[]
+  wallet                 UserWallet?
+  roomMemberAccounts     RoomMemberAccount[]
+  predictionRatingEvents PredictionRatingEvent[]
+  tableRatingEvents      TableRatingEvent[]
+  achievements           UserAchievement[]
+  seasonalStats          SeasonalUserStats[]
+  seasonalLeaderboards   SeasonLeaderboard[]
+  seasonalRewards        SeasonReward[]
+  seasonalSnapshots      SeasonSnapshot[]
+  crashBets              CrashBet[]
+  stackReturns           StackReturn[]
+  miniGameSessions       MiniGameSession[]       @relation("MinesPlayer")
+  minesBankSessions      MiniGameSession[]       @relation("MinesBank")
+  minesCommitments       MinesCommitment[]
+  miniGameJackpotEntries MiniGameJackpotEntry[]
+  jackpotPrizes          JackpotPrize[]
+  tokenPredictions       TokenPrediction[]
+  telegramLinkTokens     TelegramLinkToken[]
+  telegramSubscription   TelegramSubscription?
+  telegramNotificationSettings TelegramNotificationSettings?
+  telegramUserEvents      TelegramUserEvent[]
+  legalAcceptances       LegalAcceptance[]
+  payments               Payment[]
+  refundRequests         RefundRequest[]
+  premiumSubscriptions   PremiumSubscription[]
+  premiumSettings        PremiumUserSettings?
 
   @@index([username])
   @@map("users")
+}
+
+model LegalDocument {
+  id            String            @id @default(uuid()) @db.Uuid
+  type          String            @db.VarChar(48)
+  version       String            @db.VarChar(32)
+  title         String            @db.Text
+  content       String            @db.Text
+  contentPath   String?           @map("content_path") @db.Text
+  contentHash   String            @map("content_hash") @db.VarChar(64)
+  effectiveFrom DateTime          @map("effective_from") @db.Timestamptz(6)
+  publishedAt   DateTime          @map("published_at") @db.Timestamptz(6)
+  isActive      Boolean           @default(false) @map("is_active")
+  createdAt     DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  acceptances   LegalAcceptance[]
+
+  @@unique([type, version])
+  @@index([type, isActive, effectiveFrom])
+  @@map("legal_documents")
+}
+
+model LegalAcceptance {
+  id          String        @id @default(uuid()) @db.Uuid
+  userId      String        @map("user_id") @db.Uuid
+  documentId  String        @map("document_id") @db.Uuid
+  version     String        @db.VarChar(32)
+  contentHash String        @map("content_hash") @db.VarChar(64)
+  context     String        @db.VarChar(32)
+  acceptedAt  DateTime      @default(now()) @map("accepted_at") @db.Timestamptz(6)
+  ip          String        @db.VarChar(64)
+  userAgent   String        @map("user_agent") @db.Text
+  paymentId   String?       @map("payment_id") @db.VarChar(128)
+  orderId     String?       @map("order_id") @db.VarChar(128)
+  requestId   String        @map("request_id") @db.Uuid
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document    LegalDocument @relation(fields: [documentId], references: [id], onDelete: Restrict)
+
+  @@unique([requestId, documentId])
+  @@index([userId, documentId, context])
+  @@index([userId, acceptedAt])
+  @@index([paymentId])
+  @@index([orderId])
+  @@map("legal_acceptances")
+}
+
+model Payment {
+  id                String    @id @default(uuid()) @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  orderId           String    @unique @default(uuid()) @map("order_id") @db.VarChar(64)
+  yookassaPaymentId String?   @unique @map("yookassa_payment_id") @db.VarChar(128)
+  idempotencyKey    String    @unique @map("idempotency_key") @db.Uuid
+  provider          String    @default("YOOKASSA") @db.VarChar(24)
+  type              String    @db.VarChar(32)
+  productKey        String    @map("product_key") @db.VarChar(32)
+  amount            Decimal   @db.Decimal(12, 2)
+  currency          String    @default("RUB") @db.VarChar(3)
+  status            String    @default("PENDING") @db.VarChar(24)
+  providerStatus    String?   @map("provider_status") @db.VarChar(32)
+  description       String    @db.VarChar(128)
+  metadata          Json      @default("{}") @db.JsonB
+  providerData      Json      @default("{}") @map("provider_data") @db.JsonB
+  confirmationUrl   String?   @map("confirmation_url") @db.Text
+  returnUrl         String    @map("return_url") @db.Text
+  providerCreatedAt DateTime? @map("provider_created_at") @db.Timestamptz(6)
+  expiresAt         DateTime? @map("expires_at") @db.Timestamptz(6)
+  paidAt            DateTime? @map("paid_at") @db.Timestamptz(6)
+  processedAt       DateTime? @map("processed_at") @db.Timestamptz(6)
+  canceledAt        DateTime? @map("canceled_at") @db.Timestamptz(6)
+  lastSyncedAt      DateTime? @map("last_synced_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user              User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  refundRequest      RefundRequest?
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@index([type, status, createdAt])
+  @@index([userId, type, productKey])
+  @@map("payments")
+}
+
+model RefundRequest {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  paymentId      String   @unique @map("payment_id") @db.Uuid
+  purchaseType   String   @map("purchase_type") @db.VarChar(32)
+  reason         String   @db.Text
+  requestedAt    DateTime @default(now()) @map("requested_at") @db.Timestamptz(6)
+  status         String   @default("REQUESTED") @db.VarChar(24)
+  processedAt    DateTime? @map("processed_at") @db.Timestamptz(6)
+  decisionReason String?  @map("decision_reason") @db.Text
+  user           User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  payment        Payment  @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  @@index([userId, requestedAt])
+  @@index([status, requestedAt])
+  @@map("refund_requests")
+}
+
+model PremiumSubscription {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  plan      String   @db.VarChar(16)
+  startedAt DateTime @map("started_at") @db.Timestamptz(6)
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  status    String   @default("ACTIVE") @db.VarChar(16)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status, expiresAt])
+  @@map("premium_subscriptions")
+}
+
+model PremiumUserSettings {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @unique @map("user_id") @db.Uuid
+  settings  Json     @default("{}") @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("premium_user_settings")
+}
+
+model TelegramLinkToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash") @db.VarChar(128)
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("telegram_link_tokens")
+}
+
+model TelegramSubscription {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @unique @map("user_id") @db.Uuid
+  chatId         String   @unique @map("chat_id") @db.VarChar(64)
+  telegramUserId String   @map("telegram_user_id") @db.VarChar(64)
+  username       String?  @db.VarChar(128)
+  firstName      String?  @map("first_name") @db.VarChar(128)
+  isActive       Boolean  @default(true) @map("is_active")
+  subscribedAt   DateTime @default(now()) @map("subscribed_at") @db.Timestamptz(6)
+  lastSeenAt     DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([isActive, lastSeenAt])
+  @@map("telegram_subscriptions")
+}
+
+model TelegramNotificationSettings {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @unique @map("user_id") @db.Uuid
+  settings  Json     @default("{}") @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("telegram_notification_settings")
+}
+
+model TelegramUserEvent {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  category     String    @db.VarChar(32)
+  eventKey     String    @unique @map("event_key") @db.VarChar(160)
+  text         String    @db.Text
+  attemptedAt  DateTime? @map("attempted_at") @db.Timestamptz(6)
+  sentAt       DateTime? @map("sent_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([attemptedAt, createdAt])
+  @@map("telegram_user_events")
+}
+
+model AccountSession {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("account_sessions")
+}
+
+model PhoneVerification {
+  id          String    @id @default(uuid()) @db.Uuid
+  phone       String    @db.VarChar(16)
+  browserHash String    @map("browser_hash")
+  requestId   String    @unique @map("request_id") @db.Uuid
+  purpose     String    @db.VarChar(16)
+  status      String    @default("creating") @db.VarChar(16)
+  providerId  String?   @map("provider_id")
+  callPhone   String?   @map("call_phone")
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  checkedAt   DateTime? @map("checked_at") @db.Timestamptz(6)
+  consumedAt  DateTime? @map("consumed_at") @db.Timestamptz(6)
+
+  @@index([phone, createdAt])
+  @@index([browserHash, createdAt])
+  @@map("phone_verifications")
+}
+
+model RewardSession {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  status      String    @default("watching") @db.VarChar(16)
+  amount      Int
+  provider    String    @default("self_promo") @db.VarChar(32)
+  requestId   String    @unique @map("request_id") @db.Uuid
+  readyAt     DateTime  @map("ready_at") @db.Timestamptz(6)
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(6)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("reward_sessions")
+}
+
+model AdminAudit {
+  id        String   @id @default(uuid()) @db.Uuid
+  actorId   String?  @map("actor_id") @db.Uuid
+  action    String
+  entityId  String?  @map("entity_id")
+  reason    String
+  data      Json     @default("{}")
+  requestId String   @unique @map("request_id")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([createdAt])
+  @@map("admin_audits")
+}
+
+model SystemSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("system_settings")
+}
+
+model Season {
+  id              String              @id @default(uuid()) @db.Uuid
+  number          Int                 @unique
+  status          String              @db.VarChar(16)
+  startsAt        DateTime            @map("starts_at") @db.Timestamptz(6)
+  endsAt          DateTime            @map("ends_at") @db.Timestamptz(6)
+  finalizedAt     DateTime?           @map("finalized_at") @db.Timestamptz(6)
+  startingBalance BigInt              @default(50000) @map("starting_balance")
+  createdAt       DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  stats           SeasonalUserStats[]
+  leaderboards    SeasonLeaderboard[]
+  rewards         SeasonReward[]
+  snapshots       SeasonSnapshot[]
+  jackpotDraw     JackpotDraw?
+
+  @@index([status, startsAt, endsAt])
+  @@map("seasons")
+}
+
+model SeasonalUserStats {
+  id                    String   @id @default(uuid()) @db.Uuid
+  seasonId              String   @map("season_id") @db.Uuid
+  userId                String   @map("user_id") @db.Uuid
+  balance               BigInt   @default(50000)
+  startingBalance       BigInt   @default(50000) @map("starting_balance")
+  tableRating           Int      @default(1000) @map("table_rating")
+  predictionRating      Int      @default(1000) @map("prediction_rating")
+  handsPlayed           Int      @default(0) @map("hands_played")
+  handsWon              Int      @default(0) @map("hands_won")
+  predictionCount       Int      @default(0) @map("prediction_count")
+  predictionWins        Int      @default(0) @map("prediction_wins")
+  predictionSplitWins   Int      @default(0) @map("prediction_split_wins")
+  totalPredictionProfit BigInt   @default(0) @map("total_prediction_profit")
+  totalWon              BigInt   @default(0) @map("total_won")
+  totalLost             BigInt   @default(0) @map("total_lost")
+  bestWinStreak         Int      @default(0) @map("best_win_streak")
+  currentWinStreak      Int      @default(0) @map("current_win_streak")
+  activeDays            Int      @default(0) @map("active_days")
+  roomsJoined           Int      @default(0) @map("rooms_joined")
+  excluded              Boolean  @default(false)
+  updatedAt             DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  season                Season   @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([seasonId, userId])
+  @@index([seasonId, balance])
+  @@map("seasonal_user_stats")
+}
+
+model SeasonLeaderboard {
+  id        String   @id @default(uuid()) @db.Uuid
+  seasonId  String   @map("season_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  category  String   @db.VarChar(32)
+  place     Int
+  value     Decimal  @db.Decimal(20, 4)
+  tieKey    String   @map("tie_key") @db.VarChar(128)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  season    Season   @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([seasonId, category, userId])
+  @@index([seasonId, category, place])
+  @@map("season_leaderboards")
+}
+
+model SeasonReward {
+  id          String   @id @default(uuid()) @db.Uuid
+  seasonId    String   @map("season_id") @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  rewardType  String   @map("reward_type") @db.VarChar(32)
+  title       String   @db.VarChar(128)
+  description String   @db.Text
+  icon        String   @db.VarChar(16)
+  place       Int?
+  category    String   @db.VarChar(32)
+  rarity      String   @db.VarChar(16)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  season      Season   @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([seasonId, userId, rewardType, category])
+  @@index([seasonId, userId])
+  @@map("season_rewards")
+}
+
+model SeasonSnapshot {
+  id             String    @id @default(uuid()) @db.Uuid
+  seasonId       String    @map("season_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  data           Json      @db.JsonB
+  acknowledgedAt DateTime? @map("acknowledged_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  season         Season    @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([seasonId, userId])
+  @@index([userId, createdAt])
+  @@map("season_snapshots")
 }
 
 model RoomParticipant {
   id               String   @id @default(uuid()) @db.Uuid
   roomId           String   @map("room_id") @db.Uuid
   userId           String?  @map("user_id") @db.Uuid
+  memberId         String?  @map("member_id") @db.Uuid
   role             String   @db.VarChar(32)
   name             String   @db.Text
   sessionTokenHash String   @map("session_token_hash") @db.Text
@@ -66,14 +479,16 @@ model RoomParticipant {
   joinedAt         DateTime @default(now()) @map("joined_at") @db.Timestamptz(6)
   lastSeenAt       DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
 
-  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
-  player Player?
+  room           Room              @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user           User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+  member         RoomMember?       @relation(fields: [memberId], references: [id], onDelete: SetNull)
+  player         Player?
   actorAuditLogs AuditLog[]
-  chatMessages RoomChatMessage[]
+  chatMessages   RoomChatMessage[]
 
   @@index([roomId])
   @@index([userId])
+  @@index([memberId])
   @@map("room_participants")
 }
 
@@ -81,6 +496,7 @@ model Player {
   id             String   @id @default(uuid()) @db.Uuid
   roomId         String   @map("room_id") @db.Uuid
   userId         String?  @map("user_id") @db.Uuid
+  memberId       String?  @map("member_id") @db.Uuid
   participantId  String?  @unique @map("participant_id") @db.Uuid
   name           String   @db.Text
   seat           Int
@@ -89,82 +505,105 @@ model Player {
   totalCommitted Int      @default(0) @map("total_committed")
   status         String   @db.VarChar(32)
   isConnected    Boolean  @default(false) @map("is_connected")
+  balanceSettled Boolean  @default(false) @map("balance_settled")
+  isAway         Boolean  @default(false) @map("is_away")
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
 
-  room            Room              @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  user            User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
-  participant     RoomParticipant?  @relation(fields: [participantId], references: [id], onDelete: SetNull)
-  currentSessions GameSession[]     @relation("CurrentPlayerSession")
-  dealerSessions  GameSession[]     @relation("DealerButtonSession")
-  smallSessions   GameSession[]     @relation("SmallBlindSession")
-  bigSessions     GameSession[]     @relation("BigBlindSession")
-  actions         PlayerAction[]
-  handResults     HandResult[]
+  room             Room               @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user             User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  member           RoomMember?        @relation(fields: [memberId], references: [id], onDelete: SetNull)
+  participant      RoomParticipant?   @relation(fields: [participantId], references: [id], onDelete: SetNull)
+  currentSessions  GameSession[]      @relation("CurrentPlayerSession")
+  dealerSessions   GameSession[]      @relation("DealerButtonSession")
+  smallSessions    GameSession[]      @relation("SmallBlindSession")
+  bigSessions      GameSession[]      @relation("BigBlindSession")
+  actions          PlayerAction[]
+  handResults      HandResult[]
+  buyIns           BuyIn[]
+  predictionBets   PredictionBet[]    @relation("PredictionCandidate")
+  predictionQuotes PredictionQuote[]  @relation("PredictionQuoteCandidate")
+  resolvedMarkets  PredictionMarket[] @relation("PredictionResolution")
+  mainPotHands     Hand[]             @relation("MainPotWinner")
+  reentryRequests  ReentryRequest[]
+  stackReturns     StackReturn[]
 
+  @@unique([roomId, seat])
   @@index([roomId])
   @@index([userId])
-  @@unique([roomId, seat])
+  @@index([memberId])
   @@map("players")
 }
 
 model GameSession {
-  id                  String   @id @default(uuid()) @db.Uuid
-  roomId              String   @map("room_id") @db.Uuid
-  status              String   @db.VarChar(32)
-  handNumber          Int      @default(0) @map("hand_number")
-  pot                 Int      @default(0)
-  currentBet          Int      @default(0) @map("current_bet")
-  currentPlayerId     String?  @map("current_player_id") @db.Uuid
-  dealerButtonPlayerId String? @map("dealer_button_player_id") @db.Uuid
-  smallBlindPlayerId  String?  @map("small_blind_player_id") @db.Uuid
-  bigBlindPlayerId    String?  @map("big_blind_player_id") @db.Uuid
-  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt           DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  id                   String    @id @default(uuid()) @db.Uuid
+  roomId               String    @map("room_id") @db.Uuid
+  status               String    @db.VarChar(32)
+  handNumber           Int       @default(0) @map("hand_number")
+  pot                  Int       @default(0)
+  currentBet           Int       @default(0) @map("current_bet")
+  currentPlayerId      String?   @map("current_player_id") @db.Uuid
+  dealerButtonPlayerId String?   @map("dealer_button_player_id") @db.Uuid
+  smallBlindPlayerId   String?   @map("small_blind_player_id") @db.Uuid
+  bigBlindPlayerId     String?   @map("big_blind_player_id") @db.Uuid
+  currentTurnStartedAt DateTime? @map("current_turn_started_at") @db.Timestamptz(6)
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
 
-  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  currentPlayer Player? @relation("CurrentPlayerSession", fields: [currentPlayerId], references: [id])
+  room               Room    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  currentPlayer      Player? @relation("CurrentPlayerSession", fields: [currentPlayerId], references: [id])
   dealerButtonPlayer Player? @relation("DealerButtonSession", fields: [dealerButtonPlayerId], references: [id])
-  smallBlindPlayer Player? @relation("SmallBlindSession", fields: [smallBlindPlayerId], references: [id])
-  bigBlindPlayer Player? @relation("BigBlindSession", fields: [bigBlindPlayerId], references: [id])
-  hands Hand[]
+  smallBlindPlayer   Player? @relation("SmallBlindSession", fields: [smallBlindPlayerId], references: [id])
+  bigBlindPlayer     Player? @relation("BigBlindSession", fields: [bigBlindPlayerId], references: [id])
+  hands              Hand[]
 
   @@index([roomId])
   @@map("game_sessions")
 }
 
 model Hand {
-  id         String   @id @default(uuid()) @db.Uuid
-  roomId     String   @map("room_id") @db.Uuid
-  sessionId  String   @map("session_id") @db.Uuid
-  handNumber Int      @map("hand_number")
-  status     String   @db.VarChar(32)
-  pot        Int      @default(0)
-  currentBet Int      @default(0) @map("current_bet")
-  startedAt  DateTime @default(now()) @map("started_at") @db.Timestamptz(6)
-  finishedAt DateTime? @map("finished_at") @db.Timestamptz(6)
+  id              String    @id @default(uuid()) @db.Uuid
+  roomId          String    @map("room_id") @db.Uuid
+  sessionId       String    @map("session_id") @db.Uuid
+  handNumber      Int       @map("hand_number")
+  status          String    @db.VarChar(32)
+  pot             Int       @default(0)
+  currentBet      Int       @default(0) @map("current_bet")
+  bettingState    Json?     @map("betting_state") @db.JsonB
+  mainPotWinnerId String?   @map("main_pot_winner_id") @db.Uuid
+  mainPotSplit    Boolean   @default(false) @map("main_pot_split")
+  startedAt       DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  finishedAt      DateTime? @map("finished_at") @db.Timestamptz(6)
 
-  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  session GameSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  actions PlayerAction[]
-  results HandResult[]
-  snapshots GameSnapshot[]
+  room              Room               @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  session           GameSession        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  actions           PlayerAction[]
+  results           HandResult[]
+  snapshots         GameSnapshot[]
+  mainPotWinner     Player?            @relation("MainPotWinner", fields: [mainPotWinnerId], references: [id], onDelete: SetNull)
+  predictionMarket  PredictionMarket?
+  tableRatingEvents TableRatingEvent[]
 
   @@index([roomId, handNumber])
   @@map("hands")
 }
 
 model PlayerAction {
-  id              String   @id @default(uuid()) @db.Uuid
-  roomId          String   @map("room_id") @db.Uuid
-  handId          String   @map("hand_id") @db.Uuid
-  playerId        String   @map("player_id") @db.Uuid
-  type            String   @db.VarChar(32)
-  amount          Int      @default(0)
-  status          String   @db.VarChar(32)
-  clientRequestId String   @map("client_request_id") @db.Text
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  appliedAt       DateTime? @map("applied_at") @db.Timestamptz(6)
+  id                       String    @id @default(uuid()) @db.Uuid
+  roomId                   String    @map("room_id") @db.Uuid
+  handId                   String    @map("hand_id") @db.Uuid
+  playerId                 String    @map("player_id") @db.Uuid
+  type                     String    @db.VarChar(32)
+  amount                   Int       @default(0)
+  status                   String    @db.VarChar(32)
+  clientRequestId          String    @map("client_request_id") @db.Text
+  createdAt                DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  appliedAt                DateTime? @map("applied_at") @db.Timestamptz(6)
+  street                   String?   @db.VarChar(16)
+  turnStartedAt            DateTime? @map("turn_started_at") @db.Timestamptz(6)
+  requestedAt              DateTime? @map("requested_at") @db.Timestamptz(6)
+  decisionTimeMs           Int?      @map("decision_time_ms")
+  connectionInterruptionMs Int       @default(0) @map("connection_interruption_ms")
 
   room   Room   @relation(fields: [roomId], references: [id], onDelete: Cascade)
   hand   Hand   @relation(fields: [handId], references: [id], onDelete: Cascade)
@@ -197,7 +636,7 @@ model GameSnapshot {
   data         Json     @db.JsonB
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  room Room  @relation(fields: [roomId], references: [id], onDelete: Cascade)
   hand Hand? @relation(fields: [handId], references: [id], onDelete: Cascade)
 
   @@map("game_snapshots")
@@ -212,7 +651,7 @@ model AuditLog {
   payload            Json     @db.JsonB
   createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  room             Room             @relation(fields: [roomId], references: [id], onDelete: Cascade)
   actorParticipant RoomParticipant? @relation(fields: [actorParticipantId], references: [id])
 
   @@index([roomId, createdAt])
@@ -271,20 +710,591 @@ model RoomInvite {
 }
 
 model RoomChatMessage {
-  id            String   @id @default(uuid()) @db.Uuid
-  roomId        String   @map("room_id") @db.Uuid
-  participantId String?  @map("participant_id") @db.Uuid
-  userId        String?  @map("user_id") @db.Uuid
-  senderName    String   @map("sender_name") @db.Text
-  text          String   @db.Text
-  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  id              String    @id @default(uuid()) @db.Uuid
+  roomId          String    @map("room_id") @db.Uuid
+  participantId   String?   @map("participant_id") @db.Uuid
+  userId          String?   @map("user_id") @db.Uuid
+  senderName      String    @map("sender_name") @db.Text
+  text            String    @db.Text
+  clientRequestId String?   @map("client_request_id")
+  deletedAt       DateTime? @map("deleted_at") @db.Timestamptz(6)
+  deletionReason  String?   @map("deletion_reason")
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
   room        Room             @relation(fields: [roomId], references: [id], onDelete: Cascade)
   participant RoomParticipant? @relation(fields: [participantId], references: [id], onDelete: SetNull)
   user        User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
 
+  @@unique([roomId, participantId, clientRequestId])
   @@index([roomId, createdAt])
   @@index([participantId])
   @@index([userId])
   @@map("room_chat_messages")
+}
+
+model UserWallet {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @unique @map("user_id") @db.Uuid
+  balance   BigInt   @default(0)
+  version   Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  user    User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  entries WalletLedgerEntry[]
+
+  @@map("user_wallets")
+}
+
+model WalletLedgerEntry {
+  id             String   @id @default(uuid()) @db.Uuid
+  walletId       String   @map("wallet_id") @db.Uuid
+  roomId         String?  @map("room_id") @db.Uuid
+  memberId       String?  @map("member_id") @db.Uuid
+  transferId     String   @map("transfer_id") @db.Uuid
+  entryType      String   @map("entry_type") @db.VarChar(64)
+  amount         BigInt
+  balanceAfter   BigInt   @map("balance_after")
+  idempotencyKey String   @unique @map("idempotency_key") @db.Text
+  metadata       Json     @default("{}") @db.JsonB
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  wallet UserWallet  @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  room   Room?       @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  member RoomMember? @relation(fields: [memberId], references: [id], onDelete: SetNull)
+
+  @@index([walletId, createdAt])
+  @@index([transferId])
+  @@map("wallet_ledger_entries")
+}
+
+model RoomMember {
+  id                      String    @id @default(uuid()) @db.Uuid
+  roomId                  String    @map("room_id") @db.Uuid
+  displayName             String    @map("display_name") @db.Text
+  state                   String    @db.VarChar(32)
+  approvedByParticipantId String?   @map("approved_by_participant_id") @db.Uuid
+  initialBuyIn            BigInt?   @map("initial_buy_in")
+  requestedBuyIn          BigInt?   @map("requested_buy_in")
+  predictionGrant         BigInt    @default(0) @map("prediction_grant")
+  predictionGrantIssuedAt DateTime? @map("prediction_grant_issued_at") @db.Timestamptz(6)
+  eliminatedAt            DateTime? @map("eliminated_at") @db.Timestamptz(6)
+  reentryCount            Int       @default(0) @map("reentry_count")
+  createdAt               DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  room              Room                @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  participants      RoomParticipant[]
+  players           Player[]
+  accounts          RoomMemberAccount[]
+  buyIns            BuyIn[]
+  predictionWallet  PredictionWallet?
+  predictionBets    PredictionBet[]
+  behaviorStats     PlayerBehaviorStat?
+  reentryRequests   ReentryRequest[]
+  walletEntries     WalletLedgerEntry[]
+  roomLedgerEntries RoomLedgerEntry[]
+  stackReturns      StackReturn[]
+
+  @@index([roomId, state])
+  @@map("room_members")
+}
+
+model RoomMemberAccount {
+  id                   String    @id @default(uuid()) @db.Uuid
+  memberId             String    @map("member_id") @db.Uuid
+  userId               String    @map("user_id") @db.Uuid
+  isActive             Boolean   @default(true) @map("is_active")
+  boundByParticipantId String?   @map("bound_by_participant_id") @db.Uuid
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  endedAt              DateTime? @map("ended_at") @db.Timestamptz(6)
+
+  member RoomMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([memberId, userId, isActive])
+  @@index([userId, isActive])
+  @@map("room_member_accounts")
+}
+
+model BuyIn {
+  id              String   @id @default(uuid()) @db.Uuid
+  roomId          String   @map("room_id") @db.Uuid
+  memberId        String   @map("member_id") @db.Uuid
+  playerId        String   @map("player_id") @db.Uuid
+  amount          BigInt
+  kind            String   @db.VarChar(32)
+  transferId      String   @unique @map("transfer_id") @db.Uuid
+  clientRequestId String   @map("client_request_id") @db.Text
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  room   Room       @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  member RoomMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  player Player     @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, memberId, clientRequestId])
+  @@index([memberId, createdAt])
+  @@map("buy_ins")
+}
+
+model StackReturn {
+  id              String   @id @default(uuid()) @db.Uuid
+  roomId          String   @map("room_id") @db.Uuid
+  memberId        String   @map("member_id") @db.Uuid
+  playerId        String   @map("player_id") @db.Uuid
+  userId          String   @map("user_id") @db.Uuid
+  amount          BigInt
+  transferId      String   @unique @map("transfer_id") @db.Uuid
+  clientRequestId String   @map("client_request_id") @db.Text
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  room   Room       @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  member RoomMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  player Player     @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, memberId, clientRequestId])
+  @@index([userId, createdAt])
+  @@map("stack_returns")
+}
+
+model PredictionWallet {
+  id             String   @id @default(uuid()) @db.Uuid
+  roomId         String   @map("room_id") @db.Uuid
+  memberId       String   @unique @map("member_id") @db.Uuid
+  balance        BigInt   @default(0)
+  grantRemaining BigInt   @default(0) @map("grant_remaining")
+  version        Int      @default(0)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  room   Room       @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  member RoomMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@index([roomId])
+  @@map("prediction_wallets")
+}
+
+model RoomTreasury {
+  id        String   @id @default(uuid()) @db.Uuid
+  roomId    String   @unique @map("room_id") @db.Uuid
+  balance   BigInt   @default(0)
+  version   Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@map("room_treasuries")
+}
+
+model RoomLedgerEntry {
+  id             String   @id @default(uuid()) @db.Uuid
+  roomId         String   @map("room_id") @db.Uuid
+  memberId       String?  @map("member_id") @db.Uuid
+  marketId       String?  @map("market_id") @db.Uuid
+  transferId     String   @map("transfer_id") @db.Uuid
+  accountType    String   @map("account_type") @db.VarChar(32)
+  entryType      String   @map("entry_type") @db.VarChar(64)
+  amount         BigInt
+  balanceAfter   BigInt?  @map("balance_after")
+  idempotencyKey String   @unique @map("idempotency_key") @db.Text
+  metadata       Json     @default("{}") @db.JsonB
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  room   Room              @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  member RoomMember?       @relation(fields: [memberId], references: [id], onDelete: SetNull)
+  market PredictionMarket? @relation(fields: [marketId], references: [id], onDelete: SetNull)
+
+  @@index([roomId, createdAt])
+  @@index([transferId])
+  @@map("room_ledger_entries")
+}
+
+model PredictionMarket {
+  id                 String    @id @default(uuid()) @db.Uuid
+  roomId             String    @map("room_id") @db.Uuid
+  handId             String    @unique @map("hand_id") @db.Uuid
+  marketType         String    @map("market_type") @db.VarChar(64)
+  pricingMode        String    @default("pari_mutuel") @map("pricing_mode") @db.VarChar(32)
+  quoteLiquidity     BigInt?   @map("quote_liquidity")
+  status             String    @db.VarChar(32)
+  revision           Int       @default(1)
+  liquidity          BigInt    @default(0)
+  modelVersion       String    @map("model_version") @db.Text
+  modelSnapshot      Json      @map("model_snapshot") @db.JsonB
+  openedAt           DateTime? @map("opened_at") @db.Timestamptz(6)
+  lockDueAt          DateTime? @map("lock_due_at") @db.Timestamptz(6)
+  lockedAt           DateTime? @map("locked_at") @db.Timestamptz(6)
+  settledAt          DateTime? @map("settled_at") @db.Timestamptz(6)
+  resolutionPlayerId String?   @map("resolution_player_id") @db.Uuid
+  voidReason         String?   @map("void_reason") @db.Text
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  room             Room              @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  hand             Hand              @relation(fields: [handId], references: [id], onDelete: Cascade)
+  resolutionPlayer Player?           @relation("PredictionResolution", fields: [resolutionPlayerId], references: [id], onDelete: SetNull)
+  quotes           PredictionQuote[]
+  bets             PredictionBet[]
+  ledgerEntries    RoomLedgerEntry[]
+
+  @@index([roomId, status])
+  @@map("prediction_markets")
+}
+
+model PredictionQuote {
+  id                String   @id @default(uuid()) @db.Uuid
+  marketId          String   @map("market_id") @db.Uuid
+  revision          Int
+  candidatePlayerId String   @map("candidate_player_id") @db.Uuid
+  realStake         BigInt   @default(0) @map("real_stake")
+  virtualStake      BigInt   @default(0) @map("virtual_stake")
+  modelProbability  Float    @map("model_probability")
+  odds              Float
+  reasonCodes       Json     @default("[]") @map("reason_codes") @db.JsonB
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  market    PredictionMarket @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  candidate Player           @relation("PredictionQuoteCandidate", fields: [candidatePlayerId], references: [id], onDelete: Cascade)
+
+  @@unique([marketId, revision, candidatePlayerId])
+  @@index([marketId, revision])
+  @@map("prediction_quotes")
+}
+
+model PredictionBet {
+  id                     String    @id @default(uuid()) @db.Uuid
+  marketId               String    @map("market_id") @db.Uuid
+  memberId               String    @map("member_id") @db.Uuid
+  candidatePlayerId      String    @map("candidate_player_id") @db.Uuid
+  stake                  BigInt
+  status                 String    @db.VarChar(32)
+  grossPayout            BigInt    @default(0) @map("gross_payout")
+  netProfit              BigInt    @default(0) @map("net_profit")
+  quoteRevision          Int       @map("quote_revision")
+  acceptedOddsHundredths Int?      @map("accepted_odds_hundredths")
+  potentialPayout        BigInt?   @map("potential_payout")
+  placedStreet           String?   @map("placed_street") @db.VarChar(16)
+  riskPercent            Int       @default(0) @map("risk_percent")
+  ratingDelta            Int?      @map("rating_delta")
+  ratingAppliedAt        DateTime? @map("rating_applied_at") @db.Timestamptz(6)
+  clientRequestId        String    @map("client_request_id") @db.Text
+  createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  settledAt              DateTime? @map("settled_at") @db.Timestamptz(6)
+
+  market      PredictionMarket       @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  member      RoomMember             @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  candidate   Player                 @relation("PredictionCandidate", fields: [candidatePlayerId], references: [id], onDelete: Cascade)
+  ratingEvent PredictionRatingEvent?
+
+  @@unique([marketId, memberId])
+  @@unique([marketId, memberId, clientRequestId])
+  @@index([marketId, candidatePlayerId])
+  @@index([memberId, createdAt])
+  @@map("prediction_bets")
+}
+
+model MiniGameSession {
+  id             String    @id @default(uuid()) @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  game           String    @db.VarChar(32)
+  status         String    @db.VarChar(16)
+  stake          BigInt
+  mines          Int?
+  serverSeedHash String?   @map("server_seed_hash") @db.Char(64)
+  serverSeed     String?   @map("server_seed") @db.Char(64)
+  clientSeed     String?   @map("client_seed") @db.VarChar(128)
+  nonce          Int       @default(0)
+  openedCells    Json      @default("[]") @map("opened_cells") @db.JsonB
+  mineCells      Json?     @map("mine_cells") @db.JsonB
+  multiplier     Decimal   @default(1) @db.Decimal(12, 4)
+  payout         BigInt    @default(0)
+  bankUserId     String    @map("bank_user_id") @db.Uuid
+  bankReserve    BigInt    @map("bank_reserve")
+  maxPayout      BigInt    @map("max_payout")
+  idempotencyKey String    @unique @map("idempotency_key") @db.Text
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  finishedAt     DateTime? @map("finished_at") @db.Timestamptz(6)
+  user           User      @relation("MinesPlayer", fields: [userId], references: [id], onDelete: Cascade)
+  bank           User      @relation("MinesBank", fields: [bankUserId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "mines_bank_user_fkey")
+
+  @@index([userId, status, createdAt])
+  @@map("mini_game_sessions")
+}
+
+model MiniGameEconomy {
+  id            String                 @id @db.VarChar(16)
+  dayKey        String                 @map("day_key") @db.VarChar(10)
+  minesBank     BigInt                 @map("mines_bank")
+  rocketBank    BigInt                 @map("rocket_bank")
+  jackpot       BigInt                 @default(0)
+  jackpotTenths BigInt                 @default(0) @map("jackpot_tenths")
+  updatedAt     DateTime               @default(now()) @map("updated_at") @db.Timestamptz(6)
+  entries       MiniGameJackpotEntry[]
+
+  @@map("mini_game_economy")
+}
+
+model MiniGameJackpotEntry {
+  id          String          @id @default(uuid()) @db.Uuid
+  economyId   String          @map("economy_id") @db.VarChar(16)
+  userId      String          @map("user_id") @db.Uuid
+  game        String          @db.VarChar(16)
+  amount      BigInt
+  source      String          @db.VarChar(32)
+  referenceId String?         @map("reference_id") @db.Uuid
+  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  economy     MiniGameEconomy @relation(fields: [economyId], references: [id], onDelete: Cascade)
+  user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([economyId, createdAt])
+  @@index([userId, createdAt])
+  @@map("mini_game_jackpot_entries")
+}
+
+model JackpotDraw {
+  id           String         @id @default(uuid()) @db.Uuid
+  seasonId     String         @unique @map("season_id") @db.Uuid
+  seasonNumber Int            @unique @map("season_number")
+  pot          BigInt
+  potTenths    BigInt         @map("pot_tenths")
+  participants Json
+  createdAt    DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  season       Season         @relation(fields: [seasonId], references: [id], onDelete: Restrict)
+  prizes       JackpotPrize[]
+
+  @@map("jackpot_draws")
+}
+
+model JackpotPrize {
+  id        String      @id @default(uuid()) @db.Uuid
+  drawId    String      @map("draw_id") @db.Uuid
+  userId    String      @map("user_id") @db.Uuid
+  username  String
+  place     Int
+  amount    BigInt
+  claimedAt DateTime?   @map("claimed_at") @db.Timestamptz(6)
+  draw      JackpotDraw @relation(fields: [drawId], references: [id], onDelete: Restrict)
+  user      User        @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([drawId, place])
+  @@unique([drawId, userId])
+  @@index([userId, claimedAt])
+  @@map("jackpot_prizes")
+}
+
+model MinesCommitment {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  serverSeed String    @map("server_seed") @db.Char(64)
+  seedHash   String    @map("seed_hash") @db.Char(64)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([userId, expiresAt])
+  @@map("mines_commitments")
+}
+
+model TokenPredictionRound {
+  id          String                   @id @default(uuid()) @db.Uuid
+  roomId      String                   @map("room_id") @db.Uuid
+  handId      String                   @unique @map("hand_id") @db.Uuid
+  handNumber  Int                      @map("hand_number")
+  status      String                   @default("OPEN") @db.VarChar(16)
+  candidates  Json                     @db.JsonB
+  rewardFund  BigInt                   @default(0) @map("reward_fund")
+  deductions  Json                     @default("{}") @db.JsonB
+  lockedAt    DateTime?                @map("locked_at") @db.Timestamptz(6)
+  settledAt   DateTime?                @map("settled_at") @db.Timestamptz(6)
+  createdAt   DateTime                 @default(now()) @map("created_at") @db.Timestamptz(6)
+  predictions TokenPrediction[]
+  commands    TokenPredictionCommand[]
+
+  @@index([roomId, createdAt])
+  @@map("token_prediction_rounds")
+}
+
+model TokenPrediction {
+  id          String               @id @default(uuid()) @db.Uuid
+  roundId     String               @map("round_id") @db.Uuid
+  userId      String               @map("user_id") @db.Uuid
+  candidateId String               @map("candidate_id") @db.Uuid
+  tokens      Int
+  status      String               @default("OPEN") @db.VarChar(16)
+  payout      BigInt               @default(0)
+  ratingDelta Int                  @default(0) @map("rating_delta")
+  updatedAt   DateTime             @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  round       TokenPredictionRound @relation(fields: [roundId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  user        User                 @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@unique([roundId, userId, candidateId])
+  @@index([userId, status])
+  @@map("token_predictions")
+}
+
+model TokenPredictionCommand {
+  id        String               @id @default(uuid()) @db.Uuid
+  roundId   String               @map("round_id") @db.Uuid
+  userId    String               @map("user_id") @db.Uuid
+  requestId String               @map("request_id") @db.VarChar(128)
+  inputHash String               @map("input_hash") @db.Char(64)
+  createdAt DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  round     TokenPredictionRound @relation(fields: [roundId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([roundId, userId, requestId])
+  @@map("token_prediction_commands")
+}
+
+model PredictionRatingEvent {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  betId     String?  @unique @map("bet_id") @db.Uuid
+  delta     Int
+  reason    String   @db.VarChar(128)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bet  PredictionBet? @relation(fields: [betId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@map("prediction_rating_events")
+}
+
+model TableRatingEvent {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  handId    String?  @map("hand_id") @db.Uuid
+  delta     Int
+  reason    String   @db.VarChar(128)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  hand Hand? @relation(fields: [handId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, handId])
+  @@index([userId, createdAt])
+  @@map("table_rating_events")
+}
+
+model Achievement {
+  id           String   @id @default(uuid()) @db.Uuid
+  code         String   @unique @db.VarChar(64)
+  title        String   @db.VarChar(128)
+  description  String   @db.Text
+  icon         String   @db.VarChar(16)
+  rarity       String   @db.VarChar(16)
+  ratingReward Int      @default(0) @map("rating_reward")
+  moneyReward  Int      @default(0) @map("money_reward")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  users UserAchievement[]
+
+  @@map("achievements")
+}
+
+model AchievementNotification {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  code        String    @db.VarChar(64)
+  text        String    @db.Text
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  attemptedAt DateTime? @map("attempted_at") @db.Timestamptz(6)
+  sentAt      DateTime? @map("sent_at") @db.Timestamptz(6)
+
+  @@unique([userId, code])
+  @@index([attemptedAt, createdAt])
+  @@map("achievement_notifications")
+}
+
+model UserAchievement {
+  id            String   @id @default(uuid()) @db.Uuid
+  userId        String   @map("user_id") @db.Uuid
+  achievementId String   @map("achievement_id") @db.Uuid
+  progress      Int      @default(100)
+  unlockedAt    DateTime @default(now()) @map("unlocked_at") @db.Timestamptz(6)
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievement Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, achievementId])
+  @@index([userId, unlockedAt])
+  @@map("user_achievements")
+}
+
+model PlayerBehaviorStat {
+  id                String   @id @default(uuid()) @db.Uuid
+  roomId            String   @map("room_id") @db.Uuid
+  memberId          String   @unique @map("member_id") @db.Uuid
+  sampleSize        Int      @default(0) @map("sample_size")
+  opportunities     Int      @default(0)
+  bets              Int      @default(0)
+  raises            Int      @default(0)
+  folds             Int      @default(0)
+  allIns            Int      @default(0) @map("all_ins")
+  showdowns         Int      @default(0)
+  mainPotWins       Int      @default(0) @map("main_pot_wins")
+  averageDecisionMs Int      @default(0) @map("average_decision_ms")
+  updatedAt         DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  room   Room       @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  member RoomMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@index([roomId, memberId])
+  @@map("player_behavior_stats")
+}
+
+model ReentryRequest {
+  id                      String    @id @default(uuid()) @db.Uuid
+  roomId                  String    @map("room_id") @db.Uuid
+  memberId                String    @map("member_id") @db.Uuid
+  playerId                String    @map("player_id") @db.Uuid
+  amount                  BigInt
+  status                  String    @db.VarChar(32)
+  clientRequestId         String    @map("client_request_id") @db.Text
+  reviewedByParticipantId String?   @map("reviewed_by_participant_id") @db.Uuid
+  createdAt               DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  reviewedAt              DateTime? @map("reviewed_at") @db.Timestamptz(6)
+
+  room   Room       @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  member RoomMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  player Player     @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, memberId, clientRequestId])
+  @@index([roomId, status])
+  @@map("reentry_requests")
+}
+
+model CrashRound {
+  id        String     @id @default(uuid()) @db.Uuid
+  phase     String     @db.VarChar(16)
+  startedAt DateTime   @default(now()) @map("started_at") @db.Timestamptz(6)
+  crashAt   Int        @map("crash_at_hundredths")
+  seedHash  String     @map("seed_hash") @db.Char(64)
+  seed      String     @db.Char(64)
+  createdAt DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+  bets      CrashBet[]
+
+  @@index([phase, startedAt])
+  @@map("crash_rounds")
+}
+
+model CrashBet {
+  id          String     @id @default(uuid()) @db.Uuid
+  roundId     String     @map("round_id") @db.Uuid
+  userId      String     @map("user_id") @db.Uuid
+  stake       Int
+  cashedAt    Int?       @map("cashed_at_hundredths")
+  payout      Int        @default(0)
+  autoCashout Int?       @map("auto_cashout_at_hundredths")
+  createdAt   DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+  round       CrashRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roundId, userId])
+  @@index([userId, createdAt])
+  @@map("crash_bets")
 }

@@ -1,6 +1,7 @@
 import { readBody } from 'h3'
 import { inviteFriendToRoomSchema } from '../../../utils/validation'
 import { inviteFriendToRoom } from '../../../services/socialService'
+import { resolveAccountToken } from '../../../utils/accountCookie'
 
 export default defineEventHandler(async (event) => {
   const code = getRouterParam(event, 'code')?.toUpperCase()
@@ -15,7 +16,7 @@ export default defineEventHandler(async (event) => {
   }
 
   return inviteFriendToRoom({
-    token: parsed.data.token,
+    token: resolveAccountToken(event, parsed.data.token),
     roomCode: code,
     friendUserId: parsed.data.friendUserId
   })

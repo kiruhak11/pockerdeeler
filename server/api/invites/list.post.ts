@@ -1,6 +1,7 @@
 import { readBody } from 'h3'
 import { authTokenSchema } from '../../utils/validation'
 import { listRoomInvites } from '../../services/socialService'
+import { resolveAccountToken } from '../../utils/accountCookie'
 
 export default defineEventHandler(async (event) => {
   const body = await readBody(event)
@@ -9,5 +10,5 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: 'token обязателен' })
   }
 
-  return listRoomInvites(parsed.data.token)
+  return listRoomInvites(resolveAccountToken(event, parsed.data.token))
 })

@@ -1,7 +1,45 @@
 export type RoomStatus = 'lobby' | 'active' | 'paused' | 'finished'
 export type ParticipantRole = 'dealer' | 'player' | 'spectator'
 
+export interface BuyInSettings {
+  enabled: boolean
+  minBuyIn: number
+  maxBuyIn: number
+  allowTopUp: boolean
+  topUpOnlyBetweenHands: true
+  maxActivePlayerSeatsPerAccount: 1
+}
+
+export interface PredictionSettings {
+  enabled: boolean
+  question: 'main_pot_single_winner'
+  grantMode: 'original_buy_in' | 'fixed'
+  fixedGrant?: number
+  minStake: number
+  maxStake: number
+  maxStakePercentOfGrant: number
+  marketOpenStreet: 'preflop'
+  gracePeriodSeconds: number
+  virtualLiquidityPerMarket: number
+  treasuryInitialBalance: number
+  behaviorImpact: number
+  includeDecisionTime: boolean
+  hidePredictionsFromPlayers: true
+  comebackMinBuyIn: number
+  comebackMaxBuyIn: number
+  maxReentriesPerMember: number
+  requireDealerApprovalForReentry: boolean
+}
+
+export interface RosterSettings {
+  requireDealerApproval: boolean
+  lockRosterAfterGameStart: boolean
+  allowDealerAccountRebinding: boolean
+}
+
 export interface RoomSettings {
+  accessMode: 'public' | 'private'
+  playerPolicy: 'mixed' | 'accounts' | 'guests'
   startingStack: number
   smallBlind?: number
   bigBlind?: number
@@ -10,6 +48,9 @@ export interface RoomSettings {
   allowLateJoin: boolean
   requireDealerActionApproval: boolean
   allowSpectators: boolean
+  buyIn: BuyInSettings
+  predictions: PredictionSettings
+  roster: RosterSettings
 }
 
 export interface Room {
@@ -17,8 +58,9 @@ export interface Room {
   code: string
   name: string
   status: RoomStatus
+  revision: number
   dealerId: string
-  dealerSecretHash: string
+  hasPassword: boolean
   settings: RoomSettings
   createdAt: string
   updatedAt: string
@@ -55,4 +97,14 @@ export interface RoomState {
       finalStack: number
     }[]
   } | null
+}
+
+export interface BuyInOptionsView {
+  enabled: boolean
+  minBuyIn: number
+  maxBuyIn: number
+  allowTopUp: boolean
+  walletBalance: number
+  currentStack: number
+  maximumTopUp: number
 }
