@@ -4,6 +4,7 @@ import { useAccountStore } from '~/stores/account'
 import { useAccountAuth } from '~/composables/useAccountAuth'
 import { getHttpErrorMessage } from '~/utils/httpError'
 import ReservedRooms from '~/components/room/ReservedRooms.vue'
+import AppIcon from '~/components/ui/AppIcon.vue'
 
 const gameStore = useGameStore()
 const accountStore = useAccountStore()
@@ -72,15 +73,15 @@ async function logoutAccount() {
     <section class="panel home-page__join">
       <div><span class="home-page__number">01</span><p class="eyebrow">Быстрый вход</p><h2>Введите код стола</h2></div>
       <div class="home-page__join-row"><input v-model="roomCode" class="input" type="text" inputmode="text" maxlength="8" autocomplete="off" placeholder="A7K2M9" @keyup.enter="joinByCode"><button type="button" class="btn" @click="joinByCode">Войти за стол</button></div>
-      <NuxtLink class="home-page__text-link" to="/rooms">Посмотреть все открытые столы →</NuxtLink>
+      <NuxtLink class="home-page__text-link" to="/rooms">Посмотреть все открытые столы <AppIcon name="arrow-right" :size="16" /></NuxtLink>
     </section>
 
     <section class="home-page__choices">
       <NuxtLink class="home-choice home-choice--accent" to="/create"><span>02</span><div><small>Для организатора</small><h2>Создать комнату</h2><p>Настройте блайнды, бай-ин и пригласите друзей.</p></div><b>＋</b></NuxtLink>
-      <button class="home-choice" type="button" @click="startNewLocalGame"><span>03</span><div><small>Без интернета</small><h2>Локальная игра</h2><p>Калькулятор дилера на одном устройстве.</p></div><b>→</b></button>
+    <button class="home-choice" type="button" @click="startNewLocalGame"><span>03</span><div><small>Без интернета</small><h2>Локальная игра</h2><p>Калькулятор дилера на одном устройстве.</p></div><AppIcon name="arrow-right" :size="20" /></button>
     </section>
 
-    <button v-if="hasSaved" type="button" class="home-page__continue" @click="continueLocalGame"><span>Сохранённая локальная игра</span><strong>Продолжить →</strong></button>
+    <button v-if="hasSaved" type="button" class="home-page__continue" @click="continueLocalGame"><span>Сохранённая локальная игра</span><strong>Продолжить <AppIcon name="arrow-right" :size="17" /></strong></button>
 
     <section v-if="!accountStore.user" class="home-page__account"><div><strong>Сохраните прогресс</strong><p>Аккаунт хранит баланс, рейтинг, друзей и достижения.</p></div><NuxtLink class="btn btn--ghost" to="/login">Войти</NuxtLink><NuxtLink class="btn" to="/login?mode=register">Создать аккаунт</NuxtLink></section>
     <section v-else class="home-page__session"><button type="button" :disabled="authLoading" @click="logoutAccount">Выйти из аккаунта</button></section>

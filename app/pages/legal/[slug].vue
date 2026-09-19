@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { getLegalDocument, legalDocuments } from '~/data/legalDocuments'
+import AppIcon from '~/components/ui/AppIcon.vue'
 
 const route = useRoute()
 const document = getLegalDocument(String(route.params.slug))
@@ -17,7 +18,7 @@ const otherDocuments = legalDocuments.filter(item => item.slug !== document?.slu
 
 <template>
   <main v-if="document" class="legal-page page-shell">
-    <nav class="legal-breadcrumbs" aria-label="Навигация по юридическим документам"><NuxtLink to="/">Главная</NuxtLink><span>→</span><span>Юридическая информация</span></nav>
+    <nav class="legal-breadcrumbs" aria-label="Навигация по юридическим документам"><NuxtLink to="/">Главная</NuxtLink><AppIcon name="arrow-right" :size="15" /><span>Юридическая информация</span></nav>
     <header class="legal-hero">
       <p class="eyebrow">POKER DEALER DESK / LEGAL</p>
       <h1 class="page-title">{{ document.title }}</h1>
@@ -32,7 +33,7 @@ const otherDocuments = legalDocuments.filter(item => item.slug !== document?.slu
       </section>
     </article>
     <aside class="legal-updated"><strong>Версия документа: {{ document.version }}</strong><span>Дата вступления в силу: {{ document.effectiveDate }}</span><small>При изменении публикуется новая версия; опубликованные версии не перезаписываются.</small></aside>
-    <nav class="legal-related" aria-label="Другие юридические документы"><NuxtLink v-for="item in otherDocuments" :key="item.slug" :to="`/legal/${item.slug}`">{{ item.shortTitle }} <span>↗</span></NuxtLink></nav>
+    <nav class="legal-related" aria-label="Другие юридические документы"><NuxtLink v-for="item in otherDocuments" :key="item.slug" :to="`/legal/${item.slug}`">{{ item.shortTitle }} <AppIcon name="arrow-right" :size="14"/></NuxtLink></nav>
   </main>
 </template>
 

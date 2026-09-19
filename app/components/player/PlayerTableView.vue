@@ -38,7 +38,7 @@ const statusLabels: Record<Player['status'], string> = {
       >
         <span>{{ player.seat }}.</span>
         <span class="name">
-          {{ player.name }} <small v-if="player.achievementIcon" class="player-achievement"><AchievementBadge :code="player.achievementIcon" :size="18"/></small>
+          <span class="player-name-identity"><span class="player-name-text">{{ player.name }}</span><span v-if="player.achievementIcon" class="player-achievement"><AchievementBadge :code="player.achievementIcon" :size="18"/></span></span>
           <small v-if="props.selfPlayerId === player.id">(вы)</small>
           <small v-if="player.isAway">Отошёл</small>
           <small v-if="props.smallBlindPlayerId === player.id" title="Малый обязательный взнос">Малый блайнд</small>
@@ -90,6 +90,28 @@ const statusLabels: Record<Player['status'], string> = {
     overflow-wrap: anywhere;
     gap: 0.35rem;
     align-items: baseline;
+
+    .player-name-identity {
+      display: inline-flex;
+      min-width: 0;
+      align-items: center;
+      gap: .35rem;
+      white-space: nowrap;
+    }
+
+    .player-name-text {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .player-achievement {
+      display: inline-flex;
+      flex: 0 0 auto;
+      line-height: 0;
+      align-items: center;
+    }
 
     small {
       color: var(--text-muted);

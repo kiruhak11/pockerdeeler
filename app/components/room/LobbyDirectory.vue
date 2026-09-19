@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { getHttpErrorMessage } from '~/utils/httpError'
+import AppIcon from '~/components/ui/AppIcon.vue'
 
 const tab = ref<'public' | 'private'>('public')
 const { data: rooms, status, error, refresh } = await useFetch('/api/rooms', { server: false, lazy: true })
@@ -28,7 +29,7 @@ onBeforeUnmount(() => clearInterval(timer))
         <div class="lobby-card__top"><span class="lobby-card__status" :class="{ live: room.status !== 'lobby' }"><i />{{ room.status === 'lobby' ? 'Сбор игроков' : 'Игра идёт' }}</span><strong class="lobby-card__code">{{ room.code }}</strong></div>
         <div><h3>{{ room.name }}</h3><p>{{ policy[room.playerPolicy] }}</p></div>
         <div class="lobby-card__facts"><span><small>Игроки</small><strong>{{ room.playerCount }}/{{ room.maxPlayers }}</strong></span><span><small>Блайнды</small><strong>{{ room.smallBlind }}/{{ room.bigBlind }}</strong></span><span><small>Доступ</small><strong>{{ room.hasPassword ? 'Пароль' : 'Свободно' }}</strong></span></div>
-        <NuxtLink class="lobby-card__join" :to="`/room/${room.code}/join`">Занять место <span>→</span></NuxtLink>
+        <NuxtLink class="lobby-card__join" :to="`/room/${room.code}/join`">Занять место <AppIcon name="arrow-right" :size="16" /></NuxtLink>
       </article>
     </div>
   </section>

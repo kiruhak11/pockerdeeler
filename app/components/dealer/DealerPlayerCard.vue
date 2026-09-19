@@ -35,7 +35,7 @@ defineProps<{
     @click="emit('select', player.id)"
   >
     <header>
-      <strong>{{ player.name }} <small v-if="player.achievementIcon" class="player-achievement"><AchievementBadge :code="player.achievementIcon" :size="18"/></small></strong>
+      <strong class="dealer-player-card__name"><span>{{ player.name }}</span><span v-if="player.achievementIcon" class="player-achievement"><AchievementBadge :code="player.achievementIcon" :size="18"/></span></strong>
       <div class="dealer-player-card__badges">
         <span v-if="isDealerButton" class="tag">D</span>
         <span v-if="isSmallBlind" class="tag">SB</span>
@@ -76,6 +76,26 @@ defineProps<{
     justify-content: space-between;
     gap: 0.5rem;
     align-items: center;
+  }
+
+  &__name {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    gap: .35rem;
+
+    > span:first-child {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .player-achievement {
+      display: inline-flex;
+      flex: 0 0 auto;
+      line-height: 0;
+    }
   }
 
   &__badges {

@@ -33,7 +33,7 @@ const visiblePlayers = computed(() =>
         @click="emit('selectPlayer', player)"
         @keydown.enter="emit('selectPlayer', player)"
       >
-        <span class="player-line"><span class="player-line__name">{{ player.seat }}. {{ player.name }} <small v-if="player.achievementIcon" class="player-achievement"><AchievementBadge :code="player.achievementIcon" :size="18"/></small></span><small class="player-line__status">{{ player.status === 'folded' ? 'Сбросил карты' : player.status === 'out' ? 'Выбыл' : `${player.stack} фишек` }}</small></span>
+        <span class="player-line"><span class="player-line__name"><span class="player-line__username">{{ player.seat }}. {{ player.name }}</span><span v-if="player.achievementIcon" class="player-achievement"><AchievementBadge :code="player.achievementIcon" :size="18"/></span></span><small class="player-line__status">{{ player.status === 'folded' ? 'Сбросил карты' : player.status === 'out' ? 'Выбыл' : `${player.stack} фишек` }}</small></span>
         <span class="marks">
           <span v-if="player.isAway" class="tag">Отошёл</span>
           <span v-if="props.smallBlindPlayerId === player.id" class="tag">SB</span>
@@ -71,7 +71,23 @@ li {
 }
 
 .player-line__name {
-  overflow-wrap: anywhere;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: .35rem;
+  white-space: nowrap;
+}
+
+.player-line__username {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.player-achievement {
+  display: inline-flex;
+  flex: 0 0 auto;
+  line-height: 0;
 }
 
 .player-line__status {

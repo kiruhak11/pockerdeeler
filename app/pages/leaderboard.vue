@@ -20,7 +20,7 @@ const filters: { key: LeaderboardSort; label: string; short: string; icon: strin
   { key: 'balance', label: 'Баланс', short: 'Баланс', icon: '◉' },
   { key: 'wins', label: 'Успешные прогнозы', short: 'Прогнозы', icon: '✓' },
   { key: 'achievements', label: 'Достижения', short: 'Награды', icon: '◆' },
-  { key: 'streak', label: 'Серия побед', short: 'Серия', icon: '↗' }
+  { key: 'streak', label: 'Серия побед', short: 'Серия', icon: 'arrow-right' }
   ,{ key: 'season', label: 'Сезон', short: 'Сезон', icon: 'trophy' }
 ]
 
@@ -39,14 +39,14 @@ onMounted(async () => { try { premiumAccess.value = await $fetch<PremiumAccess>(
   <main class="page-shell leaderboard-page">
     <header class="leaderboard-hero"><p class="leaderboard-hero__eyebrow">ЗАЛ СЛАВЫ</p><h1 class="page-title">Лидерборд</h1><p class="page-subtitle">Сравнивайте мастерство за столом, серии и прогресс, а не только размер кошелька.</p></header>
     <nav class="leaderboard-tabs" aria-label="Сортировка лидерборда">
-      <button v-for="filter in filters" :key="filter.key" :class="{ active: sort === filter.key }" :aria-pressed="sort === filter.key" @click="sort = filter.key"><i>{{ filter.icon }}</i><span>{{ filter.label }}</span><small>{{ filter.short }}</small></button>
+      <button v-for="filter in filters" :key="filter.key" :class="{ active: sort === filter.key }" :aria-pressed="sort === filter.key" @click="sort = filter.key"><i><AppIcon v-if="filter.icon === 'arrow-right'" name="arrow-right" :size="20"/><template v-else>{{ filter.icon }}</template></i><span>{{ filter.label }}</span><small>{{ filter.short }}</small></button>
     </nav>
     <nav v-if="sort === 'season'" class="season-categories" aria-label="Категории сезона"><button v-for="category in seasonCategories" :key="category.key" :class="{ active: seasonCategory === category.key }" @click="seasonCategory = category.key">{{ category.label }}</button></nav>
     <label v-if="sort !== 'season' && premiumAccess?.features.includes('LEADERBOARD_PREMIUM_FILTER')" class="premium-filter"><input v-model="premiumOnly" type="checkbox"><span>Показать только Premium</span></label>
     <p v-if="loading">Загружаем рейтинг...</p><p v-if="error" class="leaderboard-page__error">{{ error }}</p>
     <section v-if="!loading" class="panel leaderboard-list">
       <div v-for="entry in entries" :key="entry.userId" class="leaderboard-row" :class="{ 'leaderboard-row--podium': entry.rank <= 3 }">
-        <strong class="leaderboard-row__rank"><AppIcon v-if="entry.rank <= 3" :name="['medal-gold','medal-silver','medal-bronze'][entry.rank - 1]" :size="22"/><span v-else>#{{ entry.rank }}</span></strong><span class="leaderboard-row__name"><AppIcon v-if="entry.premiumPlan === 'ELITE'" name="spark" :size="15"/><AppIcon v-else-if="entry.premiumType === 'PREMIUM'" name="diamond" :size="15"/>{{ entry.username }}<small v-if="entry.selectedAchievementIcon" class="leaderboard-row__badge"><AchievementBadge :code="entry.selectedAchievementIcon" :size="18"/></small></span>
+        <strong class="leaderboard-row__rank"><AppIcon v-if="entry.rank <= 3" :name="['medal-gold','medal-silver','medal-bronze'][entry.rank - 1]" :size="22"/><span v-else>#{{ entry.rank }}</span></strong><span class="leaderboard-row__name"><AppIcon v-if="entry.premiumPlan === 'ELITE'" name="spark" :size="15"/><AppIcon v-else-if="entry.premiumType === 'PREMIUM'" name="diamond" :size="15"/><span class="leaderboard-row__username">{{ entry.username }}</span><span v-if="entry.selectedAchievementIcon" class="leaderboard-row__badge"><AchievementBadge :code="entry.selectedAchievementIcon" :size="18"/></span></span>
         <span class="leaderboard-row__main">{{ sort === 'balance' ? `${entry.balance.toLocaleString('ru-RU')} баланс` : sort === 'wins' ? `${entry.predictionWins} точных прогнозов` : sort === 'streak' ? `${entry.streak} подряд` : sort === 'achievements' ? `${entry.achievements} достижений` : `${entry.tableRating} рейтинг игры` }}</span><span class="leaderboard-row__meta"><b class="table-record__wins">{{ entry.handsPlayed ? Math.round(entry.wins * 100 / entry.handsPlayed) : 0 }}% побед</b><span> · {{ entry.predictionWins }}/{{ entry.predictions }} прогнозов · {{ entry.successPercent }}%</span></span>
       </div>
       <p v-if="!entries.length" class="page-subtitle">Пока нет данных для рейтинга.</p>
@@ -64,8 +64,9 @@ onMounted(async () => { try { premiumAccess.value = await $fetch<PremiumAccess>(
 .premium-filter{display:flex;align-items:center;gap:.55rem;width:max-content;padding:.55rem .8rem;border:1px solid rgba(242,180,81,.25);border-radius:999px;color:var(--text-muted);background:rgba(242,180,81,.06);font-size:.8rem;cursor:pointer}.premium-filter input{accent-color:var(--accent)}
 .leaderboard-row { display: grid; grid-template-columns: 3rem minmax(130px, 1fr) auto auto; gap: .8rem; align-items: center; padding: .9rem .8rem; border: 1px solid transparent; border-radius: 15px; color: var(--text-muted); background: rgba(255,255,255,.025); }
 .leaderboard-row--podium { border-color: rgba(242,180,81,.11); background: linear-gradient(90deg, rgba(242,180,81,.09), rgba(255,255,255,.02)); }
-.leaderboard-row__name { color: var(--text); font-weight: 800; }
-.leaderboard-row__name small { margin-left: .35rem; font-size: 1rem; }
+.leaderboard-row__name { display: inline-flex; min-width: 0; align-items: center; gap: .35rem; overflow: hidden; color: var(--text); font-weight: 800; white-space: nowrap; }
+.leaderboard-row__username { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.leaderboard-row__badge { display: inline-flex; flex: 0 0 auto; line-height: 0; }
 .leaderboard-row__meta { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .2rem .55rem; font-size: .78rem; text-align: right; }
 .table-record__wins { color: #72d395; }
 .table-record__losses { color: #ff8b82; }

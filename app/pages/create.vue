@@ -3,6 +3,7 @@ import { usePlayerSessionStore } from "~/stores/playerSession"
 import { useAccountStore } from '~/stores/account'
 import { useAccountAuth } from '~/composables/useAccountAuth'
 import { parseQuickBetSteps, formatQuickBetSteps } from '~/utils/quickBetSteps'
+import AppIcon from '~/components/ui/AppIcon.vue'
 const sessionStore = usePlayerSessionStore()
 const accountStore = useAccountStore()
 const { loadMe } = useAccountAuth()
@@ -212,7 +213,7 @@ async function submit() {
       <section class="create-final">
         <div class="create-final__options"><label class="check"><input v-model="form.allowLateJoin" type="checkbox"><span>Поздний вход</span></label><label class="check"><input v-model="form.requireDealerActionApproval" type="checkbox"><span>Подтверждение действий</span></label><label class="check"><input v-model="form.allowSpectators" type="checkbox"><span>Зрители</span></label></div>
         <div class="create-final__summary"><span>Готово к запуску</span><strong>{{ form.name }} · {{ form.smallBlind }}/{{ form.bigBlind }}</strong></div>
-        <button type="submit" class="btn create-final__submit" :disabled="isSubmitting">{{ isSubmitting ? 'Создаём стол…' : 'Создать комнату →' }}</button>
+        <button type="submit" class="btn create-final__submit" :disabled="isSubmitting"><span>{{ isSubmitting ? 'Создаём стол…' : 'Создать комнату' }}</span><AppIcon v-if="!isSubmitting" name="arrow-right" :size="17" /></button>
       </section>
     </form>
   </main>

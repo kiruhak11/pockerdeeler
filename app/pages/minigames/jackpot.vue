@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppIcon from '~/components/ui/AppIcon.vue'
 type Prize = { id: string; place: number; username: string; amount: number; claimedAt: string | null; mine: boolean }
 type Draw = { id: string; seasonNumber: number; pot: number; createdAt: string; prizes: Prize[] }
 const auth = useAccountAuth()
@@ -12,7 +13,7 @@ async function claim(prize: Prize) { claiming.value = prize.id; message.value = 
 onMounted(() => { void auth.loadMe().catch(() => {}); void loadHistory() })
 </script>
 <template>
-  <main class="jackpot-page"><NuxtLink class="arcade-back" to="/minigames">← Все мини-игры</NuxtLink>
+  <main class="jackpot-page"><NuxtLink class="arcade-back" to="/minigames"><AppIcon name="arrow-left" :size="16" /> Все мини-игры</NuxtLink>
     <header class="jackpot-hero"><div><p class="arcade-eyebrow">SEASON JACKPOT · LIVE</p><h1>Три места.<br><span>Один большой финал.</span></h1><p>Все проигрыши в мини-играх складываются в общий призовой фонд. Участники выбираются по весу проигрышей за сезон.</p></div><div class="hero-crown">♛<small>50 / 30 / 20</small></div></header>
     <section class="pot-panel"><div><p class="arcade-eyebrow">ДЖЕКПОТ СЕЗОНА {{ economy?.season?.number ?? '—' }}</p><strong>{{ (economy?.jackpot || 0).toLocaleString('ru-RU') }}</strong><span>фишек</span><small>До перехода сезона · {{ countdown }}</small></div><div class="pot-ring"><i/><b>LIVE</b></div></section>
     <section class="rules"><div><b>01</b><span>Играй в Rocket или Mines</span></div><div><b>02</b><span>Проигрыши увеличивают шанс</span></div><div><b>03</b><span>Три приза выдаются после перехода</span></div></section>
