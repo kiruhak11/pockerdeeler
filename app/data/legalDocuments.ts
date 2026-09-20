@@ -145,7 +145,7 @@ export function getLegalDocument(slug: string) {
   return legalDocuments.find(document => document.slug === slug)
 }
 
-export type LegalDocumentSnapshot = Pick<LegalDocument, 'type' | 'version' | 'title' | 'effectiveFrom' | 'publishedAt'> & {
+export type LegalDocumentSnapshot = Pick<LegalDocument, 'type' | 'version' | 'title' | 'effectiveFrom' | 'publishedAt' | 'effectiveDate'> & {
   content: string
   publicPath: string | null
 }
@@ -158,15 +158,16 @@ export const legalDocumentSnapshots: LegalDocumentSnapshot[] = [
     content: JSON.stringify({ summary: document.summary, sections: document.sections }),
     publicPath: `/legal/${document.slug}`,
     effectiveFrom: document.effectiveFrom,
-    publishedAt: document.publishedAt
+    publishedAt: document.publishedAt,
+    effectiveDate: document.effectiveDate
   })),
   {
     type: 'VIRTUAL_CURRENCY_NOTICE', version: '1.0', title: 'Уведомление о виртуальной валюте',
     content: 'Я понимаю, что игровые фишки являются внутренними виртуальными единицами сервиса, не являются денежными средствами и не подлежат выводу или обмену на реальные деньги или имущество',
-    publicPath: null, effectiveFrom, publishedAt
+    publicPath: null, effectiveFrom, publishedAt, effectiveDate
   },
   {
     type: 'AGE_CONFIRMATION', version: '1.0', title: 'Подтверждение совершеннолетия',
-    content: 'Мне исполнилось 18 лет', publicPath: null, effectiveFrom, publishedAt
+    content: 'Мне исполнилось 18 лет', publicPath: null, effectiveFrom, publishedAt, effectiveDate
   }
 ]

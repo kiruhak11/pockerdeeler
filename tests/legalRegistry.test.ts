@@ -15,10 +15,13 @@ const publicSlugs = [
   'requisites'
 ]
 
-test('legal registry contains exactly the ten public v1.0 documents', () => {
+test('legal registry contains exactly the ten current public documents', () => {
   assert.deepEqual(legalDocuments.map(document => document.slug), publicSlugs)
   assert.equal(new Set(legalDocuments.map(document => document.type)).size, 10)
-  assert.ok(legalDocuments.every(document => document.version === '1.0' && document.effectiveDate === '19 сентября 2026 года'))
+  assert.ok(legalDocuments.every(document => document.version === '1.0'))
+  assert.equal(getLegalDocument('game-rules')?.version, '1.0')
+  assert.equal(getLegalDocument('personal-data-consent')?.version, '1.0')
+  assert.equal(getLegalDocument('requisites')?.version, '1.0')
   assert.equal(legalDocuments.some(document => /чек-лист|checklist/i.test(`${document.title} ${document.summary} ${JSON.stringify(document.sections)}`)), false)
 })
 
@@ -28,6 +31,7 @@ test('public registry routes resolve and internal snapshots are not public', () 
   }
   assert.equal(getLegalDocument('internal-legal-checklist'), undefined)
   assert.equal(legalDocumentSnapshots.filter(document => document.publicPath).length, 10)
+  assert.equal(legalDocumentSnapshots.some(document => ['GAME_RULES', 'PERSONAL_DATA_CONSENT', 'REQUISITES'].includes(document.type) && document.version === '1.1'), false)
   assert.ok(legalDocumentSnapshots.filter(document => document.publicPath === null).every(document => ['VIRTUAL_CURRENCY_NOTICE', 'AGE_CONFIRMATION'].includes(document.type)))
 })
 

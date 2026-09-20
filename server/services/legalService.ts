@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { createError } from 'h3'
 import type { Prisma } from '@prisma/client'
-import { legalDocumentSnapshots, type LegalDocumentType } from '../../app/data/legalDocuments'
+import { legalDocumentSnapshots, type LegalDocumentSnapshot, type LegalDocumentType } from '../../app/data/legalDocuments'
 import { prisma } from '../db/client'
 import { getPremiumPaymentPlan, getVirtualCurrencyPackage } from './paymentCatalog'
 
@@ -53,6 +53,22 @@ function isUniqueConstraint(error: unknown) {
   return !!error && typeof error === 'object' && 'code' in error && error.code === 'P2002'
 }
 
+type LegalDocumentSnapshotRow = {
+  type: string
+  version: string
+  title: string
+  content: string
+  contentPath: string | null
+  contentHash: string
+}
+
+export function assertLegalDocumentSnapshot(row: LegalDocumentSnapshotRow, snapshot: LegalDocumentSnapshot) {
+  const contentHash = legalContentHash(snapshot.content)
+  if (row.contentHash !== contentHash || row.content !== snapshot.content || row.title !== snapshot.title || row.contentPath !== snapshot.publicPath) {
+    throw createError({ statusCode: 500, message: `Редакция ${snapshot.type} ${snapshot.version} уже опубликована с другим содержанием. Создайте новую версию.` })
+  }
+}
+
 export function assertLegalConfirmations(context: LegalAcceptanceContext, input: LegalConfirmationInput) {
   if ((context === 'PREMIUM' || context === 'VIRTUAL_CHIPS') && input.termsAccepted !== true) {
     throw createError({ statusCode: 400, message: 'Подтвердите принятие Публичной оферты и Правил сервиса' })
@@ -78,11 +94,12 @@ export function assertRegistrationLegalConfirmations(input: RegistrationLegalCon
   if (input.personalDataConsent !== true) throw createError({ statusCode: 400, message: 'Дайте отдельное согласие на обработку персональных данных' })
 }
 
-export async function ensureLegalDocuments(client: Prisma.TransactionClient | typeof prisma = prisma) {
+export async function ensureLegalDocuments(client: Prisma.TransactionClient | typeof prisma = prisma, requestedTypes?: readonly LegalDocumentType[]) {
   const idsByType = new Map<LegalDocumentType, string>()
   const now = Date.now()
+  const snapshots = requestedTypes ? legalDocumentSnapshots.filter(snapshot => requestedTypes.includes(snapshot.type)) : legalDocumentSnapshots
 
-  for (const snapshot of legalDocumentSnapshots) {
+  for (const snapshot of snapshots) {
     const contentHash = legalContentHash(snapshot.content)
     let row
     try {
@@ -109,11 +126,9 @@ export async function ensureLegalDocuments(client: Prisma.TransactionClient | ty
       if (client !== prisma) throw error
       row = await client.legalDocument.findUniqueOrThrow({ where: { type_version: { type: snapshot.type, version: snapshot.version } } })
     }
-    if (row.contentHash !== contentHash || row.content !== snapshot.content || row.title !== snapshot.title || row.contentPath !== snapshot.publicPath) {
-      throw createError({ statusCode: 500, message: `Редакция ${snapshot.type} ${snapshot.version} уже опубликована с другим содержанием. Создайте новую версию.` })
-    }
+    assertLegalDocumentSnapshot(row, snapshot)
     if (new Date(snapshot.effectiveFrom).getTime() <= now) {
-      const selected = legalDocumentSnapshots
+      const selected = snapshots
         .filter(item => item.type === snapshot.type && new Date(item.effectiveFrom).getTime() <= now)
         .sort((a, b) => new Date(b.effectiveFrom).getTime() - new Date(a.effectiveFrom).getTime())[0]
       if (selected?.version === snapshot.version) idsByType.set(snapshot.type, row.id)

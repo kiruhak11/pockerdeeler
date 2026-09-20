@@ -3,6 +3,7 @@ import { createError } from 'h3'
 import type { Prisma } from '@prisma/client'
 import { prisma } from '../db/client'
 import { ensureLegalDocuments } from './legalService'
+import type { LegalDocumentType } from '../../app/data/legalDocuments'
 
 export const distributionCategories = ['NICKNAME', 'GAME_STATISTICS', 'ACHIEVEMENTS', 'VIRTUAL_BALANCE', 'RATING', 'WIN_HISTORY'] as const
 export type DistributionCategory = typeof distributionCategories[number]
@@ -25,7 +26,7 @@ function isSerializationConflict(error: unknown) {
 }
 
 async function currentDistributionDocument(client: DbClient, ensureRegistry = true): Promise<LegalDocumentRow | null> {
-  if (ensureRegistry) await ensureLegalDocuments(client)
+  if (ensureRegistry) await ensureLegalDocuments(client, ['PERSONAL_DATA_DISTRIBUTION'] satisfies readonly LegalDocumentType[])
   const document = await client.legalDocument.findFirst({ where: { type: 'PERSONAL_DATA_DISTRIBUTION', isActive: true, effectiveFrom: { lte: new Date() } }, orderBy: { effectiveFrom: 'desc' } })
   if (!document && ensureRegistry) throw createError({ statusCode: 503, message: 'Актуальная редакция согласия на распространение данных временно недоступна' })
   return document
