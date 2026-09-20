@@ -103,10 +103,10 @@ export async function acknowledgeSeasonResult(token: string) {
 export async function seasonLeaderboard(category: string, token?: string) {
   const season = await ensureCurrentSeason()
   const now = new Date()
-  const userId = token ? await auth(token).catch(() => null) : null
+  if (token) await auth(token).catch(() => null)
   const key = SEASON_CATEGORIES.includes(category as typeof SEASON_CATEGORIES[number]) ? category : 'tableRating'
   const { rows } = await prisma.$transaction(async tx => {
-    const users = await tx.user.findMany({ where: { deletedAt: null }, include: { wallet: true, premiumSubscriptions: { where: { status: 'ACTIVE', startedAt: { lte: now }, expiresAt: { gt: now } }, orderBy: { expiresAt: 'desc' }, take: 1 } }, orderBy: { createdAt: 'asc' } })
+    const users = await tx.user.findMany({ where: { deletedAt: null, leaderboardVisible: true }, include: { wallet: true, premiumSubscriptions: { where: { status: 'ACTIVE', startedAt: { lte: now }, expiresAt: { gt: now } }, orderBy: { expiresAt: 'desc' }, take: 1 } }, orderBy: { createdAt: 'asc' } })
     const rows = []
     for (const user of users) rows.push({ user, ...await collectSeasonMetrics(tx, season, user.id, snapshotData({ ...user, balance: user.wallet?.balance ?? BigInt(user.balance) })) })
     return { users, rows }
@@ -114,9 +114,8 @@ export async function seasonLeaderboard(category: string, token?: string) {
   const permissionsByUser = await getDistributionPermissionsForUsers(rows.map(row => row.user.id))
   const eligible = rows.filter(row => {
     const permissions = permissionsByUser.get(row.user.id) || new Set<DistributionCategory>()
-    if (!permissions.has('NICKNAME') || !permissions.has('RATING')) return false
-    const requiredCategory: DistributionCategory = key === 'balance' ? 'VIRTUAL_BALANCE' : key === 'tableRating' ? 'RATING' : 'GAME_STATISTICS'
-    if (!permissions.has(requiredCategory)) return false
+    const requiredCategory: DistributionCategory | null = key === 'balance' ? 'VIRTUAL_BALANCE' : key === 'tableRating' ? null : 'GAME_STATISTICS'
+    if (requiredCategory && !permissions.has(requiredCategory)) return false
     if (key === 'balance') return true
     if (key === 'tableRating' || key === 'handsPlayed') return row.handsPlayed > 0
     if (key === 'winRate') return row.handsPlayed >= 10
@@ -127,7 +126,7 @@ export async function seasonLeaderboard(category: string, token?: string) {
   })
   const sorted = eligible.sort((a, b) => Number((b as any)[key]) - Number((a as any)[key]) || a.user.createdAt.getTime() - b.user.createdAt.getTime())
   return {
-    season: { number: season.number, endsAt: season.endsAt.toISOString() }, category: key, currentUserId: userId,
+    season: { number: season.number, endsAt: season.endsAt.toISOString() }, category: key,
     entries: sorted.slice(0, 100).map((row, index) => {
       const permissions = permissionsByUser.get(row.user.id) || new Set<DistributionCategory>()
       const entry: Record<string, unknown> = { rank: index + 1, username: row.user.username, value: Number((row as any)[key]) }

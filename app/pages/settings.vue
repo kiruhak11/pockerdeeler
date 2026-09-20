@@ -3,6 +3,7 @@ import { useAccountStore } from '~/stores/account'
 import { useAccountAuth } from '~/composables/useAccountAuth'
 import { getHttpErrorMessage } from '~/utils/httpError'
 import AccountSecuritySettings from '~/components/account/AccountSecuritySettings.vue'
+import LeaderboardVisibilitySettings from '~/components/account/LeaderboardVisibilitySettings.vue'
 import DistributionConsentSettings from '~/components/account/DistributionConsentSettings.vue'
 
 const accountStore = useAccountStore()
@@ -127,6 +128,8 @@ async function onChangePassword() {
         <label v-for="option in options" :key="option.key" class="setting-row"><span><strong>{{ option.title }}</strong><small>{{ option.description }}</small></span><input v-model="editablePreferences[option.key]" type="checkbox" role="switch" @change="persist"></label>
       </div>
     </section>
+
+    <LeaderboardVisibilitySettings />
 
     <AccountSecuritySettings />
 

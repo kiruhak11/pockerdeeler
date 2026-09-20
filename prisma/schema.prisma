@@ -72,6 +72,7 @@ model User {
   selectedAchievementCode String?          @map("selected_achievement_code") @db.VarChar(64)
   lastDailyBonusAt        DateTime?        @map("last_daily_bonus_at") @db.Timestamptz(6)
   miniGameResetAt         DateTime?        @map("mini_game_reset_at") @db.Timestamptz(6)
+  leaderboardVisible      Boolean          @default(true) @map("leaderboard_visible")
   createdAt               DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt               DateTime         @default(now()) @map("updated_at") @db.Timestamptz(6)
 
