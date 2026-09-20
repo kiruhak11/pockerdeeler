@@ -27,9 +27,20 @@ const filters: { key: LeaderboardSort; label: string; short: string; icon: strin
 async function load() {
   loading.value = true
   error.value = ''
-  try { entries.value = sort.value === 'season' ? (await $fetch<any>('/api/season/leaderboard', { query: { category: seasonCategory.value } })).entries.map((item: any) => ({ ...item, balance: item.value, tableRating: item.value, predictionWins: item.predictionWins || 0, wins: item.handsWon || 0, handsPlayed: item.handsPlayed || 0, predictions: 0, successPercent: 0, streak: item.bestWinStreak || 0, bestStreak: item.bestWinStreak || 0, achievements: 0, splitWins: 0, premiumPlan: item.premiumPlan || null, selectedAchievementIcon: null, achievementsList: [] })) : (await $fetch<{ entries: LeaderboardEntry[] }>('/api/leaderboard', { query: { sort: sort.value, premiumOnly: premiumOnly.value || undefined } })).entries }
+  try { entries.value = sort.value === 'season' ? (await $fetch<any>('/api/season/leaderboard', { query: { category: seasonCategory.value } })).entries.map((item: any) => ({ ...item, balance: item.value, tableRating: item.value, predictionWins: item.predictionWins, wins: item.handsWon, handsPlayed: item.handsPlayed, predictions: item.predictionCount, successPercent: item.winRate, streak: item.bestWinStreak, bestStreak: item.bestWinStreak, splitWins: item.predictionSplitWins })) : (await $fetch<{ entries: LeaderboardEntry[] }>('/api/leaderboard', { query: { sort: sort.value, premiumOnly: premiumOnly.value || undefined } })).entries }
   catch { error.value = 'Не удалось загрузить лидерборд' }
   finally { loading.value = false }
+}
+function mainLabel(entry: LeaderboardEntry) {
+  if (sort.value === 'balance' && entry.balance !== undefined) return `${entry.balance.toLocaleString('ru-RU')} баланс`
+  if (sort.value === 'wins' && entry.predictionWins !== undefined) return `${entry.predictionWins} точных прогнозов`
+  if (sort.value === 'streak' && entry.streak !== undefined) return `${entry.streak} подряд`
+  if (sort.value === 'achievements' && entry.achievements !== undefined) return `${entry.achievements} достижений`
+  return `${entry.tableRating ?? '—'} рейтинг игры`
+}
+function metaLabel(entry: LeaderboardEntry) {
+  if (entry.handsPlayed === undefined || entry.predictionWins === undefined || entry.predictions === undefined || entry.successPercent === undefined) return ''
+  return `${entry.predictionWins}/${entry.predictions} прогнозов · ${entry.successPercent}%`
 }
 watch([sort, seasonCategory, premiumOnly], load)
 onMounted(async () => { try { premiumAccess.value = await $fetch<PremiumAccess>('/api/premium/me') } catch {} await load() })
@@ -45,9 +56,9 @@ onMounted(async () => { try { premiumAccess.value = await $fetch<PremiumAccess>(
     <label v-if="sort !== 'season' && premiumAccess?.features.includes('LEADERBOARD_PREMIUM_FILTER')" class="premium-filter"><input v-model="premiumOnly" type="checkbox"><span>Показать только Premium</span></label>
     <p v-if="loading">Загружаем рейтинг...</p><p v-if="error" class="leaderboard-page__error">{{ error }}</p>
     <section v-if="!loading" class="panel leaderboard-list">
-      <div v-for="entry in entries" :key="entry.userId" class="leaderboard-row" :class="{ 'leaderboard-row--podium': entry.rank <= 3 }">
-        <strong class="leaderboard-row__rank"><AppIcon v-if="entry.rank <= 3" :name="['medal-gold','medal-silver','medal-bronze'][entry.rank - 1]" :size="22"/><span v-else>#{{ entry.rank }}</span></strong><span class="leaderboard-row__name"><AppIcon v-if="entry.premiumPlan === 'ELITE'" name="spark" :size="15"/><AppIcon v-else-if="entry.premiumType === 'PREMIUM'" name="diamond" :size="15"/><span class="leaderboard-row__username">{{ entry.username }}</span><span v-if="entry.selectedAchievementIcon" class="leaderboard-row__badge"><AchievementBadge :code="entry.selectedAchievementIcon" :size="18"/></span></span>
-        <span class="leaderboard-row__main">{{ sort === 'balance' ? `${entry.balance.toLocaleString('ru-RU')} баланс` : sort === 'wins' ? `${entry.predictionWins} точных прогнозов` : sort === 'streak' ? `${entry.streak} подряд` : sort === 'achievements' ? `${entry.achievements} достижений` : `${entry.tableRating} рейтинг игры` }}</span><span class="leaderboard-row__meta"><b class="table-record__wins">{{ entry.handsPlayed ? Math.round(entry.wins * 100 / entry.handsPlayed) : 0 }}% побед</b><span> · {{ entry.predictionWins }}/{{ entry.predictions }} прогнозов · {{ entry.successPercent }}%</span></span>
+      <div v-for="entry in entries" :key="entry.userId || entry.rank" class="leaderboard-row" :class="{ 'leaderboard-row--podium': entry.rank <= 3 }">
+        <strong class="leaderboard-row__rank"><AppIcon v-if="entry.rank <= 3" :name="['medal-gold','medal-silver','medal-bronze'][entry.rank - 1]" :size="22"/><span v-else>#{{ entry.rank }}</span></strong><span class="leaderboard-row__name"><span class="leaderboard-row__username">{{ entry.username }}</span><span v-if="entry.selectedAchievementIcon" class="leaderboard-row__badge"><AchievementBadge :code="entry.selectedAchievementIcon" :size="18"/></span></span>
+        <span class="leaderboard-row__main">{{ mainLabel(entry) }}</span><span v-if="metaLabel(entry)" class="leaderboard-row__meta"><b class="table-record__wins">{{ entry.handsPlayed ? Math.round((entry.wins || 0) * 100 / entry.handsPlayed) : 0 }}% побед</b><span> · {{ metaLabel(entry) }}</span></span>
       </div>
       <p v-if="!entries.length" class="page-subtitle">Пока нет данных для рейтинга.</p>
     </section>

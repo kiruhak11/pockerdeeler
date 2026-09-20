@@ -1,16 +1,18 @@
 <script setup lang="ts">
 import LegalConsentFields from '~/components/legal/LegalConsentFields.vue'
 import AppIcon from '~/components/ui/AppIcon.vue'
-type ConsentState = { termsAccepted: boolean; virtualCurrencyAcknowledged: boolean; ageConfirmed: boolean; personalDataConsent: boolean }
+type ConsentState = { termsAccepted: boolean; virtualCurrencyAcknowledged: boolean; virtualChipsRulesAccepted: boolean; ageConfirmed: boolean; personalDataConsent: boolean }
 const packages = [{ packageId: 'chips-99', priceRub: 99, chips: 9900 }, { packageId: 'chips-199', priceRub: 199, chips: 19900 }, { packageId: 'chips-499', priceRub: 499, chips: 49900 }, { packageId: 'chips-999', priceRub: 999, chips: 99900 }]
-const selected = ref('chips-199'); const paying = ref(false); const message = ref(''); const consents = ref<ConsentState>({ termsAccepted: false, virtualCurrencyAcknowledged: false, ageConfirmed: false, personalDataConsent: false })
+const selected = ref('chips-199'); const paying = ref(false); const message = ref(''); const checkoutRequestId = ref<string | null>(null); const consents = ref<ConsentState>({ termsAccepted: false, virtualCurrencyAcknowledged: false, virtualChipsRulesAccepted: false, ageConfirmed: false, personalDataConsent: false })
+watch(selected, () => { checkoutRequestId.value = null })
 const chosen = computed(() => packages.find(item => item.packageId === selected.value) || packages[1]!)
 async function startPayment() {
-  if (!consents.value.termsAccepted || !consents.value.virtualCurrencyAcknowledged || !consents.value.ageConfirmed || paying.value) return
+  if (!consents.value.termsAccepted || !consents.value.virtualChipsRulesAccepted || !consents.value.virtualCurrencyAcknowledged || !consents.value.ageConfirmed || paying.value) return
   paying.value = true; message.value = ''
   try {
-    await $fetch('/api/legal/accept', { method: 'POST', body: { context: 'VIRTUAL_CHIPS', requestId: crypto.randomUUID(), termsAccepted: true, virtualCurrencyAcknowledged: true, ageConfirmed: true } })
-    const payment = await $fetch<{ confirmationUrl: string }>('/api/payments/virtual-currency/create', { method: 'POST', body: { packageId: chosen.value.packageId } })
+    const accepted = await $fetch<{ requestId: string }>('/api/legal/accept', { method: 'POST', body: { context: 'VIRTUAL_CHIPS', packageId: chosen.value.packageId, requestId: checkoutRequestId.value || undefined, checkout: true, termsAccepted: true, virtualChipsRulesAccepted: true, virtualCurrencyAcknowledged: true, ageConfirmed: true } })
+    checkoutRequestId.value = accepted.requestId
+    const payment = await $fetch<{ confirmationUrl: string }>('/api/payments/virtual-currency/create', { method: 'POST', body: { packageId: chosen.value.packageId, requestId: accepted.requestId } })
     window.location.assign(payment.confirmationUrl)
   } catch (error) { message.value = error instanceof Error ? error.message : 'Не удалось создать платёж'; paying.value = false }
 }
@@ -24,7 +26,7 @@ useHead({ title: 'Пополнение фишек · Poker Dealer Desk' })
     </header>
     <section class="notice" aria-label="Правила виртуальных фишек"><span aria-hidden="true">◆</span><p><strong>Это внутренняя валюта Pocker.</strong> Фишки используются только внутри платформы, не являются денежными средствами и не подлежат выводу или обмену на деньги или имущество.</p></section>
     <section aria-labelledby="packages-title"><div class="section-heading"><div><p class="eyebrow">ПАКЕТЫ</p><h2 id="packages-title">Выберите количество</h2></div><NuxtLink to="/payments/history">История покупок <AppIcon name="arrow-right" :size="16" /></NuxtLink></div><div class="packages"><button v-for="item in packages" :key="item.packageId" type="button" :class="{ selected: selected === item.packageId }" @click="selected = item.packageId"><span class="package-check" aria-hidden="true">✓</span><strong>{{ item.priceRub }} ₽</strong><span>{{ item.chips.toLocaleString('ru-RU') }} фишек</span><small>Курс 1:100</small></button></div></section>
-    <section class="checkout panel"><div class="checkout__summary"><p class="eyebrow">ВАШ ВЫБОР</p><h2>{{ chosen.priceRub }} ₽ <span>→</span> {{ chosen.chips.toLocaleString('ru-RU') }} фишек</h2><ul><li>Без автопродления</li><li>Начисление после статуса succeeded</li><li>Только для использования в Pocker</li></ul><nav aria-label="Юридические документы"><NuxtLink to="/legal/offer">Оферта</NuxtLink><NuxtLink to="/legal/game-rules">Правила</NuxtLink><NuxtLink to="/legal/refunds">Возврат</NuxtLink></nav></div><div class="checkout__action"><LegalConsentFields v-model="consents" mode="VIRTUAL_CHIPS" /><button class="pay" type="button" :disabled="paying || !consents.termsAccepted || !consents.virtualCurrencyAcknowledged || !consents.ageConfirmed" @click="startPayment"><span>{{ paying ? 'Создаём платёж…' : `Оплатить ${chosen.priceRub} ₽` }}</span><AppIcon name="arrow-right" :size="19" /></button><small v-if="message" class="message">{{ message }}</small></div></section>
+    <section class="checkout panel"><div class="checkout__summary"><p class="eyebrow">ВАШ ВЫБОР</p><h2>{{ chosen.priceRub }} ₽ <span>→</span> {{ chosen.chips.toLocaleString('ru-RU') }} фишек</h2><ul><li>Без автопродления</li><li>Начисление после статуса succeeded</li><li>Только для использования в Pocker</li></ul><nav aria-label="Юридические документы"><NuxtLink to="/legal/offer">Оферта</NuxtLink><NuxtLink to="/legal/virtual-chips">Правила виртуальных фишек</NuxtLink><NuxtLink to="/legal/game-rules">Правила игры</NuxtLink></nav></div><div class="checkout__action"><LegalConsentFields v-model="consents" mode="VIRTUAL_CHIPS" /><button class="pay" type="button" :disabled="paying || !consents.termsAccepted || !consents.virtualChipsRulesAccepted || !consents.virtualCurrencyAcknowledged || !consents.ageConfirmed" @click="startPayment"><span>{{ paying ? 'Создаём платёж…' : `Оплатить ${chosen.priceRub} ₽` }}</span><AppIcon name="arrow-right" :size="19" /></button><small v-if="message" class="message">{{ message }}</small></div></section>
   </main>
 </template>
 <style scoped>

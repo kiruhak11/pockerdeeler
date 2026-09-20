@@ -3,6 +3,7 @@ import { useAccountStore } from '~/stores/account'
 import { useAccountAuth } from '~/composables/useAccountAuth'
 import { getHttpErrorMessage } from '~/utils/httpError'
 import AccountSecuritySettings from '~/components/account/AccountSecuritySettings.vue'
+import DistributionConsentSettings from '~/components/account/DistributionConsentSettings.vue'
 
 const accountStore = useAccountStore()
 const { loadMe, changePassword } = useAccountAuth()
@@ -128,6 +129,8 @@ async function onChangePassword() {
     </section>
 
     <AccountSecuritySettings />
+
+    <DistributionConsentSettings />
 
     <section v-if="accountStore.user" class="panel settings-card telegram-settings-card">
       <div class="settings-card__heading"><span class="settings-card__index">04</span><div><h2>Telegram</h2><p>Уведомления и привязка управляются только здесь.</p></div></div>

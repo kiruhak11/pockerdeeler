@@ -59,7 +59,15 @@ test('phone challenge is browser bound, persistent, one-use and creates opaque H
   await b.request('/api/auth/phone/complete', { id: a.id, username: 'forged', password }, 403)
   const verified = await b.request('/api/auth/phone/status', { id: a.id })
   assert.equal(verified.status, 'verified')
-  const signedIn = await b.request('/api/auth/phone/complete', { id: a.id, username: `phone_${randomUUID().slice(0, 8)}`, password })
+  const signedIn = await b.request('/api/auth/phone/complete', {
+    id: a.id,
+    username: `phone_${randomUUID().slice(0, 8)}`,
+    password,
+    ageConfirmed: true,
+    termsAccepted: true,
+    privacyAcknowledged: true,
+    personalDataConsent: true
+  })
   users.push(signedIn.user.id)
   assert.equal(signedIn.token, 'cookie-session')
   assert.equal(signedIn.user.phone, '+79993214567')

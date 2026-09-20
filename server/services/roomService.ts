@@ -22,6 +22,7 @@ import { toChipBigInt, toChipNumber } from '../utils/chips'
 import type { BuyInSettings, PredictionSettings, RoomSettings, RosterSettings } from '../../app/types/room'
 import { ACHIEVEMENTS } from './achievementService'
 import { notifyAdminTelegram } from './adminTelegramNotificationService'
+import { getDistributionPermissionsForUsers, type DistributionCategory } from './distributionConsentService'
 
 export interface CreateRoomPayload {
   accessMode?: 'public' | 'private'
@@ -114,7 +115,9 @@ function mapLastDistribution(log: DbAuditLog) {
   }
 }
 
-function mapPlayer(player: DbPlayer & { user?: { selectedAchievementCode: string | null; tableRating: number; predictionRating: number; premiumType: string; premiumSubscriptions: { plan: string }[]; achievements: { achievement: { code: string } }[]; seasonalRewards: { id: string }[] } | null }) {
+function mapPlayer(player: DbPlayer & { user?: { selectedAchievementCode: string | null; tableRating: number; predictionRating: number; premiumType: string; premiumSubscriptions: { plan: string }[]; achievements: { achievement: { code: string } }[]; seasonalRewards: { id: string }[] } | null }, permissions: Set<DistributionCategory> = new Set()) {
+  const exposeRating = permissions.has('RATING')
+  const exposeAchievements = permissions.has('ACHIEVEMENTS')
   return {
     id: player.id,
     roomId: player.roomId,
@@ -122,12 +125,11 @@ function mapPlayer(player: DbPlayer & { user?: { selectedAchievementCode: string
     memberId: player.memberId ?? undefined,
     participantId: player.participantId ?? '',
     name: player.name,
-    achievementIcon: player.user?.selectedAchievementCode || null,
-    achievementIcons: [...(player.user?.seasonalRewards.map(item => `season:${item.id}`) ?? []), ...(player.user?.achievements.map(item => item.achievement.code) ?? [])],
-    achievementCount: (player.user?.achievements.length ?? 0) + (player.user?.seasonalRewards.length ?? 0),
-    tableRating: player.user?.tableRating,
-    predictionRating: player.user?.predictionRating,
-    premiumType: player.user?.premiumSubscriptions.length || player.user?.premiumType === 'PREMIUM' ? 'PREMIUM' as const : 'FREE' as const,
+    achievementIcon: exposeAchievements ? player.user?.selectedAchievementCode || null : null,
+    achievementIcons: exposeAchievements ? [...(player.user?.seasonalRewards.map(item => `season:${item.id}`) ?? []), ...(player.user?.achievements.map(item => item.achievement.code) ?? [])] : [],
+    achievementCount: exposeAchievements ? (player.user?.achievements.length ?? 0) + (player.user?.seasonalRewards.length ?? 0) : 0,
+    tableRating: exposeRating ? player.user?.tableRating : undefined,
+    predictionRating: exposeRating ? player.user?.predictionRating : undefined,
     seat: player.seat,
     stack: player.stack,
     currentBet: player.currentBet,
@@ -1027,6 +1029,7 @@ export async function getRoomState(roomCode: string): Promise<RoomState> {
       orderBy: [{ seat: 'asc' }, { createdAt: 'asc' }],
       include: { user: { select: { selectedAchievementCode: true, tableRating: true, predictionRating: true, premiumType: true, premiumSubscriptions: { where: { status: 'ACTIVE', startedAt: { lte: new Date() }, expiresAt: { gt: new Date() } }, select: { plan: true }, take: 1 }, achievements: { select: { achievement: { select: { code: true } } }, orderBy: { unlockedAt: 'desc' } }, seasonalRewards: { select: { id: true }, orderBy: { createdAt: 'desc' } } } } }
     })
+    const permissionsByUser = await getDistributionPermissionsForUsers(players.map(player => player.userId).filter((userId): userId is string => Boolean(userId)), tx, false)
 
     const session = await tx.gameSession.findFirst({
       where: { roomId: room.id },
@@ -1074,7 +1077,7 @@ export async function getRoomState(roomCode: string): Promise<RoomState> {
 
     return {
       room: mapRoom(room),
-      players: players.map(mapPlayer),
+      players: players.map(player => mapPlayer(player, player.userId ? permissionsByUser.get(player.userId) : undefined)),
       currentSession: session ? mapSession(session) : null,
       currentHand: currentHand ? mapHand(currentHand) : null,
       actions: actions.map(mapAction),

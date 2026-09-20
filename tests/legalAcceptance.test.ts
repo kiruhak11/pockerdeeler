@@ -16,7 +16,7 @@ test('premium requires explicit terms confirmation', () => {
 test('virtual chips require three independent confirmations', () => {
   assert.throws(() => assertLegalConfirmations('VIRTUAL_CHIPS', { termsAccepted: true, ageConfirmed: true }))
   assert.throws(() => assertLegalConfirmations('VIRTUAL_CHIPS', { termsAccepted: true, virtualCurrencyAcknowledged: true }))
-  assert.doesNotThrow(() => assertLegalConfirmations('VIRTUAL_CHIPS', { termsAccepted: true, virtualCurrencyAcknowledged: true, ageConfirmed: true }))
+  assert.doesNotThrow(() => assertLegalConfirmations('VIRTUAL_CHIPS', { termsAccepted: true, virtualCurrencyAcknowledged: true, virtualChipsRulesAccepted: true, ageConfirmed: true }))
 })
 
 test('personal data consent remains separate from the offer', () => {

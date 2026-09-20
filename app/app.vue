@@ -25,6 +25,7 @@ watch(() => account.user?.id, () => void checkSeasonResults())
   <ClientOnly><PwaExperience /></ClientOnly>
   <div class="app-content"><NuxtPage /></div>
   <LegalFooter />
+  <CookieConsentManager />
   <BottomNav />
   <ToastList />
   <SeasonResultsModal v-if="seasonModalOpen" :summary="seasonSummary" @close="closeSeasonResults" />

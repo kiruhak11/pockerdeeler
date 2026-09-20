@@ -57,10 +57,10 @@ export function useAccountAuth() {
     return $fetch<PhoneVerification>('/api/auth/phone/status', { method: 'POST', body: { id }, retry: 0 })
   }
 
-  async function completePhone(id: string, password: string, username?: string) {
+  async function completePhone(id: string, password: string, username?: string, legal?: { ageConfirmed: boolean; termsAccepted: boolean; privacyAcknowledged: boolean; personalDataConsent: boolean }) {
     if (password.length < 12 || password.length > 128) throw new Error('Пароль: от 12 до 128 символов')
     const response = await $fetch<{ user: AccountUser; token: string }>('/api/auth/phone/complete', {
-      method: 'POST', body: { id, password, ...(username ? { username } : {}) }, retry: 0
+      method: 'POST', body: { id, password, ...(username ? { username } : {}), ...(legal || {}) }, retry: 0
     })
     accountStore.saveSession(response)
     return response.user

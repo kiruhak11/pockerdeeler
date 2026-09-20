@@ -16,6 +16,8 @@ const loading = ref(true)
 const paying = ref(false)
 const message = ref('')
 const consents = ref<ConsentState>({ termsAccepted: false, virtualCurrencyAcknowledged: false, ageConfirmed: false, personalDataConsent: false })
+const checkoutRequestId = ref<string | null>(null)
+watch(selectedPlan, () => { checkoutRequestId.value = null })
 const preferences = reactive({ theme: 'classic', frame: 'none', interfaceStyle: 'standard', nameColor: undefined as string | undefined, profilePreset: undefined as string | undefined, animatedFrame: false })
 
 const labels: Record<string, string> = {
@@ -61,8 +63,9 @@ async function startPremiumPayment() {
   paying.value = true
   message.value = ''
   try {
-    await $fetch('/api/legal/accept', { method: 'POST', body: { context: 'PREMIUM', requestId: crypto.randomUUID(), termsAccepted: true } })
-    const payment = await $fetch<{ confirmationUrl: string }>('/api/payments/premium/create', { method: 'POST', body: { plan: chosen.value.plan } })
+    const accepted = await $fetch<{ requestId: string }>('/api/legal/accept', { method: 'POST', body: { context: 'PREMIUM', plan: chosen.value.plan, requestId: checkoutRequestId.value || undefined, checkout: true, termsAccepted: true } })
+    checkoutRequestId.value = accepted.requestId
+    const payment = await $fetch<{ confirmationUrl: string }>('/api/payments/premium/create', { method: 'POST', body: { plan: chosen.value.plan, requestId: accepted.requestId } })
     window.location.assign(payment.confirmationUrl)
   } catch (error) {
     message.value = error instanceof Error ? error.message : 'Не удалось создать платёж'
@@ -85,7 +88,7 @@ useHead({ title: 'Premium · Poker Dealer Desk' })
       <div v-else class="plans"><article v-for="item in plans" :key="item.plan" class="plan" :class="[`plan--${item.plan.toLowerCase()}`, { selected: selectedPlan === item.plan, current: access?.plan === item.plan }]"><div class="plan__top"><span class="plan__code">{{ item.plan }}</span><PremiumBadge :plan="item.plan" :size="52"/><span v-if="item.plan === 'PRO'" class="popular">Популярный</span><span v-else-if="access?.plan === item.plan" class="current-mark">Текущий</span></div><h3>{{ item.name }}</h3><div class="price"><strong>{{ item.priceRub }} ₽</strong><span>/ {{ item.durationDays }} дней</span></div><p class="renewal">Разовая покупка · без автопродления</p><ul><li v-for="feature in item.features" :key="feature"><i>✓</i><span>{{ labels[feature] }}</span></li></ul><button type="button" :aria-pressed="selectedPlan === item.plan" @click="selectedPlan = item.plan">{{ selectedPlan === item.plan ? 'Выбран' : 'Выбрать' }}</button></article></div>
     </section>
 
-    <section class="checkout panel" aria-labelledby="premium-checkout-title"><div class="checkout__summary"><p class="eyebrow">ОФОРМЛЕНИЕ</p><h2 id="premium-checkout-title">{{ chosen?.name || 'Premium Pro' }}</h2><div><strong>{{ chosen?.priceRub || 299 }} ₽</strong><span>30 дней · без автопродления</span></div><p>Оплата проходит через ЮKassa. Premium активируется только после серверного подтверждения успешного платежа.</p><nav aria-label="Юридические документы Premium"><NuxtLink to="/legal/offer" target="_blank">Публичная оферта <AppIcon name="arrow-right" :size="14"/></NuxtLink><NuxtLink to="/legal/game-rules" target="_blank">Правила сервиса <AppIcon name="arrow-right" :size="14"/></NuxtLink><NuxtLink to="/legal/refunds" target="_blank">Условия возврата <AppIcon name="arrow-right" :size="14"/></NuxtLink></nav></div><div class="checkout__action"><LegalConsentFields v-model="consents" mode="PREMIUM" /><button type="button" :disabled="paying || !consents.termsAccepted" @click="startPremiumPayment">{{ paymentLabel }}</button><small>Галочка не отмечена заранее. Автопродления и сохранения карты нет.</small><span v-if="message" class="payment-message">{{ message }}</span></div></section>
+    <section class="checkout panel" aria-labelledby="premium-checkout-title"><div class="checkout__summary"><p class="eyebrow">ОФОРМЛЕНИЕ</p><h2 id="premium-checkout-title">{{ chosen?.name || 'Premium Pro' }}</h2><div><strong>{{ chosen?.priceRub || 299 }} ₽</strong><span>30 дней · без автопродления</span></div><p>Оплата проходит через ЮKassa. Premium активируется только после серверного подтверждения успешного платежа.</p><nav aria-label="Юридические документы Premium"><NuxtLink to="/legal/offer" target="_blank">Публичная оферта <AppIcon name="arrow-right" :size="14"/></NuxtLink><NuxtLink to="/legal/refunds" target="_blank">Политика возвратов <AppIcon name="arrow-right" :size="14"/></NuxtLink></nav></div><div class="checkout__action"><LegalConsentFields v-model="consents" mode="PREMIUM" /><button type="button" :disabled="paying || !consents.termsAccepted" @click="startPremiumPayment">{{ paymentLabel }}</button><small>Галочка не отмечена заранее. Автопродления и сохранения карты нет.</small><span v-if="message" class="payment-message">{{ message }}</span></div></section>
 
     <section v-if="summary" class="premium-summary"><article><small>Баланс</small><strong>{{ summary.balance.toLocaleString('ru-RU') }}</strong></article><article><small>Покер</small><strong>{{ summary.poker.wins }} / {{ summary.poker.hands }}</strong></article><article><small>Мини-игры</small><strong>{{ summary.miniGames.rocketGames + summary.miniGames.minesGames }}</strong></article></section>
     <section v-if="access?.achievements.length" class="premium-achievements panel"><article v-for="achievement in access.achievements" :key="achievement.code"><AchievementBadge :code="achievement.code" :size="30"/><div><strong>{{ achievement.title }}</strong><small>{{ achievement.description }}</small></div></article></section>

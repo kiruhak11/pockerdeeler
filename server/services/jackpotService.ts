@@ -4,6 +4,7 @@ import { prisma } from '../db/client'
 import { drawWinners, splitJackpotTenths, JACKPOT_SHARES } from '../utils/jackpotMath'
 import { adjustUserWallet } from './walletService'
 import { verifyUserAuthToken } from './userAccountService'
+import { getDistributionPermissionsForUsers } from './distributionConsentService'
 
 type Tx = Prisma.TransactionClient
 export async function jackpotParticipants(tx: Tx, season: Pick<Season, 'startsAt' | 'finalizedAt' | 'number'>) {
@@ -47,9 +48,13 @@ export async function finalizeJackpot(tx: Tx, season: Season) {
 export async function jackpotState(token?: string | null) {
   const auth = token ? await verifyUserAuthToken(token) : null
   const draws = await prisma.jackpotDraw.findMany({ orderBy: { seasonNumber: 'desc' }, include: { prizes: { orderBy: { place: 'asc' } } } })
+  const permissionsByUser = await getDistributionPermissionsForUsers(draws.flatMap(draw => draw.prizes.map(prize => prize.userId)))
   return { shares: JACKPOT_SHARES, currentUserId: auth?.userId ?? null, history: draws.map(draw => ({
     id: draw.id, seasonNumber: draw.seasonNumber, pot: Number(draw.pot), createdAt: draw.createdAt.toISOString(),
-    prizes: draw.prizes.map(prize => ({ id: prize.id, place: prize.place, username: prize.username, amount: Number(prize.amount), claimedAt: prize.claimedAt?.toISOString() ?? null, mine: prize.userId === auth?.userId }))
+    prizes: draw.prizes.flatMap(prize => {
+      const visible = prize.userId === auth?.userId || permissionsByUser.get(prize.userId)?.has('WIN_HISTORY')
+      return visible ? [{ id: prize.id, place: prize.place, username: prize.username, amount: Number(prize.amount), claimedAt: prize.claimedAt?.toISOString() ?? null, mine: prize.userId === auth?.userId }] : []
+    })
   })) }
 }
 

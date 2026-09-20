@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { PrismaClient } from '@prisma/client'
 import { registerUser } from '../server/services/userAccountService'
-import { minesField, minesTerms } from '../server/utils/minesMath'
+import { minesField, minesLimit, minesTerms } from '../server/utils/minesMath'
 const base=process.env.TEST_BASE_URL || 'http://127.0.0.1:3106'
 assert.ok(['localhost','127.0.0.1'].includes(new URL(base).hostname))
 assert.match(process.env.DATABASE_URL || '', /(:55439\/|_test)/)
@@ -21,8 +21,11 @@ async function account(role='USER',balance=5000){
 }
 async function total(){
   const wallets=await db.userWallet.aggregate({_sum:{balance:true}})
+  const achievements=await db.walletLedgerEntry.aggregate({where:{entryType:'ACHIEVEMENT_REWARD'},_sum:{amount:true}})
   const active=await db.miniGameSession.findMany({where:{status:'ACTIVE'}})
-  return (wallets._sum.balance || 0n)+active.reduce((sum,s)=>sum+s.stake+s.bankReserve,0n)
+  // Achievement rewards are an independent, intentional emission. Exclude
+  // them so this helper checks only the Mines wallet/reserve conservation.
+  return (wallets._sum.balance || 0n)-(achievements._sum.amount || 0n)+active.reduce((sum,s)=>sum+s.stake+s.bankReserve,0n)
 }
 async function start(user:{token:string},extra:Record<string,unknown>={}){
   const commit=await req('/api/mines/prepare',{},user.token)
@@ -35,7 +38,7 @@ async function start(user:{token:string},extra:Record<string,unknown>={}){
 async function cells(id:string){
   const s=await db.miniGameSession.findUniqueOrThrow({where:{id}})
   const mines=minesField(s.serverSeed!,s.clientSeed!,s.nonce,s.mines!)
-  return {mine:mines.find(i=>Math.floor(i/5)===0)!,safe:Array.from({length:25},(_,i)=>i).filter(i=>!mines.includes(i) && Math.floor(i/5)===0)}
+  return {mine:mines[0]!,safe:Array.from({length:25},(_,i)=>i).filter(i=>!mines.includes(i))}
 }
 let house:{id:string;token:string}
 test('Mines start reserve, restore, concurrent safe open and double cashout conserve chips',async()=>{
@@ -44,6 +47,9 @@ test('Mines start reserve, restore, concurrent safe open and double cashout cons
   const before=await total()
   const {input,session}=await start(user)
   assert.equal(await total(),before)
+  const stored=await db.miniGameSession.findUniqueOrThrow({where:{id:session.id}})
+  assert.equal(stored.bankReserve,stored.maxPayout)
+  assert.equal((await db.walletLedgerEntry.findUniqueOrThrow({where:{idempotencyKey:'mines:bank-reserve:'+session.id}})).amount,-stored.bankReserve)
   assert.ok(!('serverSeed' in session) && !('mineCells' in session))
   assert.equal((await req('/api/mines/state',undefined,user.token)).active.id,session.id)
   await req('/api/mines/cashout',{sessionId:session.id},user.token,409)
@@ -83,6 +89,13 @@ test('concurrent distinct starts allow one active session; cashout racing mine i
   const raced=await Promise.all(['open','cashout'].map(path=>fetch(base+'/api/mines/'+path,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+user.token},body:JSON.stringify({sessionId:session.id,...(path==='open'?{cell:mine}:{})})})))
   assert.equal(raced.filter(r=>r.status===200).length,1)
   assert.equal(await total(),before)
+  const other=await account()
+  const parallelBefore=await total()
+  const [parallelA,parallelB]=await Promise.all([start(user,{clientSeed:'parallel-a'}),start(other,{clientSeed:'parallel-b'})])
+  assert.equal(await total(),parallelBefore)
+  await req('/api/mines/open',{sessionId:parallelA.session.id,cell:(await cells(parallelA.session.id)).mine},user.token)
+  await req('/api/mines/open',{sessionId:parallelB.session.id,cell:(await cells(parallelB.session.id)).mine},other.token)
+  assert.equal(await total(),parallelBefore)
 })
 test('bank cannot promise uncovered payout and max payout automatically cashes out',async()=>{
   const user=await account()
@@ -94,9 +107,18 @@ test('bank cannot promise uncovered payout and max payout automatically cashes o
   await db.userWallet.update({where:{userId:house.id},data:{balance:original.balance}})
   const baseline=await total(),{session}=await req('/api/mines/start',input,user.token),{safe}=await cells(session.id)
   let current=session
-  for(let column=0;column<5;column++){const cell=minesField(session.serverSeed!,session.clientSeed!,session.nonce,session.mines!).find(i=>Math.floor(i/5)===column)!; const safeCell=Array.from({length:5},(_,i)=>column*5+i).find(i=>i!==cell)!; current=(await req('/api/mines/open',{sessionId:session.id,cell:safeCell},user.token)).session;if(current.status!=='ACTIVE')break}
-  assert.equal(current.status,'CASHED_OUT');assert.equal(current.payout,1200)
+  for(const safeCell of safe){current=(await req('/api/mines/open',{sessionId:session.id,cell:safeCell},user.token)).session;if(current.status!=='ACTIVE')break}
+  assert.equal(current.status,'CASHED_OUT');assert.equal(current.payout,Number(minesTerms(100n,10,current.safeOpened,1_000_000n).payout))
   assert.equal(await total(),baseline)
+  const exactReserve=minesLimit(100n,10)
+  await db.userWallet.update({where:{userId:house.id},data:{balance:exactReserve}})
+  const exactBaseline=await total(),exactGame=await start(user,{clientSeed:'exact-reserve-boundary'})
+  const exactStored=await db.miniGameSession.findUniqueOrThrow({where:{id:exactGame.session.id}})
+  assert.equal(exactStored.bankReserve,exactReserve)
+  assert.equal(await total(),exactBaseline)
+  await req('/api/mines/open',{sessionId:exactGame.session.id,cell:(await cells(exactGame.session.id)).mine},user.token)
+  assert.equal(await total(),exactBaseline)
+  await db.userWallet.update({where:{userId:house.id},data:{balance:original.balance}})
 })
 async function room(){
   const r=await req('/api/rooms/create',{name:'Overhaul test',startingStack:1000,smallBlind:5,bigBlind:10,maxPlayers:8,allowLateJoin:true,requireDealerActionApproval:false,allowSpectators:true,buyIn:{enabled:true,minBuyIn:100,maxBuyIn:2000,allowTopUp:true},predictions:{enabled:true}})

@@ -1,7 +1,8 @@
 import { randomBytes, randomUUID } from 'node:crypto'
-import { createError, getCookie, setCookie, type H3Event } from 'h3'
+import { createError, getCookie, getRequestHeader, getRequestIP, setCookie, type H3Event } from 'h3'
 import { prisma } from '../db/client'
 import { hashPassword, sessionHash, issueUserAuthToken, getUserProfile, getUserByToken } from './userAccountService'
+import { acceptRegistrationLegalDocuments, assertRegistrationLegalConfirmations, type RegistrationLegalConfirmationInput } from './legalService'
 import { isolatedAuthTests, accountCookie } from '../utils/accountCookie'
 
 export function normalizePhone(value: string): string {
@@ -87,11 +88,11 @@ export async function pollPhoneVerification(event: H3Event, id: string) {
     return view(await tx.phoneVerification.update({ where: { id }, data: { status, checkedAt: new Date() } }))
   }, { timeout: 12000 })
 }
-export async function completePhoneVerification(event: H3Event, input: { id: string; username?: string; password: string }) {
+export async function completePhoneVerification(event: H3Event, input: { id: string; username?: string; password: string; legal?: RegistrationLegalConfirmationInput }) {
   const browserHash = verificationBrowser(event)
   if (input.password.length < 12 || input.password.length > 128) throw createError({ statusCode: 400, message: 'Пароль: от 12 до 128 символов' })
   const linkedUser = accountCookie(event) ? await getUserByToken(accountCookie(event)) : null
-  const userId = await prisma.$transaction(async tx => {
+  const result = await prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT id FROM phone_verifications WHERE id = ${input.id}::uuid FOR UPDATE`
     const v = await tx.phoneVerification.findUnique({ where: { id: input.id } })
     if (!v || v.browserHash !== browserHash || v.status !== 'verified' || v.consumedAt || v.expiresAt <= new Date()) throw createError({ statusCode: 403, message: 'Сначала подтвердите номер звонком' })
@@ -101,10 +102,19 @@ export async function completePhoneVerification(event: H3Event, input: { id: str
       const username = input.username?.trim().toLowerCase()
       if (!username || username.length < 3 || username.length > 32) throw createError({ statusCode: 400, message: 'Имя: от 3 до 32 символов' })
       if (owner || await tx.user.findUnique({ where: { username } })) throw createError({ statusCode: 409, message: 'Номер или имя уже заняты. Войдите или восстановите доступ' })
+      if (!input.legal) throw createError({ statusCode: 400, message: 'Перед созданием аккаунта примите обязательные юридические документы' })
+      assertRegistrationLegalConfirmations(input.legal)
       const u = await tx.user.create({ data: { username, phone: v.phone, phoneVerifiedAt: new Date(), passwordHash: hashPassword(input.password), balance: 5000 } })
       const wallet = await tx.userWallet.create({ data: { userId: u.id, balance: 5000n } })
       await tx.walletLedgerEntry.create({ data: { walletId: wallet.id, transferId: randomUUID(), entryType: 'ACCOUNT_OPENING_GRANT', amount: 5000n, balanceAfter: 5000n, idempotencyKey: `wallet-opening:${u.id}` } })
       id = u.id
+      await acceptRegistrationLegalDocuments(tx, {
+        userId: id,
+        requestId: v.requestId,
+        confirmations: input.legal,
+        ip: getRequestIP(event, { xForwardedFor: true }) || 'unknown',
+        userAgent: getRequestHeader(event, 'user-agent') || 'unknown'
+      })
     } else {
       const target = v.purpose === 'link' ? linkedUser : owner
       if (!target || target.blockedAt || target.deletedAt || (owner && owner.id !== target.id)) throw createError({ statusCode: 403, message: 'Аккаунт недоступен или номер уже занят' })
@@ -113,8 +123,7 @@ export async function completePhoneVerification(event: H3Event, input: { id: str
       id = target.id
     }
     await tx.phoneVerification.update({ where: { id: v.id }, data: { status: 'consumed', consumedAt: new Date() } })
-    return id
+    return { id, token: await issueUserAuthToken(id, tx) }
   })
-  const token = await issueUserAuthToken(userId)
-  return { user: await getUserProfile(token), token }
+  return { user: await getUserProfile(result.token), token: result.token }
 }

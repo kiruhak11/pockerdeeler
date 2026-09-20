@@ -37,9 +37,9 @@ export function verifyPassword(password: string, storedHash: string): boolean {
 
 export function sessionHash(token: string): string { return createHash('sha256').update(token).digest('hex') }
 
-export async function issueUserAuthToken(userId: string): Promise<string> {
+export async function issueUserAuthToken(userId: string, client: Pick<Prisma.TransactionClient, 'accountSession'> = prisma): Promise<string> {
   const token = randomBytes(32).toString('base64url')
-  await prisma.accountSession.create({ data: { userId, tokenHash: sessionHash(token), expiresAt: new Date(Date.now() + TOKEN_TTL_MS) } })
+  await client.accountSession.create({ data: { userId, tokenHash: sessionHash(token), expiresAt: new Date(Date.now() + TOKEN_TTL_MS) } })
   return token
 }
 

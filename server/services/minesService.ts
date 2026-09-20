@@ -68,14 +68,14 @@ async function finish(tx: Tx, session: MiniGameSession, status: 'LOST' | 'CASHED
   const throttled = await recentMiniGameThrottle(tx, { game: 'mines', userId: session.userId, payout: rawPayout })
   const payout = throttled.payout
   const modernEconomy = session.createdAt >= ECONOMY_CUTOFF
-  await lockUsers(tx, modernEconomy ? [session.userId] : [session.userId, session.bankUserId])
+  await lockUsers(tx, [session.userId, session.bankUserId])
   const sameAsBank = session.userId === session.bankUserId
   const returned = session.stake + session.bankReserve - payout
-  if (!modernEconomy && !sameAsBank && returned < 0n) throw new Error('Mines reserve invariant violated')
+  if (!sameAsBank && returned < 0n) throw new Error('Mines reserve invariant violated')
   await tx.walletLedgerEntry.update({ where: { idempotencyKey: `mines:stake:${session.id}` }, data: { metadata: { sessionId: session.id, mines: session.mines, outcome: status, payout: Number(payout), stake: Number(session.stake), recentNet: Number(throttled.recentNet), throttleBps: throttled.factorBps } } })
   if (modernEconomy) await settleMiniGameEconomy(tx, { game: 'mines', userId: session.userId, stake: session.stake, payout, referenceId: session.id })
   if (payout) await adjustUserWallet(tx, { userId: session.userId, delta: payout, entryType: 'MINES_PAYOUT', transferId: session.id, idempotencyKey: `mines:payout:${session.id}`, metadata: { sessionId: session.id, mines: session.mines, safeOpened: opened.length } })
-  if (!modernEconomy && returned && !sameAsBank) await adjustUserWallet(tx, { userId: session.bankUserId, delta: returned, entryType: 'MINES_BANK_SETTLEMENT', transferId: session.id, idempotencyKey: `mines:bank-return:${session.id}`, metadata: { sessionId: session.id, outcome: status, reserveReturned: Number(session.bankReserve), playerPayout: Number(payout), netProfit: Number(session.stake - payout) } })
+  if (returned && !sameAsBank) await adjustUserWallet(tx, { userId: session.bankUserId, delta: returned, entryType: 'MINES_BANK_SETTLEMENT', transferId: session.id, idempotencyKey: `mines:bank-return:${session.id}`, metadata: { sessionId: session.id, outcome: status, reserveReturned: Number(session.bankReserve), playerPayout: Number(payout), netProfit: Number(session.stake - payout) } })
   const updated = await tx.miniGameSession.update({ where: { id: session.id }, data: { status, multiplier: status === 'LOST' ? sessionTerms(session, Math.max(0, opened.length - 1)).multiplier : sessionTerms(session, opened.length).multiplier, openedCells: opened, mineCells: minesField(session.serverSeed!, session.clientSeed!, session.nonce, session.mines!), payout, finishedAt: new Date() } })
   const wallet = await tx.userWallet.findUniqueOrThrow({ where: { userId: session.userId }, select: { balance: true } })
   return { ...view(updated), balance: Number(wallet.balance) }
@@ -125,7 +125,10 @@ export async function startMines(token: string | null | undefined, input: { stak
     const playerWallet = await tx.userWallet.findUniqueOrThrow({ where: { userId: id } })
     if (playerWallet.balance < stake) throw createError({ statusCode: 409, statusMessage: 'В кошельке недостаточно фишек для этой ставки' })
     const maxPayout = theoreticalMaxPayout
-    const reserve = 0n
+    // Move the full potential liability out of the bank wallet before the
+    // session becomes active. This preserves the wallet/ledger total and
+    // rejects insufficient coverage before the player's stake is debited.
+    const reserve = maxPayout
     await tx.minesCommitment.update({ where: { id: commitment.id }, data: { consumedAt: new Date() } })
     const session = await tx.miniGameSession.create({ data: { userId: id, game: 'mines', status: 'ACTIVE', stake, mines: input.mines, serverSeed: commitment.serverSeed, serverSeedHash: commitment.seedHash, clientSeed: input.clientSeed, idempotencyKey: key, openedCells: [], multiplier: 1, bankUserId: bankId, bankReserve: reserve, maxPayout } })
     await adjustUserWallet(tx, { userId: id, delta: -stake, entryType: 'MINES_STAKE', transferId: session.id, idempotencyKey: `mines:stake:${session.id}`, metadata: { sessionId: session.id, mines: input.mines } })

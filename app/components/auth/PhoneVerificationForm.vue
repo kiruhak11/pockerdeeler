@@ -14,6 +14,10 @@ const phone = ref('')
 const username = ref('')
 const password = ref('')
 const confirmPassword = ref('')
+const ageConfirmed = ref(false)
+const termsAccepted = ref(false)
+const privacyAcknowledged = ref(false)
+const personalDataConsent = ref(false)
 const busy = ref(false)
 const error = ref('')
 const checked = ref(false)
@@ -87,11 +91,20 @@ async function complete() {
   if (busy.value || !verified.value || !saved.value || !verification.value) return
   error.value = ''
   if (password.value !== confirmPassword.value) { error.value = 'Подтверждение пароля не совпадает'; return }
+  if (purpose.value === 'register' && (!ageConfirmed.value || !termsAccepted.value || !privacyAcknowledged.value || !personalDataConsent.value)) {
+    error.value = 'Для создания аккаунта подтвердите возраст и обязательные юридические документы'
+    return
+  }
   busy.value = true
   try {
     saved.value.completing = true
     persist()
-    await auth.completePhone(verification.value.id, password.value, purpose.value === 'register' ? username.value.trim() : undefined)
+    await auth.completePhone(verification.value.id, password.value, purpose.value === 'register' ? username.value.trim() : undefined, purpose.value === 'register' ? {
+      ageConfirmed: ageConfirmed.value,
+      termsAccepted: termsAccepted.value,
+      privacyAcknowledged: privacyAcknowledged.value,
+      personalDataConsent: personalDataConsent.value
+    } : undefined)
     done()
   } catch (e) {
     error.value = getHttpErrorMessage(e, 'Ответ не получен. Проверьте результат, не создавая новую заявку.')
@@ -170,6 +183,13 @@ onBeforeUnmount(() => {
         <label>Повторите пароль
           <input v-model="confirmPassword" class="input" type="password" autocomplete="new-password" minlength="12" maxlength="128" required>
         </label>
+        <fieldset v-if="purpose === 'register'" class="phone-flow__legal">
+          <legend>Обязательные подтверждения</legend>
+          <label><input v-model="ageConfirmed" type="checkbox" required> Мне исполнилось 18 лет</label>
+          <label><input v-model="termsAccepted" type="checkbox" required> Я принимаю <a href="/legal/user-agreement" target="_blank" rel="noopener">Пользовательское соглашение</a></label>
+          <label><input v-model="privacyAcknowledged" type="checkbox" required> Я ознакомился(лась) с <a href="/legal/privacy" target="_blank" rel="noopener">Политикой конфиденциальности</a></label>
+          <label><input v-model="personalDataConsent" type="checkbox" required> Я даю отдельное <a href="/legal/personal-data-consent" target="_blank" rel="noopener">согласие на обработку персональных данных</a></label>
+        </fieldset>
         <button class="btn" :disabled="busy">{{ busy ? 'Сохраняем...' : purpose === 'register' ? 'Создать аккаунт' : 'Сохранить номер и пароль' }}</button>
       </form>
       <button v-if="!verified || saved.completing" class="btn btn--ghost" :disabled="busy" @click="check">Проверить результат</button>
@@ -180,5 +200,5 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped lang="scss">
-.phone-flow { display: grid; gap: 0.8rem; min-width: 0; p { margin: 0; color: var(--text-muted); line-height: 1.5; } &__form { display: grid; gap: 0.9rem; } label { display: grid; gap: 0.4rem; } &__number { font-size: 1.2rem; text-align: center; text-decoration: none; overflow-wrap: anywhere; } p#{&}__error { color: var(--danger); } p#{&}__success { color: var(--success); } .btn { min-height: 46px; } }
+.phone-flow { display: grid; gap: 0.8rem; min-width: 0; p { margin: 0; color: var(--text-muted); line-height: 1.5; } &__form { display: grid; gap: 0.9rem; } label { display: grid; gap: 0.4rem; } &__number { font-size: 1.2rem; text-align: center; text-decoration: none; overflow-wrap: anywhere; } &__legal { display: grid; gap: 0.55rem; margin: 0; padding: 0.8rem; border: 1px solid color-mix(in srgb, var(--text-muted) 35%, transparent); border-radius: 0.6rem; } &__legal legend { padding: 0 0.25rem; color: var(--text); font-weight: 600; } &__legal label { display: flex; align-items: flex-start; gap: 0.5rem; line-height: 1.4; } &__legal input { flex: 0 0 auto; margin-top: 0.2rem; } &__legal a { overflow-wrap: anywhere; } p#{&}__error { color: var(--danger); } p#{&}__success { color: var(--success); } .btn { min-height: 46px; } }
 </style>

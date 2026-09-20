@@ -1,27 +1,56 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { createError } from 'h3'
 import type { Prisma } from '@prisma/client'
 import { legalDocumentSnapshots, type LegalDocumentType } from '../../app/data/legalDocuments'
 import { prisma } from '../db/client'
+import { getPremiumPaymentPlan, getVirtualCurrencyPackage } from './paymentCatalog'
 
 export const legalAcceptanceContexts = ['PREMIUM', 'VIRTUAL_CHIPS', 'PERSONAL_DATA'] as const
 export type LegalAcceptanceContext = typeof legalAcceptanceContexts[number]
 
 const requiredTypes: Record<LegalAcceptanceContext, LegalDocumentType[]> = {
-  PREMIUM: ['OFFER', 'GAME_RULES'],
-  VIRTUAL_CHIPS: ['OFFER', 'GAME_RULES', 'VIRTUAL_CURRENCY_NOTICE', 'AGE_CONFIRMATION'],
+  PREMIUM: ['PUBLIC_OFFER'],
+  VIRTUAL_CHIPS: ['PUBLIC_OFFER', 'VIRTUAL_CHIPS_RULES', 'GAME_RULES', 'VIRTUAL_CURRENCY_NOTICE', 'AGE_CONFIRMATION'],
   PERSONAL_DATA: ['PERSONAL_DATA_CONSENT']
 }
 
 export type LegalConfirmationInput = {
   termsAccepted?: boolean
+  privacyAcknowledged?: boolean
   virtualCurrencyAcknowledged?: boolean
+  virtualChipsRulesAccepted?: boolean
   ageConfirmed?: boolean
   personalDataConsent?: boolean
 }
 
+export type RegistrationLegalConfirmationInput = {
+  termsAccepted?: boolean
+  privacyAcknowledged?: boolean
+  ageConfirmed?: boolean
+  personalDataConsent?: boolean
+}
+
+const registrationRequiredTypes: LegalDocumentType[] = ['USER_AGREEMENT', 'PRIVACY_POLICY', 'PERSONAL_DATA_CONSENT', 'AGE_CONFIRMATION']
+
+export type LegalAcceptanceInput = {
+  userId: string
+  context: LegalAcceptanceContext
+  confirmations: LegalConfirmationInput
+  requestId?: string
+  productKey?: string
+  checkout?: boolean
+  ip: string
+  userAgent: string
+  paymentId?: string | null
+  orderId?: string | null
+}
+
 export function legalContentHash(content: string) {
   return createHash('sha256').update(content, 'utf8').digest('hex')
+}
+
+function isUniqueConstraint(error: unknown) {
+  return !!error && typeof error === 'object' && 'code' in error && error.code === 'P2002'
 }
 
 export function assertLegalConfirmations(context: LegalAcceptanceContext, input: LegalConfirmationInput) {
@@ -31,6 +60,9 @@ export function assertLegalConfirmations(context: LegalAcceptanceContext, input:
   if (context === 'VIRTUAL_CHIPS' && input.virtualCurrencyAcknowledged !== true) {
     throw createError({ statusCode: 400, message: 'Подтвердите условия использования виртуальных фишек' })
   }
+  if (context === 'VIRTUAL_CHIPS' && input.virtualChipsRulesAccepted !== true) {
+    throw createError({ statusCode: 400, message: 'Примите Правила виртуальных фишек' })
+  }
   if (context === 'VIRTUAL_CHIPS' && input.ageConfirmed !== true) {
     throw createError({ statusCode: 400, message: 'Подтвердите, что вам исполнилось 18 лет' })
   }
@@ -39,27 +71,44 @@ export function assertLegalConfirmations(context: LegalAcceptanceContext, input:
   }
 }
 
+export function assertRegistrationLegalConfirmations(input: RegistrationLegalConfirmationInput) {
+  if (input.ageConfirmed !== true) throw createError({ statusCode: 400, message: 'Подтвердите, что вам исполнилось 18 лет' })
+  if (input.termsAccepted !== true) throw createError({ statusCode: 400, message: 'Примите Пользовательское соглашение' })
+  if (input.privacyAcknowledged !== true) throw createError({ statusCode: 400, message: 'Подтвердите ознакомление с Политикой конфиденциальности' })
+  if (input.personalDataConsent !== true) throw createError({ statusCode: 400, message: 'Дайте отдельное согласие на обработку персональных данных' })
+}
+
 export async function ensureLegalDocuments(client: Prisma.TransactionClient | typeof prisma = prisma) {
   const idsByType = new Map<LegalDocumentType, string>()
   const now = Date.now()
 
   for (const snapshot of legalDocumentSnapshots) {
     const contentHash = legalContentHash(snapshot.content)
-    const row = await client.legalDocument.upsert({
-      where: { type_version: { type: snapshot.type, version: snapshot.version } },
-      create: {
-        type: snapshot.type,
-        version: snapshot.version,
-        title: snapshot.title,
-        content: snapshot.content,
-        contentPath: snapshot.publicPath,
-        contentHash,
-        effectiveFrom: new Date(snapshot.effectiveFrom),
-        publishedAt: new Date(snapshot.publishedAt),
-        isActive: false
-      },
-      update: {}
-    })
+    let row
+    try {
+      row = await client.legalDocument.upsert({
+        where: { type_version: { type: snapshot.type, version: snapshot.version } },
+        create: {
+          type: snapshot.type,
+          version: snapshot.version,
+          title: snapshot.title,
+          content: snapshot.content,
+          contentPath: snapshot.publicPath,
+          contentHash,
+          effectiveFrom: new Date(snapshot.effectiveFrom),
+          publishedAt: new Date(snapshot.publishedAt),
+          isActive: false
+        },
+        update: {}
+      })
+    } catch (error) {
+      // A standalone client can recover by reading the winner. A transaction
+      // cannot continue after PostgreSQL rejected its statement, so let the
+      // outer transaction retry instead of issuing a query in the aborted tx.
+      if (!isUniqueConstraint(error)) throw error
+      if (client !== prisma) throw error
+      row = await client.legalDocument.findUniqueOrThrow({ where: { type_version: { type: snapshot.type, version: snapshot.version } } })
+    }
     if (row.contentHash !== contentHash || row.content !== snapshot.content || row.title !== snapshot.title || row.contentPath !== snapshot.publicPath) {
       throw createError({ statusCode: 500, message: `Редакция ${snapshot.type} ${snapshot.version} уже опубликована с другим содержанием. Создайте новую версию.` })
     }
@@ -100,19 +149,61 @@ export async function assertCurrentLegalAccepted(userId: string, context: LegalA
   return documents
 }
 
-export async function acceptCurrentLegalDocuments(input: {
-  userId: string
-  context: LegalAcceptanceContext
-  confirmations: LegalConfirmationInput
-  requestId: string
-  ip: string
-  userAgent: string
-  paymentId?: string | null
-  orderId?: string | null
-}) {
+async function assertRequestOwnership(tx: Prisma.TransactionClient, requestId: string, userId: string, context: LegalAcceptanceContext) {
+  const existing = await tx.legalAcceptance.findMany({ where: { requestId }, select: { userId: true, context: true } })
+  if (existing.some(row => row.userId !== userId)) throw createError({ statusCode: 409, message: 'Идентификатор запроса принадлежит другому пользователю' })
+  if (existing.some(row => row.context !== context && !(context !== 'PERSONAL_DATA' && row.context === 'PERSONAL_DATA'))) {
+    throw createError({ statusCode: 409, message: 'Идентификатор запроса уже использован в другом контексте' })
+  }
+}
+
+async function ensureCheckoutSession(tx: Prisma.TransactionClient, input: { userId: string; context: LegalAcceptanceContext; requestId?: string; productKey?: string }) {
+  if (input.requestId) {
+    const session = await tx.legalCheckoutSession.findUnique({ where: { id: input.requestId } })
+    if (!session) throw createError({ statusCode: 409, message: 'Checkout не найден или уже недоступен' })
+    if (session.userId !== input.userId) throw createError({ statusCode: 403, message: 'Checkout принадлежит другому пользователю' })
+    if (session.context !== input.context) throw createError({ statusCode: 409, message: 'Контекст checkout не совпадает' })
+    if (input.productKey) {
+      const product = input.context === 'VIRTUAL_CHIPS' ? getVirtualCurrencyPackage(input.productKey) : input.context === 'PREMIUM' ? getPremiumPaymentPlan(input.productKey) : null
+      const expectedPaymentType = input.context === 'VIRTUAL_CHIPS' ? 'VIRTUAL_CURRENCY' : input.context === 'PREMIUM' ? 'PREMIUM' : null
+      const expectedProductKey = product ? ('packageId' in product ? product.packageId : product.plan) : null
+      if (!product || !expectedPaymentType || !expectedProductKey) throw createError({ statusCode: 400, message: 'Товар checkout не найден' })
+      if (session.paymentType && session.paymentType !== expectedPaymentType) throw createError({ statusCode: 409, message: 'Checkout уже связан с другим продуктом' })
+      if (session.productKey && session.productKey !== expectedProductKey) throw createError({ statusCode: 409, message: 'Checkout уже связан с другим товаром' })
+      if (!session.paymentType || !session.productKey) {
+        return tx.legalCheckoutSession.update({ where: { id: session.id }, data: { paymentType: expectedPaymentType, productKey: expectedProductKey } })
+      }
+    }
+    return session
+  }
+  const product = input.context === 'VIRTUAL_CHIPS' && input.productKey ? getVirtualCurrencyPackage(input.productKey) : input.context === 'PREMIUM' && input.productKey ? getPremiumPaymentPlan(input.productKey) : null
+  if (input.productKey && !product) throw createError({ statusCode: 400, message: 'Товар checkout не найден' })
+  const paymentType = input.context === 'VIRTUAL_CHIPS' && product ? 'VIRTUAL_CURRENCY' : input.context === 'PREMIUM' && product ? 'PREMIUM' : undefined
+  const productKey = product ? ('packageId' in product ? product.packageId : product.plan) : undefined
+  return tx.legalCheckoutSession.create({ data: { userId: input.userId, context: input.context, paymentType, productKey } })
+}
+
+function isSerializationConflict(error: unknown) {
+  if (!error || typeof error !== 'object') return false
+  const code = 'code' in error ? error.code : undefined
+  const meta = 'meta' in error && error.meta && typeof error.meta === 'object' ? error.meta as { code?: string; message?: string } : undefined
+  return code === 'P2034' || code === 'P2002' || (code === 'P2010' && meta?.code === '40001') || meta?.message?.includes('could not serialize access') === true
+}
+
+export async function acceptCurrentLegalDocuments(input: LegalAcceptanceInput) {
   assertLegalConfirmations(input.context, input.confirmations)
-  return prisma.$transaction(async tx => {
-    await ensureLegalDocuments(tx)
+  // The registry is append-only and is shared by every checkout. Initialize
+  // it before the Serializable acceptance transaction so parallel checkouts
+  // do not contend on the same upsert/update statements.
+  await ensureLegalDocuments()
+  const transaction = () => prisma.$transaction(async tx => {
+    const requestId = input.checkout
+      ? (await ensureCheckoutSession(tx, { userId: input.userId, context: input.context, requestId: input.requestId, productKey: input.productKey })).id
+      : (input.requestId || randomUUID())
+    if (!input.checkout && input.requestId && await tx.legalCheckoutSession.findUnique({ where: { id: input.requestId }, select: { id: true } })) {
+      throw createError({ statusCode: 409, message: 'Checkout acceptance требует checkout-контекст' })
+    }
+    await assertRequestOwnership(tx, requestId, input.userId, input.context)
     const types = [...requiredTypes[input.context]]
     if (input.context !== 'PERSONAL_DATA' && input.confirmations.personalDataConsent === true) types.push('PERSONAL_DATA_CONSENT')
     const documents = await tx.legalDocument.findMany({ where: { type: { in: types }, isActive: true, effectiveFrom: { lte: new Date() } } })
@@ -121,7 +212,7 @@ export async function acceptCurrentLegalDocuments(input: {
     for (const document of documents) {
       const acceptanceContext: LegalAcceptanceContext = document.type === 'PERSONAL_DATA_CONSENT' ? 'PERSONAL_DATA' : input.context
       const acceptance = await tx.legalAcceptance.upsert({
-        where: { requestId_documentId: { requestId: input.requestId, documentId: document.id } },
+        where: { requestId_documentId: { requestId, documentId: document.id } },
         create: {
           userId: input.userId,
           documentId: document.id,
@@ -132,7 +223,7 @@ export async function acceptCurrentLegalDocuments(input: {
           userAgent: input.userAgent.slice(0, 2048) || 'unknown',
           paymentId: input.paymentId?.slice(0, 128) || null,
           orderId: input.orderId?.slice(0, 128) || null,
-          requestId: input.requestId
+          requestId
         },
         update: {}
       })
@@ -141,6 +232,70 @@ export async function acceptCurrentLegalDocuments(input: {
       }
       rows.push(acceptance)
     }
-    return { context: input.context, acceptedAt: rows[0]?.acceptedAt, documents: rows.map(row => ({ documentId: row.documentId, version: row.version, contentHash: row.contentHash })) }
+    return { context: input.context, requestId, checkout: input.checkout === true, acceptedAt: rows[0]?.acceptedAt, documents: rows.map(row => ({ documentId: row.documentId, version: row.version, contentHash: row.contentHash })) }
   }, { isolationLevel: 'Serializable' })
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await transaction()
+    } catch (error) {
+      if (!isSerializationConflict(error) || attempt === 2) throw error
+      await new Promise(resolve => setTimeout(resolve, 15 * (attempt + 1)))
+    }
+  }
+  throw createError({ statusCode: 503, message: 'Юридическое согласие временно обрабатывается, повторите попытку' })
+}
+
+export async function acceptRegistrationLegalDocuments(tx: Prisma.TransactionClient, input: {
+  userId: string
+  requestId: string
+  confirmations: RegistrationLegalConfirmationInput
+  ip: string
+  userAgent: string
+}) {
+  assertRegistrationLegalConfirmations(input.confirmations)
+  // Seed and validate the append-only registry on a committed client before
+  // entering the registration transaction. A concurrent first registration
+  // must not turn a harmless registry race into a P2002 that aborts its tx.
+  await ensureLegalDocuments()
+  await ensureLegalDocuments(tx)
+  const existing = await tx.legalAcceptance.findMany({ where: { requestId: input.requestId }, select: { userId: true, context: true } })
+  if (existing.some(row => row.userId !== input.userId)) throw createError({ statusCode: 409, message: 'Идентификатор запроса принадлежит другому пользователю' })
+  if (existing.some(row => row.context !== 'REGISTRATION')) throw createError({ statusCode: 409, message: 'Идентификатор запроса уже использован в другом контексте' })
+
+  const documents = await tx.legalDocument.findMany({ where: { type: { in: registrationRequiredTypes }, isActive: true, effectiveFrom: { lte: new Date() } } })
+  if (documents.length !== registrationRequiredTypes.length) throw createError({ statusCode: 503, message: 'Актуальные юридические документы временно недоступны' })
+
+  const rows = []
+  for (const document of documents) {
+    const acceptance = await tx.legalAcceptance.upsert({
+      where: { requestId_documentId: { requestId: input.requestId, documentId: document.id } },
+      create: {
+        userId: input.userId,
+        documentId: document.id,
+        version: document.version,
+        contentHash: document.contentHash,
+        context: 'REGISTRATION',
+        ip: input.ip.slice(0, 64) || 'unknown',
+        userAgent: input.userAgent.slice(0, 2048) || 'unknown',
+        requestId: input.requestId
+      },
+      update: {}
+    })
+    if (acceptance.userId !== input.userId || acceptance.context !== 'REGISTRATION') throw createError({ statusCode: 409, message: 'Идентификатор запроса уже использован' })
+    rows.push(acceptance)
+  }
+  return { context: 'REGISTRATION' as const, requestId: input.requestId, acceptedAt: rows[0]?.acceptedAt, documents: rows.map(row => ({ documentId: row.documentId, version: row.version, contentHash: row.contentHash })) }
+}
+
+export async function assertCheckoutLegalAccepted(userId: string, context: LegalAcceptanceContext, requestId: string) {
+  const session = await prisma.legalCheckoutSession.findUnique({ where: { id: requestId } })
+  if (!session) throw createError({ statusCode: 409, message: 'Checkout не найден' })
+  if (session.userId !== userId) throw createError({ statusCode: 403, message: 'Checkout принадлежит другому пользователю' })
+  if (session.context !== context) throw createError({ statusCode: 409, message: 'Контекст checkout не совпадает с платежом' })
+  const documents = await currentLegalDocuments(context)
+  const accepted = await prisma.legalAcceptance.findMany({ where: { userId, requestId, documentId: { in: documents.map(document => document.id) }, context }, select: { documentId: true, version: true, contentHash: true } })
+  const acceptedByDocument = new Map(accepted.map(row => [row.documentId, row]))
+  const missing = documents.filter(document => !acceptedByDocument.has(document.id) || acceptedByDocument.get(document.id)?.version !== document.version || acceptedByDocument.get(document.id)?.contentHash !== document.contentHash)
+  if (missing.length) throw createError({ statusCode: 409, message: 'Перед оплатой примите актуальные юридические документы', data: { missing: missing.map(document => ({ type: document.type, version: document.version, publicPath: document.publicPath })) } })
+  return documents
 }

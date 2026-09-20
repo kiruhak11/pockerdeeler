@@ -7,6 +7,7 @@ import { buildSeasonAwards, collectSeasonMetrics, SEASON_CATEGORIES } from './se
 import { finalizeJackpot } from './jackpotService'
 import { queueTelegramUserEvent } from './notificationService'
 import { seasonFinishedEventKey, seasonStartedEventKey } from './telegramLifecycleService'
+import { getDistributionPermissionsForUsers, type DistributionCategory } from './distributionConsentService'
 
 export { SEASON_CATEGORIES } from './seasonAwardService'
 const STARTING_BALANCE = 50_000n
@@ -110,7 +111,12 @@ export async function seasonLeaderboard(category: string, token?: string) {
     for (const user of users) rows.push({ user, ...await collectSeasonMetrics(tx, season, user.id, snapshotData({ ...user, balance: user.wallet?.balance ?? BigInt(user.balance) })) })
     return { users, rows }
   }, { timeout: 30_000 })
+  const permissionsByUser = await getDistributionPermissionsForUsers(rows.map(row => row.user.id))
   const eligible = rows.filter(row => {
+    const permissions = permissionsByUser.get(row.user.id) || new Set<DistributionCategory>()
+    if (!permissions.has('NICKNAME') || !permissions.has('RATING')) return false
+    const requiredCategory: DistributionCategory = key === 'balance' ? 'VIRTUAL_BALANCE' : key === 'tableRating' ? 'RATING' : 'GAME_STATISTICS'
+    if (!permissions.has(requiredCategory)) return false
     if (key === 'balance') return true
     if (key === 'tableRating' || key === 'handsPlayed') return row.handsPlayed > 0
     if (key === 'winRate') return row.handsPlayed >= 10
@@ -122,7 +128,12 @@ export async function seasonLeaderboard(category: string, token?: string) {
   const sorted = eligible.sort((a, b) => Number((b as any)[key]) - Number((a as any)[key]) || a.user.createdAt.getTime() - b.user.createdAt.getTime())
   return {
     season: { number: season.number, endsAt: season.endsAt.toISOString() }, category: key, currentUserId: userId,
-    entries: sorted.slice(0, 100).map((row, index) => ({ rank: index + 1, userId: row.user.id, username: row.user.username, premiumType: row.user.premiumSubscriptions.length ? 'PREMIUM' : 'FREE', premiumPlan: row.user.premiumSubscriptions[0]?.plan || null, value: Number((row as any)[key]), handsPlayed: row.handsPlayed, handsWon: row.handsWon, predictionWins: row.predictionWins, bestWinStreak: row.bestWinStreak }))
+    entries: sorted.slice(0, 100).map((row, index) => {
+      const permissions = permissionsByUser.get(row.user.id) || new Set<DistributionCategory>()
+      const entry: Record<string, unknown> = { rank: index + 1, username: row.user.username, value: Number((row as any)[key]) }
+      if (permissions.has('GAME_STATISTICS')) Object.assign(entry, { handsPlayed: row.handsPlayed, handsWon: row.handsWon, predictionCount: row.predictionCount, predictionWins: row.predictionWins, bestWinStreak: row.bestWinStreak, winRate: row.handsPlayed ? Math.round(row.handsWon * 100 / row.handsPlayed) : 0 })
+      return entry
+    })
   }
 }
 

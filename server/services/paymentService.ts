@@ -2,29 +2,18 @@ import { randomUUID } from 'node:crypto'
 import { createError } from 'h3'
 import type { Prisma } from '@prisma/client'
 import { prisma } from '../db/client'
-import { assertCurrentLegalAccepted, type LegalAcceptanceContext } from './legalService'
+import { assertCheckoutLegalAccepted, type LegalAcceptanceContext } from './legalService'
 import { adjustUserWallet } from './walletService'
 import { premiumExpiresAt } from './premiumService'
-import { evaluateRefundEligibility, refundReasonLabel } from '../utils/refundEligibility'
+import { evaluateRefundEligibility, isRefundRequestable, refundReasonLabel } from '../utils/refundEligibility'
 import { notifyAdminTelegram } from './adminTelegramNotificationService'
 import { dispatchUserTelegram } from './notificationService'
+import { getPremiumPaymentPlan, getVirtualCurrencyPackage, PREMIUM_PAYMENT_PLANS, VIRTUAL_CURRENCY_PACKAGES } from './paymentCatalog'
+import type { PremiumPaymentPlan, VirtualCurrencyPackageId } from './paymentCatalog'
+export { PREMIUM_PAYMENT_PLANS, VIRTUAL_CURRENCY_PACKAGES } from './paymentCatalog'
+export type { PremiumPaymentPlan, VirtualCurrencyPackageId } from './paymentCatalog'
 
-export const PREMIUM_PAYMENT_PLANS = {
-  LITE: { plan: 'LITE', name: 'Premium Lite', priceRub: 149, durationDays: 30 },
-  PRO: { plan: 'PRO', name: 'Premium Pro', priceRub: 299, durationDays: 30 },
-  ELITE: { plan: 'ELITE', name: 'Premium Elite', priceRub: 499, durationDays: 30 }
-} as const
-
-export const VIRTUAL_CURRENCY_PACKAGES = {
-  'chips-99': { packageId: 'chips-99', priceRub: 99, chips: 9_900 },
-  'chips-199': { packageId: 'chips-199', priceRub: 199, chips: 19_900 },
-  'chips-499': { packageId: 'chips-499', priceRub: 499, chips: 49_900 },
-  'chips-999': { packageId: 'chips-999', priceRub: 999, chips: 99_900 }
-} as const
-
-export type PremiumPaymentPlan = keyof typeof PREMIUM_PAYMENT_PLANS
-export type VirtualCurrencyPackageId = keyof typeof VIRTUAL_CURRENCY_PACKAGES
-type PaymentType = 'PREMIUM' | 'VIRTUAL_CURRENCY'
+export type PaymentType = 'PREMIUM' | 'VIRTUAL_CURRENCY'
 type ProviderPayment = {
   id?: string
   status?: string
@@ -69,41 +58,90 @@ async function yooRequest(path: string, init: RequestInit = {}) {
   return body
 }
 
-async function currentPayment(userId: string, type: PaymentType, productKey: string) {
-  return prisma.payment.findFirst({ where: { userId, type, productKey, status: 'PENDING', createdAt: { gte: new Date(Date.now() - 30 * 60_000) } }, orderBy: { createdAt: 'desc' } })
-}
-
-export async function createYooKassaPayment(input: { userId: string; type: PaymentType; productKey: string; priceRub: number; metadata: Record<string, string>; legalContext: LegalAcceptanceContext }) {
-  await assertCurrentLegalAccepted(input.userId, input.legalContext)
-  const existing = await currentPayment(input.userId, input.type, input.productKey)
-  if (existing?.confirmationUrl && existing.yookassaPaymentId) return { id: existing.id, status: existing.status, confirmationUrl: existing.confirmationUrl, reused: true }
-
+async function getOrCreateCheckoutPayment(input: { userId: string; type: PaymentType; productKey: string; priceRub: number; metadata: Record<string, string>; legalContext: LegalAcceptanceContext; requestId: string }) {
   const internalPaymentId = randomUUID()
   const orderId = `order_${internalPaymentId.replaceAll('-', '')}`
   const idempotencyKey = randomUUID()
   const returnUrl = `${appOrigin()}/payments/return?payment=${internalPaymentId}`
-  let local = existing
-  if (!local) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      local = await prisma.payment.create({ data: {
-        id: internalPaymentId,
-        userId: input.userId,
-        orderId,
-        idempotencyKey,
-        type: input.type,
-        productKey: input.productKey,
-        amount: money(input.priceRub),
-        currency: 'RUB',
-        status: 'PENDING',
-        description: input.type === 'PREMIUM' ? `Premium ${input.productKey}` : `Виртуальные фишки ${input.productKey}`,
-        metadata: { ...input.metadata, productKey: input.productKey, internalPaymentId, orderId },
-        returnUrl
-      } })
+      return await prisma.$transaction(async tx => {
+        const checkout = await tx.legalCheckoutSession.findUnique({ where: { id: input.requestId } })
+        if (!checkout) throw createError({ statusCode: 409, message: 'Checkout не найден' })
+        if (checkout.userId !== input.userId) throw createError({ statusCode: 403, message: 'Checkout принадлежит другому пользователю' })
+        if (checkout.context !== input.legalContext) throw createError({ statusCode: 409, message: 'Контекст checkout не совпадает с платежом' })
+        if (checkout.paymentType && (checkout.paymentType !== input.type || checkout.productKey !== input.productKey)) throw createError({ statusCode: 409, message: 'Checkout уже связан с другим продуктом' })
+        const existing = await tx.payment.findUnique({ where: { checkoutId: input.requestId } })
+        if (existing) {
+          if (existing.userId !== input.userId || existing.type !== input.type || existing.productKey !== input.productKey || Number(existing.amount) !== input.priceRub || existing.currency !== 'RUB') throw createError({ statusCode: 409, message: 'Существующий заказ не соответствует выбранному товару' })
+          return existing
+        }
+        await tx.legalCheckoutSession.update({ where: { id: checkout.id }, data: { paymentType: input.type, productKey: input.productKey } })
+        return tx.payment.create({ data: {
+          id: internalPaymentId,
+          userId: input.userId,
+          checkoutId: input.requestId,
+          orderId,
+          idempotencyKey,
+          type: input.type,
+          productKey: input.productKey,
+          amount: money(input.priceRub),
+          currency: 'RUB',
+          status: 'PENDING',
+          description: input.type === 'PREMIUM' ? `Premium ${input.productKey}` : `Виртуальные фишки ${input.productKey}`,
+          metadata: { ...input.metadata, productKey: input.productKey, internalPaymentId, orderId, checkoutId: input.requestId },
+          returnUrl
+        } })
+      }, { isolationLevel: 'Serializable' })
     } catch (error) {
-      if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'P2002') throw error
-      local = await currentPayment(input.userId, input.type, input.productKey)
-      if (!local) throw createError({ statusCode: 409, message: 'Платеж уже создается, повторите попытку' })
+      if (isSerializationConflict(error) && attempt < 2) {
+        await new Promise(resolve => setTimeout(resolve, 15 * (attempt + 1)))
+        continue
+      }
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'P2002' && attempt < 2) {
+        await new Promise(resolve => setTimeout(resolve, 15 * (attempt + 1)))
+        continue
+      }
+      throw error
     }
+  }
+  throw createError({ statusCode: 503, message: 'Платеж временно создается, повторите попытку' })
+}
+
+export async function bindCheckoutLegalAcceptance(input: { userId: string; context: LegalAcceptanceContext; requestId: string; paymentId: string; orderId: string }) {
+  const checkout = await prisma.legalCheckoutSession.findUnique({ where: { id: input.requestId } })
+  if (!checkout) throw createError({ statusCode: 409, message: 'Checkout не найден' })
+  if (checkout.userId !== input.userId) throw createError({ statusCode: 403, message: 'Checkout принадлежит другому пользователю' })
+  if (checkout.context !== input.context) throw createError({ statusCode: 409, message: 'Контекст checkout не совпадает' })
+  const payment = await prisma.payment.findUnique({ where: { checkoutId: input.requestId } })
+  if (!payment || payment.userId !== input.userId) throw createError({ statusCode: 403, message: 'Платеж не принадлежит checkout' })
+  const paymentContext = payment.type === 'PREMIUM' ? 'PREMIUM' : payment.type === 'VIRTUAL_CURRENCY' ? 'VIRTUAL_CHIPS' : null
+  if (paymentContext !== input.context || payment.yookassaPaymentId !== input.paymentId) throw createError({ statusCode: 409, message: 'Платеж не соответствует checkout' })
+  const existing = await prisma.legalAcceptance.findMany({ where: { requestId: input.requestId }, select: { userId: true, context: true, paymentId: true, orderId: true } })
+  if (existing.some(row => row.userId !== input.userId || (row.context !== input.context && !(input.context !== 'PERSONAL_DATA' && row.context === 'PERSONAL_DATA')))) throw createError({ statusCode: 409, message: 'Acceptance не принадлежит checkout' })
+  if (existing.some(row => row.paymentId && row.paymentId !== input.paymentId)) throw createError({ statusCode: 409, message: 'Acceptance уже связана с другим платежом' })
+  await prisma.legalAcceptance.updateMany({ where: { userId: input.userId, requestId: input.requestId, paymentId: null }, data: { paymentId: input.paymentId, orderId: input.orderId } })
+  return { paymentId: input.paymentId, orderId: input.orderId }
+}
+
+export async function createYooKassaPayment(input: { userId: string; type: PaymentType; productKey: string; priceRub: number; metadata: Record<string, string>; legalContext: LegalAcceptanceContext; requestId: string }) {
+  if (input.metadata.userId && input.metadata.userId !== input.userId) throw createError({ statusCode: 403, message: 'Платеж не принадлежит пользователю' })
+  if (input.metadata.type && input.metadata.type !== input.type) throw createError({ statusCode: 409, message: 'Тип платежа не совпадает с checkout' })
+  if (input.type === 'PREMIUM' && input.metadata.plan && input.metadata.plan !== input.productKey) throw createError({ statusCode: 409, message: 'Тариф платежа не совпадает с checkout' })
+  if (input.type === 'PREMIUM') {
+    const plan = getPremiumPaymentPlan(input.productKey)
+    if (!plan || plan.priceRub !== input.priceRub) throw createError({ statusCode: 409, message: 'Тариф или цена платежа не соответствует серверному каталогу' })
+  }
+  if (input.type === 'VIRTUAL_CURRENCY' && input.metadata.packageId && input.metadata.packageId !== input.productKey) throw createError({ statusCode: 409, message: 'Пакет платежа не совпадает с checkout' })
+  if (input.type === 'VIRTUAL_CURRENCY') {
+    const pack = getVirtualCurrencyPackage(input.productKey)
+    if (!pack || pack.priceRub !== input.priceRub) throw createError({ statusCode: 409, message: 'Пакет или цена платежа не соответствует серверному каталогу' })
+  }
+  await assertCheckoutLegalAccepted(input.userId, input.legalContext, input.requestId)
+  const local = await getOrCreateCheckoutPayment(input)
+  if (local?.confirmationUrl && local.yookassaPaymentId) {
+    await bindCheckoutLegalAcceptance({ userId: input.userId, context: input.legalContext, requestId: input.requestId, paymentId: local.yookassaPaymentId, orderId: local.orderId })
+    return { id: local.id, status: local.status, confirmationUrl: local.confirmationUrl, reused: true }
   }
 
   if (Number(local.amount) !== input.priceRub || local.currency !== 'RUB') {
@@ -114,11 +152,11 @@ export async function createYooKassaPayment(input: { userId: string; type: Payme
     const provider = await yooRequest('/payments', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Idempotence-Key': local.idempotencyKey },
-      body: JSON.stringify({ amount: { value: money(Number(local.amount)), currency: 'RUB' }, capture: true, confirmation: { type: 'redirect', return_url: local.returnUrl }, description: local.description, metadata: { ...input.metadata, internalPaymentId: local.id } })
+      body: JSON.stringify({ amount: { value: money(Number(local.amount)), currency: 'RUB' }, capture: true, confirmation: { type: 'redirect', return_url: local.returnUrl }, description: local.description, metadata: { ...input.metadata, internalPaymentId: local.id, checkoutId: input.requestId } })
     })
     if (!provider.id || !provider.confirmation?.confirmation_url) throw createError({ statusCode: 502, message: 'ЮKassa не вернула ссылку на оплату' })
     await prisma.payment.update({ where: { id: local.id }, data: { yookassaPaymentId: provider.id, providerStatus: provider.status || 'pending', confirmationUrl: provider.confirmation.confirmation_url, providerCreatedAt: provider.created_at ? new Date(provider.created_at) : null, expiresAt: provider.expires_at ? new Date(provider.expires_at) : null, lastSyncedAt: new Date() } })
-    await prisma.legalAcceptance.updateMany({ where: { userId: input.userId, context: input.legalContext === 'VIRTUAL_CHIPS' ? 'VIRTUAL_CHIPS' : 'PREMIUM', paymentId: null, acceptedAt: { gte: new Date(Date.now() - 30 * 60_000) } }, data: { paymentId: provider.id, orderId } })
+    await bindCheckoutLegalAcceptance({ userId: input.userId, context: input.legalContext, requestId: input.requestId, paymentId: provider.id, orderId: local.orderId })
     return { id: local.id, status: 'PENDING', confirmationUrl: provider.confirmation.confirmation_url, reused: false }
   } catch (error) {
     if (error && typeof error === 'object' && 'statusCode' in error) throw error
@@ -223,7 +261,7 @@ export async function paymentHistory(userId: string) {
         processedAt: row.refundRequest.processedAt?.toISOString() || null,
         decisionReason: row.refundRequest.decisionReason
       } : null,
-      refundEligibility: { code: refundEligibility, eligible: refundEligibility === 'AVAILABLE', message: refundReasonLabel(refundEligibility) }
+      refundEligibility: { code: refundEligibility, eligible: isRefundRequestable(refundEligibility), message: refundReasonLabel(refundEligibility) }
     }
   })
 }

@@ -14,19 +14,26 @@ useHead(() => ({
 }))
 
 const otherDocuments = legalDocuments.filter(item => item.slug !== document?.slug)
+const sectionAnchors = document?.sections.map((_, index) => `section-${index + 1}`) || []
 </script>
 
 <template>
   <main v-if="document" class="legal-page page-shell">
-    <nav class="legal-breadcrumbs" aria-label="Навигация по юридическим документам"><NuxtLink to="/">Главная</NuxtLink><AppIcon name="arrow-right" :size="15" /><span>Юридическая информация</span></nav>
+    <nav class="legal-breadcrumbs" aria-label="Навигация по юридическим документам"><NuxtLink to="/">Главная</NuxtLink><AppIcon name="arrow-right" :size="15" /><NuxtLink to="/legal">Юридическая информация</NuxtLink><AppIcon name="arrow-right" :size="15" /><span>{{ document.shortTitle }}</span></nav>
     <header class="legal-hero">
       <p class="eyebrow">POKER DEALER DESK / LEGAL</p>
       <h1 class="page-title">{{ document.title }}</h1>
       <p class="page-subtitle">{{ document.summary }}</p>
       <div class="legal-meta"><span>Версия {{ document.version }}</span><span>Действует с {{ document.effectiveDate }}</span></div>
     </header>
+    <nav v-if="document.sections.length > 1" class="legal-toc" aria-label="Содержание документа">
+      <strong>Содержание</strong>
+      <ol>
+        <li v-for="(section, index) in document.sections" :key="section.heading"><a :href="`#${sectionAnchors[index]}`">{{ section.heading }}</a></li>
+      </ol>
+    </nav>
     <article class="legal-document">
-      <section v-for="section in document.sections" :key="section.heading" class="legal-section">
+      <section v-for="(section, index) in document.sections" :id="sectionAnchors[index]" :key="section.heading" class="legal-section">
         <h2>{{ section.heading }}</h2>
         <p v-for="paragraph in section.paragraphs || []" :key="paragraph">{{ paragraph }}</p>
         <ul v-if="section.items?.length"><li v-for="item in section.items" :key="item">{{ item }}</li></ul>
@@ -47,6 +54,11 @@ const otherDocuments = legalDocuments.filter(item => item.slug !== document?.slu
 .legal-hero .page-subtitle { max-width:680px; line-height:1.55; }
 .legal-meta { display:flex; flex-wrap:wrap; gap:.6rem; margin-top:1.35rem; }
 .legal-meta span { padding:.4rem .65rem; border:1px solid rgba(255,255,255,.12); border-radius:999px; color:#dce9e0; font-size:.74rem; background:rgba(255,255,255,.05); }
+.legal-toc { display:grid; gap:.65rem; margin-top:1rem; padding:1rem 1.2rem; border:1px solid rgba(255,255,255,.08); border-radius:var(--radius-md); background:rgba(255,255,255,.035); }
+.legal-toc strong { color:#f0d28b; font-size:.85rem; }
+.legal-toc ol { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.35rem 1.5rem; margin:0; padding-left:1.25rem; }
+.legal-toc a { color:#c2d1c8; font-size:.8rem; line-height:1.45; text-decoration:none; }
+.legal-toc a:hover, .legal-toc a:focus-visible { color:var(--accent); outline:none; }
 .legal-document { display:grid; gap:1rem; margin-top:1rem; }
 .legal-section { padding:clamp(1rem,3vw,1.45rem); border:1px solid rgba(255,255,255,.08); border-radius:var(--radius-md); background:linear-gradient(145deg,rgba(26,40,34,.88),rgba(17,27,23,.92)); }
 .legal-section h2 { margin:0 0 .85rem; color:#f0d28b; font:700 1.05rem/1.25 'Space Grotesk',sans-serif; }
@@ -60,5 +72,5 @@ const otherDocuments = legalDocuments.filter(item => item.slug !== document?.slu
 .legal-related { display:flex; flex-wrap:wrap; gap:.5rem; margin-top:1rem; }
 .legal-related a { padding:.65rem .8rem; border:1px solid rgba(255,255,255,.1); border-radius:12px; color:#d9e5dd; text-decoration:none; font-size:.78rem; background:rgba(255,255,255,.04); }
 .legal-related a:hover, .legal-related a:focus-visible { border-color:rgba(242,180,81,.5); color:var(--accent); outline:none; }
-@media (max-width:560px) { .legal-page { padding-top:.8rem; } .legal-breadcrumbs { font-size:.7rem; } .legal-section p, .legal-section li { font-size:.86rem; line-height:1.62; } .legal-related { display:grid; grid-template-columns:1fr 1fr; } .legal-related a { min-width:0; } }
+@media (max-width:560px) { .legal-page { padding-top:.8rem; } .legal-breadcrumbs { font-size:.7rem; } .legal-toc ol { grid-template-columns:1fr; } .legal-section p, .legal-section li { font-size:.86rem; line-height:1.62; } .legal-related { display:grid; grid-template-columns:1fr 1fr; } .legal-related a { min-width:0; } }
 </style>

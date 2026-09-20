@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { createError } from 'h3'
 import { prisma } from '../db/client'
-import { evaluateRefundEligibility, refundReasonLabel } from '../utils/refundEligibility'
+import { evaluateRefundEligibility, isRefundRequestable, refundReasonLabel } from '../utils/refundEligibility'
 import { dispatchUserTelegram } from './notificationService'
 import { notifyAdminTelegram } from './adminTelegramNotificationService'
 
@@ -19,7 +19,7 @@ export async function getRefundEligibility(userId: string, paymentId: string) {
     processedAt: payment.processedAt, createdAt: payment.createdAt,
     refundStatus: payment.refundRequest?.status ?? null
   })
-  return { eligible: code === 'AVAILABLE', code, message: refundReasonLabel(code), payment }
+  return { eligible: isRefundRequestable(code), code, message: refundReasonLabel(code), payment }
 }
 
 export async function requestRefund(userId: string, paymentId: string, reason: string) {

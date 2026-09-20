@@ -75,59 +75,64 @@ model User {
   createdAt               DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt               DateTime         @default(now()) @map("updated_at") @db.Timestamptz(6)
 
-  participants           RoomParticipant[]
-  players                Player[]
-  sentFriendRequests     FriendRequest[]         @relation("FriendRequestSender")
-  receivedFriendRequests FriendRequest[]         @relation("FriendRequestReceiver")
-  friendshipsA           Friendship[]            @relation("FriendshipA")
-  friendshipsB           Friendship[]            @relation("FriendshipB")
-  sentRoomInvites        RoomInvite[]            @relation("RoomInviteSender")
-  receivedRoomInvites    RoomInvite[]            @relation("RoomInviteReceiver")
-  roomChatMessages       RoomChatMessage[]
-  wallet                 UserWallet?
-  roomMemberAccounts     RoomMemberAccount[]
-  predictionRatingEvents PredictionRatingEvent[]
-  tableRatingEvents      TableRatingEvent[]
-  achievements           UserAchievement[]
-  seasonalStats          SeasonalUserStats[]
-  seasonalLeaderboards   SeasonLeaderboard[]
-  seasonalRewards        SeasonReward[]
-  seasonalSnapshots      SeasonSnapshot[]
-  crashBets              CrashBet[]
-  stackReturns           StackReturn[]
-  miniGameSessions       MiniGameSession[]       @relation("MinesPlayer")
-  minesBankSessions      MiniGameSession[]       @relation("MinesBank")
-  minesCommitments       MinesCommitment[]
-  miniGameJackpotEntries MiniGameJackpotEntry[]
-  jackpotPrizes          JackpotPrize[]
-  tokenPredictions       TokenPrediction[]
-  telegramLinkTokens     TelegramLinkToken[]
-  telegramSubscription   TelegramSubscription?
+  participants                 RoomParticipant[]
+  players                      Player[]
+  sentFriendRequests           FriendRequest[]                      @relation("FriendRequestSender")
+  receivedFriendRequests       FriendRequest[]                      @relation("FriendRequestReceiver")
+  friendshipsA                 Friendship[]                         @relation("FriendshipA")
+  friendshipsB                 Friendship[]                         @relation("FriendshipB")
+  sentRoomInvites              RoomInvite[]                         @relation("RoomInviteSender")
+  receivedRoomInvites          RoomInvite[]                         @relation("RoomInviteReceiver")
+  roomChatMessages             RoomChatMessage[]
+  wallet                       UserWallet?
+  roomMemberAccounts           RoomMemberAccount[]
+  predictionRatingEvents       PredictionRatingEvent[]
+  tableRatingEvents            TableRatingEvent[]
+  achievements                 UserAchievement[]
+  seasonalStats                SeasonalUserStats[]
+  seasonalLeaderboards         SeasonLeaderboard[]
+  seasonalRewards              SeasonReward[]
+  seasonalSnapshots            SeasonSnapshot[]
+  crashBets                    CrashBet[]
+  stackReturns                 StackReturn[]
+  miniGameSessions             MiniGameSession[]                    @relation("MinesPlayer")
+  minesBankSessions            MiniGameSession[]                    @relation("MinesBank")
+  minesCommitments             MinesCommitment[]
+  miniGameJackpotEntries       MiniGameJackpotEntry[]
+  jackpotPrizes                JackpotPrize[]
+  tokenPredictions             TokenPrediction[]
+  telegramLinkTokens           TelegramLinkToken[]
+  telegramSubscription         TelegramSubscription?
   telegramNotificationSettings TelegramNotificationSettings?
-  telegramUserEvents      TelegramUserEvent[]
-  legalAcceptances       LegalAcceptance[]
-  payments               Payment[]
-  refundRequests         RefundRequest[]
-  premiumSubscriptions   PremiumSubscription[]
-  premiumSettings        PremiumUserSettings?
+  telegramUserEvents           TelegramUserEvent[]
+  legalAcceptances             LegalAcceptance[]
+  distributionConsents         PersonalDataDistributionConsent[]
+  distributionPermissions      PersonalDataDistributionPermission[]
+  distributionAudits           PersonalDataDistributionAudit[]
+  legalCheckoutSessions        LegalCheckoutSession[]
+  payments                     Payment[]
+  refundRequests               RefundRequest[]
+  premiumSubscriptions         PremiumSubscription[]
+  premiumSettings              PremiumUserSettings?
 
   @@index([username])
   @@map("users")
 }
 
 model LegalDocument {
-  id            String            @id @default(uuid()) @db.Uuid
-  type          String            @db.VarChar(48)
-  version       String            @db.VarChar(32)
-  title         String            @db.Text
-  content       String            @db.Text
-  contentPath   String?           @map("content_path") @db.Text
-  contentHash   String            @map("content_hash") @db.VarChar(64)
-  effectiveFrom DateTime          @map("effective_from") @db.Timestamptz(6)
-  publishedAt   DateTime          @map("published_at") @db.Timestamptz(6)
-  isActive      Boolean           @default(false) @map("is_active")
-  createdAt     DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
-  acceptances   LegalAcceptance[]
+  id                   String                            @id @default(uuid()) @db.Uuid
+  type                 String                            @db.VarChar(48)
+  version              String                            @db.VarChar(32)
+  title                String                            @db.Text
+  content              String                            @db.Text
+  contentPath          String?                           @map("content_path") @db.Text
+  contentHash          String                            @map("content_hash") @db.VarChar(64)
+  effectiveFrom        DateTime                          @map("effective_from") @db.Timestamptz(6)
+  publishedAt          DateTime                          @map("published_at") @db.Timestamptz(6)
+  isActive             Boolean                           @default(false) @map("is_active")
+  createdAt            DateTime                          @default(now()) @map("created_at") @db.Timestamptz(6)
+  acceptances          LegalAcceptance[]
+  distributionConsents PersonalDataDistributionConsent[]
 
   @@unique([type, version])
   @@index([type, isActive, effectiveFrom])
@@ -158,34 +163,107 @@ model LegalAcceptance {
   @@map("legal_acceptances")
 }
 
+model PersonalDataDistributionConsent {
+  id              String                               @id @default(uuid()) @db.Uuid
+  userId          String                               @map("user_id") @db.Uuid
+  documentId      String                               @map("document_id") @db.Uuid
+  documentVersion String                               @map("document_version") @db.VarChar(32)
+  acceptedAt      DateTime                             @default(now()) @map("accepted_at") @db.Timestamptz(6)
+  updatedAt       DateTime                             @updatedAt @map("updated_at") @db.Timestamptz(6)
+  revokedAt       DateTime?                            @map("revoked_at") @db.Timestamptz(6)
+  requestId       String                               @map("request_id") @db.Uuid
+  ip              String                               @db.VarChar(64)
+  userAgent       String                               @map("user_agent") @db.Text
+  user            User                                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document        LegalDocument                        @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  permissions     PersonalDataDistributionPermission[]
+  audits          PersonalDataDistributionAudit[]
+
+  @@unique([userId, documentId, documentVersion])
+  @@index([userId, revokedAt])
+  @@map("personal_data_distribution_consents")
+}
+
+model PersonalDataDistributionPermission {
+  id        String                          @id @default(uuid()) @db.Uuid
+  userId    String                          @map("user_id") @db.Uuid
+  consentId String                          @map("consent_id") @db.Uuid
+  category  String                          @db.VarChar(32)
+  isActive  Boolean                         @default(true) @map("is_active")
+  grantedAt DateTime                        @default(now()) @map("granted_at") @db.Timestamptz(6)
+  updatedAt DateTime                        @updatedAt @map("updated_at") @db.Timestamptz(6)
+  revokedAt DateTime?                       @map("revoked_at") @db.Timestamptz(6)
+  user      User                            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  consent   PersonalDataDistributionConsent @relation(fields: [consentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, category, isActive], map: "pdd_permissions_user_category_active_key")
+  @@unique([consentId, category], map: "pdd_permissions_consent_category_key")
+  @@index([userId, category, isActive], map: "pdd_permissions_user_category_active_idx")
+  @@map("personal_data_distribution_permissions")
+}
+
+model PersonalDataDistributionAudit {
+  id              String                           @id @default(uuid()) @db.Uuid
+  userId          String                           @map("user_id") @db.Uuid
+  consentId       String?                          @map("consent_id") @db.Uuid
+  documentVersion String                           @map("document_version") @db.VarChar(32)
+  action          String                           @db.VarChar(16)
+  categories      Json                             @db.JsonB
+  createdAt       DateTime                         @default(now()) @map("created_at") @db.Timestamptz(6)
+  ip              String                           @db.VarChar(64)
+  userAgent       String                           @map("user_agent") @db.Text
+  user            User                             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  consent         PersonalDataDistributionConsent? @relation(fields: [consentId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@map("personal_data_distribution_audits")
+}
+
+model LegalCheckoutSession {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  context     String   @db.VarChar(32)
+  paymentType String?  @map("payment_type") @db.VarChar(32)
+  productKey  String?  @map("product_key") @db.VarChar(64)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  payment     Payment?
+
+  @@index([userId, createdAt])
+  @@map("legal_checkout_sessions")
+}
+
 model Payment {
-  id                String    @id @default(uuid()) @db.Uuid
-  userId            String    @map("user_id") @db.Uuid
-  orderId           String    @unique @default(uuid()) @map("order_id") @db.VarChar(64)
-  yookassaPaymentId String?   @unique @map("yookassa_payment_id") @db.VarChar(128)
-  idempotencyKey    String    @unique @map("idempotency_key") @db.Uuid
-  provider          String    @default("YOOKASSA") @db.VarChar(24)
-  type              String    @db.VarChar(32)
-  productKey        String    @map("product_key") @db.VarChar(32)
-  amount            Decimal   @db.Decimal(12, 2)
-  currency          String    @default("RUB") @db.VarChar(3)
-  status            String    @default("PENDING") @db.VarChar(24)
-  providerStatus    String?   @map("provider_status") @db.VarChar(32)
-  description       String    @db.VarChar(128)
-  metadata          Json      @default("{}") @db.JsonB
-  providerData      Json      @default("{}") @map("provider_data") @db.JsonB
-  confirmationUrl   String?   @map("confirmation_url") @db.Text
-  returnUrl         String    @map("return_url") @db.Text
-  providerCreatedAt DateTime? @map("provider_created_at") @db.Timestamptz(6)
-  expiresAt         DateTime? @map("expires_at") @db.Timestamptz(6)
-  paidAt            DateTime? @map("paid_at") @db.Timestamptz(6)
-  processedAt       DateTime? @map("processed_at") @db.Timestamptz(6)
-  canceledAt        DateTime? @map("canceled_at") @db.Timestamptz(6)
-  lastSyncedAt      DateTime? @map("last_synced_at") @db.Timestamptz(6)
-  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
-  user              User      @relation(fields: [userId], references: [id], onDelete: Restrict)
-  refundRequest      RefundRequest?
+  id                String                @id @default(uuid()) @db.Uuid
+  userId            String                @map("user_id") @db.Uuid
+  orderId           String                @unique @default(uuid()) @map("order_id") @db.VarChar(64)
+  yookassaPaymentId String?               @unique @map("yookassa_payment_id") @db.VarChar(128)
+  idempotencyKey    String                @unique @map("idempotency_key") @db.Uuid
+  checkoutId        String?               @unique @map("checkout_id") @db.Uuid
+  provider          String                @default("YOOKASSA") @db.VarChar(24)
+  type              String                @db.VarChar(32)
+  productKey        String                @map("product_key") @db.VarChar(32)
+  amount            Decimal               @db.Decimal(12, 2)
+  currency          String                @default("RUB") @db.VarChar(3)
+  status            String                @default("PENDING") @db.VarChar(24)
+  providerStatus    String?               @map("provider_status") @db.VarChar(32)
+  description       String                @db.VarChar(128)
+  metadata          Json                  @default("{}") @db.JsonB
+  providerData      Json                  @default("{}") @map("provider_data") @db.JsonB
+  confirmationUrl   String?               @map("confirmation_url") @db.Text
+  returnUrl         String                @map("return_url") @db.Text
+  providerCreatedAt DateTime?             @map("provider_created_at") @db.Timestamptz(6)
+  expiresAt         DateTime?             @map("expires_at") @db.Timestamptz(6)
+  paidAt            DateTime?             @map("paid_at") @db.Timestamptz(6)
+  processedAt       DateTime?             @map("processed_at") @db.Timestamptz(6)
+  canceledAt        DateTime?             @map("canceled_at") @db.Timestamptz(6)
+  lastSyncedAt      DateTime?             @map("last_synced_at") @db.Timestamptz(6)
+  createdAt         DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user              User                  @relation(fields: [userId], references: [id], onDelete: Restrict)
+  refundRequest     RefundRequest?
+  checkout          LegalCheckoutSession? @relation(fields: [checkoutId], references: [id], onDelete: Restrict)
 
   @@index([userId, createdAt])
   @@index([status, createdAt])
@@ -195,17 +273,17 @@ model Payment {
 }
 
 model RefundRequest {
-  id             String   @id @default(uuid()) @db.Uuid
-  userId         String   @map("user_id") @db.Uuid
-  paymentId      String   @unique @map("payment_id") @db.Uuid
-  purchaseType   String   @map("purchase_type") @db.VarChar(32)
-  reason         String   @db.Text
-  requestedAt    DateTime @default(now()) @map("requested_at") @db.Timestamptz(6)
-  status         String   @default("REQUESTED") @db.VarChar(24)
+  id             String    @id @default(uuid()) @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  paymentId      String    @unique @map("payment_id") @db.Uuid
+  purchaseType   String    @map("purchase_type") @db.VarChar(32)
+  reason         String    @db.Text
+  requestedAt    DateTime  @default(now()) @map("requested_at") @db.Timestamptz(6)
+  status         String    @default("REQUESTED") @db.VarChar(24)
   processedAt    DateTime? @map("processed_at") @db.Timestamptz(6)
-  decisionReason String?  @map("decision_reason") @db.Text
-  user           User     @relation(fields: [userId], references: [id], onDelete: Restrict)
-  payment        Payment  @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  decisionReason String?   @map("decision_reason") @db.Text
+  user           User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  payment        Payment   @relation(fields: [paymentId], references: [id], onDelete: Restrict)
 
   @@index([userId, requestedAt])
   @@index([status, requestedAt])
@@ -281,15 +359,15 @@ model TelegramNotificationSettings {
 }
 
 model TelegramUserEvent {
-  id           String    @id @default(uuid()) @db.Uuid
-  userId       String    @map("user_id") @db.Uuid
-  category     String    @db.VarChar(32)
-  eventKey     String    @unique @map("event_key") @db.VarChar(160)
-  text         String    @db.Text
-  attemptedAt  DateTime? @map("attempted_at") @db.Timestamptz(6)
-  sentAt       DateTime? @map("sent_at") @db.Timestamptz(6)
-  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  category    String    @db.VarChar(32)
+  eventKey    String    @unique @map("event_key") @db.VarChar(160)
+  text        String    @db.Text
+  attemptedAt DateTime? @map("attempted_at") @db.Timestamptz(6)
+  sentAt      DateTime? @map("sent_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([attemptedAt, createdAt])
   @@map("telegram_user_events")

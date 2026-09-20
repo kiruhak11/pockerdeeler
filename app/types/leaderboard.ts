@@ -2,22 +2,20 @@ export type LeaderboardSort = 'balance' | 'rating' | 'wins' | 'achievements' | '
 
 export interface LeaderboardEntry {
   rank: number
-  userId: string
+  userId?: string
   username: string
-  balance: number
-  predictionRating: number
-  tableRating: number
-  premiumType: 'FREE' | 'PREMIUM'
-  premiumPlan: 'LITE' | 'PRO' | 'ELITE' | null
-  selectedAchievementIcon: string | null
-  handsPlayed: number
-  predictions: number
-  predictionWins: number
-  wins: number
-  splitWins: number
-  successPercent: number
-  streak: number
-  bestStreak: number
-  achievements: number
-  achievementsList: { id: string; title: string; description: string; icon: string; rarity: string; unlockedAt: string | null }[]
+  balance?: number
+  predictionRating?: number
+  tableRating?: number
+  selectedAchievementIcon?: string | null
+  handsPlayed?: number
+  predictions?: number
+  predictionWins?: number
+  wins?: number
+  splitWins?: number
+  successPercent?: number
+  streak?: number
+  bestStreak?: number
+  achievements?: number
+  achievementsList?: { id: string; title: string; description: string; icon: string; rarity: string; unlockedAt: string | null }[]
 }
