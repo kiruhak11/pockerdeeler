@@ -34,6 +34,10 @@ export type HandState = Readonly<{
   board: readonly Card[]
   street: HandStreet
   pot: number
+  currentBet: number
+  lastFullRaiseSize: number
+  actedThisRound: readonly string[]
+  bettingRoundComplete: boolean
   currentActor: number | null
 }>
 
@@ -185,6 +189,8 @@ export function startHand(options: StartHandOptions): InternalHandState {
 
   const actorStart = headsUp ? dealerSeat : nextSeat(seats, bigBlindSeat)
   const pot = handPlayers.reduce((total, player) => total + player.contribution, 0)
+  const currentBet = Math.max(...handPlayers.map(player => player.streetContribution), 0)
+  const currentActor = findFirstActor(handPlayers, actorStart)
   const state: InternalHandState = Object.freeze({
     handId: randomUUID(),
     players: Object.freeze(handPlayers),
@@ -196,7 +202,11 @@ export function startHand(options: StartHandOptions): InternalHandState {
     board: Object.freeze([]),
     street: 'PREFLOP',
     pot,
-    currentActor: findFirstActor(handPlayers, actorStart),
+    currentBet,
+    lastFullRaiseSize: bigBlind,
+    actedThisRound: Object.freeze([]),
+    bettingRoundComplete: currentActor === null,
+    currentActor,
     deck
   })
   return state
@@ -214,6 +224,10 @@ export function toPlayerSafeHandState(state: InternalHandState, viewerPlayerId: 
     board: state.board,
     street: state.street,
     pot: state.pot,
+    currentBet: state.currentBet,
+    lastFullRaiseSize: state.lastFullRaiseSize,
+    actedThisRound: state.actedThisRound,
+    bettingRoundComplete: state.bettingRoundComplete,
     currentActor: state.currentActor,
     players: Object.freeze(state.players.map(player => Object.freeze({
       ...player,
