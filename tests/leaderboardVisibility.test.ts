@@ -5,7 +5,22 @@ import { registerUser } from '../server/services/userAccountService'
 import { ensureLegalDocuments } from '../server/services/legalService'
 import { saveDistributionPermissions } from '../server/services/distributionConsentService'
 import { getLeaderboardVisibility, setLeaderboardVisibility } from '../server/services/leaderboardVisibilityService'
+import { toPublicLeaderboardRow } from '../server/services/publicLeaderboardService'
 import { seasonLeaderboard } from '../server/services/seasonService'
+
+test('visible leaderboard rows keep the complete aggregate statistics payload', () => {
+  const row = toPublicLeaderboardRow({
+    userId: 'user-1', username: 'visible', balance: 1234, predictionRating: 1010, tableRating: 1200,
+    tableHandsPlayed: 20, tableHandsWon: 12, tableCurrentStreak: 3, tableBestStreak: 7,
+    predictionCount: 10, predictionWins: 6, predictionSplitWins: 1, selectedAchievementIcon: null,
+    achievements: 4, achievementsList: []
+  })
+  assert.deepEqual(row, {
+    userId: 'user-1', username: 'visible', balance: 1234, predictionRating: 1010, tableRating: 1200,
+    handsPlayed: 20, predictions: 10, predictionWins: 6, wins: 12, splitWins: 1, successPercent: 60,
+    streak: 3, bestStreak: 7, selectedAchievementIcon: null, achievements: 4, achievementsList: []
+  })
+})
 
 const dbUrl = process.env.DATABASE_URL
 

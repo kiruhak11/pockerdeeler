@@ -4,6 +4,7 @@ export interface LeaderboardEntry {
   rank: number
   userId?: string
   username: string
+  value?: number
   balance?: number
   predictionRating?: number
   tableRating?: number

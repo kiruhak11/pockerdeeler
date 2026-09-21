@@ -7,7 +7,6 @@ import { buildSeasonAwards, collectSeasonMetrics, SEASON_CATEGORIES } from './se
 import { finalizeJackpot } from './jackpotService'
 import { queueTelegramUserEvent } from './notificationService'
 import { seasonFinishedEventKey, seasonStartedEventKey } from './telegramLifecycleService'
-import { getDistributionPermissionsForUsers, type DistributionCategory } from './distributionConsentService'
 
 export { SEASON_CATEGORIES } from './seasonAwardService'
 const STARTING_BALANCE = 50_000n
@@ -111,11 +110,7 @@ export async function seasonLeaderboard(category: string, token?: string) {
     for (const user of users) rows.push({ user, ...await collectSeasonMetrics(tx, season, user.id, snapshotData({ ...user, balance: user.wallet?.balance ?? BigInt(user.balance) })) })
     return { users, rows }
   }, { timeout: 30_000 })
-  const permissionsByUser = await getDistributionPermissionsForUsers(rows.map(row => row.user.id))
   const eligible = rows.filter(row => {
-    const permissions = permissionsByUser.get(row.user.id) || new Set<DistributionCategory>()
-    const requiredCategory: DistributionCategory | null = key === 'balance' ? 'VIRTUAL_BALANCE' : key === 'tableRating' ? null : 'GAME_STATISTICS'
-    if (requiredCategory && !permissions.has(requiredCategory)) return false
     if (key === 'balance') return true
     if (key === 'tableRating' || key === 'handsPlayed') return row.handsPlayed > 0
     if (key === 'winRate') return row.handsPlayed >= 10
@@ -128,10 +123,25 @@ export async function seasonLeaderboard(category: string, token?: string) {
   return {
     season: { number: season.number, endsAt: season.endsAt.toISOString() }, category: key,
     entries: sorted.slice(0, 100).map((row, index) => {
-      const permissions = permissionsByUser.get(row.user.id) || new Set<DistributionCategory>()
-      const entry: Record<string, unknown> = { rank: index + 1, username: row.user.username, value: Number((row as any)[key]) }
-      if (permissions.has('GAME_STATISTICS')) Object.assign(entry, { handsPlayed: row.handsPlayed, handsWon: row.handsWon, predictionCount: row.predictionCount, predictionWins: row.predictionWins, bestWinStreak: row.bestWinStreak, winRate: row.handsPlayed ? Math.round(row.handsWon * 100 / row.handsPlayed) : 0 })
-      return entry
+      return {
+        rank: index + 1,
+        userId: row.user.id,
+        username: row.user.username,
+        value: Number((row as any)[key]),
+        balance: row.balance,
+        tableRating: row.tableRating,
+        predictionRating: row.predictionRating,
+        handsPlayed: row.handsPlayed,
+        handsWon: row.handsWon,
+        wins: row.handsWon,
+        predictionCount: row.predictionCount,
+        predictions: row.predictionCount,
+        predictionWins: row.predictionWins,
+        bestWinStreak: row.bestWinStreak,
+        streak: row.currentWinStreak,
+        winRate: row.handsPlayed ? Math.round(row.handsWon * 100 / row.handsPlayed) : 0,
+        successPercent: row.predictionCount ? Math.round(row.predictionWins * 100 / row.predictionCount) : 0
+      }
     })
   }
 }

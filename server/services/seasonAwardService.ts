@@ -1,7 +1,7 @@
 import type { Prisma, Season } from '@prisma/client'
 
 type Tx = Prisma.TransactionClient
-type Metrics = Record<string, any> & { userId: string; balance: number; tableRating: number; predictionRating: number; handsPlayed: number; handsWon: number; predictionCount: number; predictionWins: number; bestWinStreak: number }
+type Metrics = Record<string, any> & { userId: string; balance: number; tableRating: number; predictionRating: number; handsPlayed: number; handsWon: number; currentWinStreak: number; predictionCount: number; predictionWins: number; bestWinStreak: number }
 
 export const SEASON_CATEGORY_META = {
   balance: { label: 'баланс', icon: '💰' },
@@ -67,7 +67,7 @@ export async function collectSeasonMetrics(tx: Tx, season: Season, userId: strin
   return {
     ...base, userId,
     balance: asNumber(base.balance), tableRating: asNumber(base.tableRating), predictionRating: asNumber(base.predictionRating),
-    handsPlayed, handsWon, predictionCount, predictionWins, bestWinStreak: asNumber(base.bestWinStreak),
+    handsPlayed, handsWon, currentWinStreak: asNumber(base.currentWinStreak), predictionCount, predictionWins, bestWinStreak: asNumber(base.bestWinStreak),
     winRate: handsPlayed >= 10 ? Number((handsWon * 100 / handsPlayed).toFixed(4)) : 0,
     predictionSuccessRate: predictionCount >= 3 ? Number((predictionWins * 100 / predictionCount).toFixed(4)) : 0,
     totalWon, totalLost, largeBets, predictionPayout, totalPredictionProfit,

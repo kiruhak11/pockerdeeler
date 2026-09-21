@@ -27,20 +27,20 @@ const filters: { key: LeaderboardSort; label: string; short: string; icon: strin
 async function load() {
   loading.value = true
   error.value = ''
-  try { entries.value = sort.value === 'season' ? (await $fetch<any>('/api/season/leaderboard', { query: { category: seasonCategory.value } })).entries.map((item: any) => ({ ...item, balance: item.value, tableRating: item.value, predictionWins: item.predictionWins, wins: item.handsWon, handsPlayed: item.handsPlayed, predictions: item.predictionCount, successPercent: item.winRate, streak: item.bestWinStreak, bestStreak: item.bestWinStreak, splitWins: item.predictionSplitWins })) : (await $fetch<{ entries: LeaderboardEntry[] }>('/api/leaderboard', { query: { sort: sort.value, premiumOnly: premiumOnly.value || undefined } })).entries }
+  try { entries.value = sort.value === 'season' ? (await $fetch<any>('/api/season/leaderboard', { query: { category: seasonCategory.value } })).entries.map((item: any) => ({ ...item, wins: item.wins ?? item.handsWon, predictions: item.predictions ?? item.predictionCount, successPercent: item.successPercent ?? item.winRate, streak: item.streak ?? 0, bestStreak: item.bestStreak ?? item.bestWinStreak })) : (await $fetch<{ entries: LeaderboardEntry[] }>('/api/leaderboard', { query: { sort: sort.value, premiumOnly: premiumOnly.value || undefined } })).entries }
   catch { error.value = 'Не удалось загрузить лидерборд' }
   finally { loading.value = false }
 }
 function mainLabel(entry: LeaderboardEntry) {
+  if (sort.value === 'season') {
+    const label = seasonCategories.find(category => category.key === seasonCategory.value)?.label || 'Показатель'
+    return `${entry.value === undefined ? '—' : entry.value.toLocaleString('ru-RU')} ${label.toLowerCase()}`
+  }
   if (sort.value === 'balance' && entry.balance !== undefined) return `${entry.balance.toLocaleString('ru-RU')} баланс`
   if (sort.value === 'wins' && entry.predictionWins !== undefined) return `${entry.predictionWins} точных прогнозов`
   if (sort.value === 'streak' && entry.streak !== undefined) return `${entry.streak} подряд`
   if (sort.value === 'achievements' && entry.achievements !== undefined) return `${entry.achievements} достижений`
   return `${entry.tableRating ?? '—'} рейтинг игры`
-}
-function metaLabel(entry: LeaderboardEntry) {
-  if (entry.handsPlayed === undefined || entry.predictionWins === undefined || entry.predictions === undefined || entry.successPercent === undefined) return ''
-  return `${entry.predictionWins}/${entry.predictions} прогнозов · ${entry.successPercent}%`
 }
 watch([sort, seasonCategory, premiumOnly], load)
 onMounted(async () => { try { premiumAccess.value = await $fetch<PremiumAccess>('/api/premium/me') } catch {} await load() })
@@ -57,8 +57,9 @@ onMounted(async () => { try { premiumAccess.value = await $fetch<PremiumAccess>(
     <p v-if="loading">Загружаем рейтинг...</p><p v-if="error" class="leaderboard-page__error">{{ error }}</p>
     <section v-if="!loading" class="panel leaderboard-list">
       <div v-for="entry in entries" :key="entry.userId || entry.rank" class="leaderboard-row" :class="{ 'leaderboard-row--podium': entry.rank <= 3 }">
-        <strong class="leaderboard-row__rank"><AppIcon v-if="entry.rank <= 3" :name="['medal-gold','medal-silver','medal-bronze'][entry.rank - 1]" :size="22"/><span v-else>#{{ entry.rank }}</span></strong><span class="leaderboard-row__name"><span class="leaderboard-row__username">{{ entry.username }}</span><span v-if="entry.selectedAchievementIcon" class="leaderboard-row__badge"><AchievementBadge :code="entry.selectedAchievementIcon" :size="18"/></span></span>
-        <span class="leaderboard-row__main">{{ mainLabel(entry) }}</span><span v-if="metaLabel(entry)" class="leaderboard-row__meta"><b class="table-record__wins">{{ entry.handsPlayed ? Math.round((entry.wins || 0) * 100 / entry.handsPlayed) : 0 }}% побед</b><span> · {{ metaLabel(entry) }}</span></span>
+        <strong class="leaderboard-row__rank"><AppIcon v-if="entry.rank <= 3" :name="['medal-gold','medal-silver','medal-bronze'][entry.rank - 1]" :size="22"/><span v-else>#{{ entry.rank }}</span></strong>
+        <span class="leaderboard-row__name"><span class="leaderboard-row__username">{{ entry.username }}</span><span v-if="entry.selectedAchievementIcon" class="leaderboard-row__badge"><AchievementBadge :code="entry.selectedAchievementIcon" :size="18"/></span></span>
+        <strong class="leaderboard-row__main">{{ mainLabel(entry) }}</strong>
       </div>
       <p v-if="!entries.length" class="page-subtitle">Пока нет данных для рейтинга.</p>
     </section>
@@ -73,12 +74,12 @@ onMounted(async () => { try { premiumAccess.value = await $fetch<PremiumAccess>(
 .leaderboard-list { display: grid; gap: .4rem; padding: .55rem; }
 .season-categories{display:flex;gap:.4rem;overflow-x:auto;padding:.2rem;scrollbar-width:none}.season-categories button{flex:none;padding:.55rem .8rem;border:1px solid rgba(255,255,255,.1);border-radius:999px;color:var(--text-muted);background:rgba(255,255,255,.04);cursor:pointer}.season-categories button.active{border-color:rgba(242,180,81,.5);color:#152018;background:var(--accent);font-weight:800}
 .premium-filter{display:flex;align-items:center;gap:.55rem;width:max-content;padding:.55rem .8rem;border:1px solid rgba(242,180,81,.25);border-radius:999px;color:var(--text-muted);background:rgba(242,180,81,.06);font-size:.8rem;cursor:pointer}.premium-filter input{accent-color:var(--accent)}
-.leaderboard-row { display: grid; grid-template-columns: 3rem minmax(130px, 1fr) auto auto; gap: .8rem; align-items: center; padding: .9rem .8rem; border: 1px solid transparent; border-radius: 15px; color: var(--text-muted); background: rgba(255,255,255,.025); }
+.leaderboard-row { display: grid; grid-template-columns: 3rem minmax(130px, 1fr) auto; gap: .8rem; align-items: center; padding: .9rem .8rem; border: 1px solid transparent; border-radius: 15px; color: var(--text-muted); background: rgba(255,255,255,.025); }
 .leaderboard-row--podium { border-color: rgba(242,180,81,.11); background: linear-gradient(90deg, rgba(242,180,81,.09), rgba(255,255,255,.02)); }
 .leaderboard-row__name { display: inline-flex; min-width: 0; align-items: center; gap: .35rem; overflow: hidden; color: var(--text); font-weight: 800; white-space: nowrap; }
 .leaderboard-row__username { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .leaderboard-row__badge { display: inline-flex; flex: 0 0 auto; line-height: 0; }
-.leaderboard-row__meta { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .2rem .55rem; font-size: .78rem; text-align: right; }
+.leaderboard-row__main { color: var(--accent); text-align: right; white-space: nowrap; }
 .table-record__wins { color: #72d395; }
 .table-record__losses { color: #ff8b82; }
 .leaderboard-page__error { color: var(--danger); }
@@ -86,9 +87,8 @@ onMounted(async () => { try { premiumAccess.value = await $fetch<PremiumAccess>(
   .leaderboard-page { padding-top: .65rem; }
   .leaderboard-hero { padding: 1rem; border-radius: 22px; }
   .leaderboard-tabs { grid-template-columns: repeat(6, minmax(64px, 1fr)); overflow-x: auto; scroll-snap-type: x mandatory; button { scroll-snap-align: start; min-width: 64px; min-height: 64px; } button span { display: none; } button small { display: block; font-size: .62rem; } }
-  .leaderboard-row { grid-template-columns: 2.3rem 1fr auto; gap: .45rem; padding: .8rem .35rem; }
-  .leaderboard-row__main { grid-column: 2 / 4; font-size: .82rem; color: var(--accent); }
-  .leaderboard-row__meta { grid-column: 2 / 4; justify-content: flex-start; text-align: left; font-size: .72rem; line-height: 1.35; }
+  .leaderboard-row { grid-template-columns: 2.3rem 1fr; gap: .45rem; padding: .8rem .35rem; }
+  .leaderboard-row__main { grid-column: 2 / 3; justify-self: start; font-size: .82rem; text-align: left; white-space: normal; }
   .leaderboard-row__rank { align-self: start; }
 }
 </style>
