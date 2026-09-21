@@ -18,7 +18,7 @@ export type NextHandPlayer = Readonly<{
 
 export type PrepareNextHandOptions = Readonly<{
   players: readonly NextHandPlayer[]
-  previousDealerSeat: number
+  previousDealerSeat?: number
   smallBlind: number
   bigBlind: number
   /** Optional predefined deck for deterministic tests. */
@@ -54,7 +54,9 @@ function assertNonNegativeInteger(value: number, label: string): void {
 
 function validateOptions(options: PrepareNextHandOptions): void {
   if (!options || !Array.isArray(options.players)) throw new Error('Next hand requires a players list.')
-  assertPositiveInteger(options.previousDealerSeat, 'Previous dealer seat')
+  if (options.previousDealerSeat !== undefined) {
+    assertPositiveInteger(options.previousDealerSeat, 'Previous dealer seat')
+  }
   assertPositiveInteger(options.smallBlind, 'Small blind')
   assertPositiveInteger(options.bigBlind, 'Big blind')
   if (options.bigBlind < options.smallBlind) {
