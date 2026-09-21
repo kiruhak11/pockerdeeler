@@ -6,6 +6,7 @@ import { createApp, toNodeListener } from 'h3'
 import Redis from 'ioredis'
 import { PrismaClient } from '@prisma/client'
 import webhookHandler from '../server/api/payments/webhook.post'
+import { notifyPaymentResult, PAYMENT_TRANSACTION_MAX_ATTEMPTS, retryPaymentTransaction } from '../server/services/paymentService'
 import { registerUser } from '../server/services/userAccountService'
 import { closePaymentWebhookRateLimitStore, consumePaymentWebhookCounters, PAYMENT_WEBHOOK_RATE_LIMITS } from '../server/utils/paymentWebhookRateLimit'
 
@@ -118,6 +119,33 @@ async function post(paymentId: string, extraHeaders: Record<string, string> = {}
   return { response, data }
 }
 
+test('payment transaction retry handles only bounded serialization conflicts', async () => {
+  let attempts = 0
+  const result = await retryPaymentTransaction(async () => {
+    attempts++
+    if (attempts < 3) throw { code: 'P2034' }
+    return 'processed'
+  }, { sleep: async () => {} })
+  assert.equal(result, 'processed')
+  assert.equal(attempts, 3)
+
+  let nonSerializationAttempts = 0
+  const nonSerializationError = { code: 'P2002' }
+  await assert.rejects(() => retryPaymentTransaction(async () => {
+    nonSerializationAttempts++
+    throw nonSerializationError
+  }, { sleep: async () => {} }), error => error === nonSerializationError)
+  assert.equal(nonSerializationAttempts, 1)
+
+  let exhaustedAttempts = 0
+  const exhaustedError = { code: 'P2034' }
+  await assert.rejects(() => retryPaymentTransaction(async () => {
+    exhaustedAttempts++
+    throw exhaustedError
+  }, { sleep: async () => {} }), error => error === exhaustedError)
+  assert.equal(exhaustedAttempts, PAYMENT_TRANSACTION_MAX_ATTEMPTS)
+})
+
 function succeededProvider(paymentId: string, amount: string, currency = 'RUB') {
   providerResponse = { id: paymentId, status: 'succeeded', paid: true, amount: { value: amount, currency }, metadata: {} }
 }
@@ -161,6 +189,37 @@ test('normal provider retry is allowed and already processed payment is idempote
   assert.equal(providerCalls, 2)
   assert.equal((await db.walletLedgerEntry.count({ where: { idempotencyKey: `payment:${local.id}:wallet` } })), 1)
   assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId: row.user.id } })).balance, 14_900n)
+})
+
+test('concurrent duplicate virtual currency webhooks credit chips and ledger once', { skip: !isolated }, async () => {
+  const row = await account('chips_concurrent')
+  const local = await payment(row.user.id)
+  succeededProvider(local.yookassaPaymentId!, '99.00')
+
+  const results = await Promise.all(Array.from({ length: 4 }, () => post(local.yookassaPaymentId!)))
+  assert.deepEqual(results.map(result => result.response.status).sort(), [200, 200, 200, 200])
+  assert.equal(providerCalls, 4)
+  assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId: row.user.id } })).balance, 14_900n)
+  assert.equal((await db.payment.findUniqueOrThrow({ where: { id: local.id } })).status, 'PROCESSED')
+  assert.equal(await db.walletLedgerEntry.count({ where: { idempotencyKey: `payment:${local.id}:wallet` } }), 1)
+})
+
+test('duplicate payment result does not send duplicate notifications', async () => {
+  const adminMessages: string[] = []
+  const userMessages: string[] = []
+  const local = { userId: 'user-1', type: 'VIRTUAL_CURRENCY', amount: { toString: () => '99.00' }, currency: 'RUB' }
+  const dependencies = {
+    notifyAdmin: async (_category: string, text: string) => { adminMessages.push(text); return true },
+    dispatchUser: (_userId: string, _category: string, text: string) => { userMessages.push(text) }
+  }
+
+  await notifyPaymentResult({ duplicate: true, status: 'PROCESSED' }, local, dependencies)
+  assert.deepEqual(adminMessages, [])
+  assert.deepEqual(userMessages, [])
+
+  await notifyPaymentResult({ duplicate: false, status: 'PROCESSED' }, local, dependencies)
+  assert.equal(adminMessages.length, 1)
+  assert.equal(userMessages.length, 1)
 })
 
 test('mass webhook requests are limited before YooKassa and forwarded header spoofing does not change source', { skip: !isolated }, async () => {

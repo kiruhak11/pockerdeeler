@@ -173,11 +173,51 @@ function validateProvider(expectedPaymentId: string, local: { userId: string; ty
   if (provider.metadata?.type && provider.metadata.type !== local.type) throw createError({ statusCode: 409, message: 'Тип платежа не совпадает' })
 }
 
-function isSerializationConflict(error: unknown) {
+export const PAYMENT_TRANSACTION_MAX_ATTEMPTS = 5
+const PAYMENT_TRANSACTION_RETRY_DELAYS_MS = [20, 40, 80, 120] as const
+
+export function isSerializationConflict(error: unknown) {
   if (!error || typeof error !== 'object') return false
   const code = 'code' in error ? error.code : undefined
-  const meta = 'meta' in error && error.meta && typeof error.meta === 'object' ? error.meta as { code?: string; message?: string } : undefined
-  return code === 'P2034' || (code === 'P2010' && meta?.code === '40001') || meta?.message?.includes('could not serialize access') === true
+  const meta = 'meta' in error && error.meta && typeof error.meta === 'object' ? error.meta as { code?: string } : undefined
+  // Prisma can surface PostgreSQL's serialization SQLSTATE as P2010/40001.
+  return code === 'P2034' || (code === 'P2010' && meta?.code === '40001')
+}
+
+type PaymentTransactionRetryOptions = {
+  maxAttempts?: number
+  sleep?: (delayMs: number) => Promise<void>
+}
+
+export async function retryPaymentTransaction<T>(operation: () => Promise<T>, options: PaymentTransactionRetryOptions = {}) {
+  const maxAttempts = Math.max(1, Math.floor(options.maxAttempts ?? PAYMENT_TRANSACTION_MAX_ATTEMPTS))
+  const sleep = options.sleep || ((delayMs: number) => new Promise<void>(resolve => setTimeout(resolve, delayMs)))
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      return await operation()
+    } catch (error) {
+      if (!isSerializationConflict(error) || attempt === maxAttempts - 1) throw error
+      await sleep(PAYMENT_TRANSACTION_RETRY_DELAYS_MS[Math.min(attempt, PAYMENT_TRANSACTION_RETRY_DELAYS_MS.length - 1)]!)
+    }
+  }
+
+  throw new Error('Payment transaction retry exhausted')
+}
+
+type PaymentNotificationResult = { duplicate: boolean; status: string }
+type PaymentNotificationLocal = { userId: string; type: string; amount: { toString(): string }; currency: string }
+type PaymentNotificationDependencies = {
+  notifyAdmin: typeof notifyAdminTelegram
+  dispatchUser: typeof dispatchUserTelegram
+}
+
+export async function notifyPaymentResult(result: PaymentNotificationResult, local: PaymentNotificationLocal, dependencies: PaymentNotificationDependencies = { notifyAdmin: notifyAdminTelegram, dispatchUser: dispatchUserTelegram }) {
+  if (result.duplicate || (result.status !== 'PROCESSED' && result.status !== 'CANCELED')) return
+  await dependencies.notifyAdmin('payments', `Платёж ${result.status === 'PROCESSED' ? 'обработан' : 'отменён'}: ${local.type}, ${local.amount.toString()} ${local.currency}.`)
+  if (result.status !== 'PROCESSED') return
+  dependencies.dispatchUser(local.userId, 'purchases', local.type === 'PREMIUM' ? 'Покупка Premium успешно активирована.' : 'Покупка виртуальных фишек успешно зачислена.')
+  if (local.type === 'PREMIUM') void dependencies.notifyAdmin('premium', `Premium активирован покупкой для пользователя ${local.userId}.`)
 }
 
 export async function syncAndProcessPayment(yookassaPaymentId: string) {
@@ -216,23 +256,10 @@ export async function syncAndProcessPayment(yookassaPaymentId: string) {
     return { success: true, duplicate: false, status: 'PROCESSED' }
   }, { isolationLevel: 'Serializable' })
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const result = await processTransaction()
-      if (!result.duplicate && (result.status === 'PROCESSED' || result.status === 'CANCELED')) {
-        await notifyAdminTelegram('payments', `Платёж ${result.status === 'PROCESSED' ? 'обработан' : 'отменён'}: ${local.type}, ${local.amount.toString()} ${local.currency}.`)
-        if (result.status === 'PROCESSED') {
-          dispatchUserTelegram(local.userId, 'purchases', local.type === 'PREMIUM' ? 'Покупка Premium успешно активирована.' : 'Покупка виртуальных фишек успешно зачислена.')
-          if (local.type === 'PREMIUM') void notifyAdminTelegram('premium', `Premium активирован покупкой для пользователя ${local.userId}.`)
-        }
-      }
-      return result
-    } catch (error) {
-      if (!isSerializationConflict(error) || attempt === 2) throw error
-      await new Promise(resolve => setTimeout(resolve, 15 * (attempt + 1)))
-    }
-  }
-  throw createError({ statusCode: 503, message: 'Платеж временно обрабатывается, повторите уведомление' })
+  // YooKassa was verified once above; only the local DB transaction is retried.
+  const result = await retryPaymentTransaction(processTransaction)
+  await notifyPaymentResult(result, local)
+  return result
 }
 
 export async function paymentHistory(userId: string) {
