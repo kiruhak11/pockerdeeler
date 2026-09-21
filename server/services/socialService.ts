@@ -35,6 +35,16 @@ function normalizeFriendPair(userIdA: string, userIdB: string) {
     : { userAId: userIdB, userBId: userIdA }
 }
 
+function metadataString(metadata: Prisma.JsonValue, key: string) {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return undefined
+  const value = (metadata as Record<string, unknown>)[key]
+  return typeof value === 'string' ? value : undefined
+}
+
+function throwTransferIdempotencyConflict(): never {
+  throw createError({ statusCode: 409, statusMessage: 'Этот requestId уже использован для другого перевода' })
+}
+
 function mapFriendship(friendship: DbFriendship & { userA: DbUser; userB: DbUser }, currentUserId: string) {
   const friend = friendship.userAId === currentUserId ? friendship.userB : friendship.userA
 
@@ -155,7 +165,54 @@ export async function transferToFriend(input: { token: string; friendUserId: str
   }
   if (sender.id === input.friendUserId) throw createError({ statusCode: 400, statusMessage: 'Нельзя переводить фишки самому себе' })
 
-  const result = await prisma.$transaction(async tx => {
+  const outcome = await prisma.$transaction(async tx => {
+    const debitKey = `friend-transfer:debit:${input.requestId}`
+    const creditKey = `friend-transfer:credit:${input.requestId}`
+
+    // Serialize every use of a requestId before locking the user pair. This
+    // keeps the idempotency decision global even when a retry changes the
+    // recipient and therefore would otherwise use a different pair lock.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`friend-transfer-request:${input.requestId}`}, 0))`
+
+    const [existingDebit, existingCredit] = await Promise.all([
+      tx.walletLedgerEntry.findUnique({ where: { idempotencyKey: debitKey } }),
+      tx.walletLedgerEntry.findUnique({ where: { idempotencyKey: creditKey } })
+    ])
+
+    if (existingDebit || existingCredit) {
+      if (!existingDebit || !existingCredit) throwTransferIdempotencyConflict()
+
+      const [debitWallet, creditWallet] = await Promise.all([
+        tx.userWallet.findUnique({ where: { id: existingDebit.walletId }, select: { userId: true } }),
+        tx.userWallet.findUnique({ where: { id: existingCredit.walletId }, select: { userId: true } })
+      ])
+      const recordedRecipientId = metadataString(existingDebit.metadata, 'friendUserId')
+      const recordedSenderId = metadataString(existingCredit.metadata, 'senderUserId')
+      const recordedUsername = metadataString(existingDebit.metadata, 'friendUsername')
+      const matches = Boolean(
+        debitWallet?.userId === sender.id &&
+        creditWallet?.userId === input.friendUserId &&
+        recordedRecipientId === input.friendUserId &&
+        recordedSenderId === sender.id &&
+        existingDebit.entryType === 'FRIEND_TRANSFER_DEBIT' &&
+        existingCredit.entryType === 'FRIEND_TRANSFER_CREDIT' &&
+        existingDebit.amount === -BigInt(input.amount) &&
+        existingCredit.amount === BigInt(input.amount) &&
+        existingDebit.transferId === existingCredit.transferId
+      )
+      if (!matches || !recordedUsername) throwTransferIdempotencyConflict()
+
+      return {
+        isNewTransfer: false,
+        result: {
+          success: true,
+          friend: { id: input.friendUserId, username: recordedUsername },
+          amount: input.amount,
+          balance: Number(existingDebit.balanceAfter)
+        }
+      }
+    }
+
     const pair = normalizeFriendPair(sender.id, input.friendUserId)
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`friend-transfer:${pair.userAId}:${pair.userBId}`}, 0))`
     const friendship = await tx.friendship.findUnique({ where: { userAId_userBId: pair } })
@@ -171,18 +228,20 @@ export async function transferToFriend(input: { token: string; friendUserId: str
       await lockUserWallet(tx, sender.id)
     }
     const transferId = randomUUID()
-    await adjustUserWallet(tx, { userId: sender.id, delta: -BigInt(input.amount), entryType: 'FRIEND_TRANSFER_DEBIT', transferId, idempotencyKey: `friend-transfer:debit:${input.requestId}`, metadata: { friendUserId: target.id, friendUsername: target.username } })
-    await adjustUserWallet(tx, { userId: target.id, delta: BigInt(input.amount), entryType: 'FRIEND_TRANSFER_CREDIT', transferId, idempotencyKey: `friend-transfer:credit:${input.requestId}`, metadata: { senderUserId: sender.id, senderUsername: sender.username } })
+    await adjustUserWallet(tx, { userId: sender.id, delta: -BigInt(input.amount), entryType: 'FRIEND_TRANSFER_DEBIT', transferId, idempotencyKey: debitKey, metadata: { friendUserId: target.id, friendUsername: target.username } })
+    await adjustUserWallet(tx, { userId: target.id, delta: BigInt(input.amount), entryType: 'FRIEND_TRANSFER_CREDIT', transferId, idempotencyKey: creditKey, metadata: { senderUserId: sender.id, senderUsername: sender.username } })
     const senderWallet = await tx.userWallet.findUniqueOrThrow({ where: { userId: sender.id }, select: { balance: true } })
     const result = { success: true, friend: { id: target.id, username: target.username }, amount: input.amount, balance: Number(senderWallet.balance) }
-    return result
+    return { isNewTransfer: true, result }
   })
-  // Telegram is an external network call and must not hold the wallet
-  // transaction open. A slow Telegram API previously caused a successful
-  // transfer to roll back with Prisma's 5s transaction timeout.
-  dispatchUserTelegram(result.friend.id, 'purchases', `Вам перевели ${input.amount.toLocaleString('ru-RU')} фишек от ${sender.username}.`)
-  await notifyAdminTelegram('users', `Перевод виртуальных фишек: ${sender.username} → ${result.friend.username}, сумма ${input.amount.toLocaleString('ru-RU')}.`)
-  return result
+  if (outcome.isNewTransfer) {
+    // Telegram is an external network call and must not hold the wallet
+    // transaction open. A slow Telegram API previously caused a successful
+    // transfer to roll back with Prisma's 5s transaction timeout.
+    dispatchUserTelegram(outcome.result.friend.id, 'purchases', `Вам перевели ${input.amount.toLocaleString('ru-RU')} фишек от ${sender.username}.`)
+    await notifyAdminTelegram('users', `Перевод виртуальных фишек: ${sender.username} → ${outcome.result.friend.username}, сумма ${input.amount.toLocaleString('ru-RU')}.`)
+  }
+  return outcome.result
 }
 
 export async function sendFriendRequest(input: { token: string; username: string }) {
