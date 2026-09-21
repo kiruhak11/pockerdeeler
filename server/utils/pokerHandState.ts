@@ -48,6 +48,7 @@ export type BetActionLevel = Readonly<{
 
 export type InternalHandState = HandState & Readonly<{
   deck: Deck
+  burnCards: readonly Card[]
   lastActedAtBet: readonly BetActionLevel[]
 }>
 
@@ -140,6 +141,89 @@ function findFirstActor(players: readonly HandPlayerState[], startSeat: number):
   return null
 }
 
+function nonFoldedPlayers(players: readonly HandPlayerState[]): HandPlayerState[] {
+  return players.filter(player => player.status !== 'FOLDED' && player.status !== 'OUT')
+}
+
+function eligiblePlayers(players: readonly HandPlayerState[]): HandPlayerState[] {
+  return nonFoldedPlayers(players).filter(player => player.status === 'ACTIVE' && player.stack > 0)
+}
+
+function nextPostflopActor(players: readonly HandPlayerState[], dealerSeat: number): number | null {
+  const seats = players.map(player => player.seat).sort((left, right) => left - right)
+  if (seats.length === 0) return null
+  return findFirstActor(players, nextSeat(seats, dealerSeat))
+}
+
+function nextStreet(street: HandStreet): HandStreet {
+  if (street === 'PREFLOP') return 'FLOP'
+  if (street === 'FLOP') return 'TURN'
+  if (street === 'TURN') return 'RIVER'
+  if (street === 'RIVER') return 'SHOWDOWN'
+  throw new Error(`Cannot advance street from ${street}.`)
+}
+
+function cardsNeededForStreet(street: HandStreet): number {
+  if (street === 'PREFLOP') return 4
+  if (street === 'FLOP' || street === 'TURN') return 2
+  return 0
+}
+
+function resetStreetState(
+  state: InternalHandState,
+  street: HandStreet,
+  board: readonly Card[],
+  burnCards: readonly Card[]
+): InternalHandState {
+  const players = Object.freeze(state.players.map(player => Object.freeze({
+    ...player,
+    streetContribution: 0
+  })))
+  const canBet = eligiblePlayers(players).length >= 2
+  return Object.freeze({
+    ...state,
+    players,
+    board: Object.freeze([...board]),
+    burnCards: Object.freeze([...burnCards]),
+    street,
+    currentBet: 0,
+    lastFullRaiseSize: state.bigBlind,
+    actedThisRound: Object.freeze([]),
+    lastActedAtBet: Object.freeze([]),
+    bettingRoundComplete: street === 'SHOWDOWN' || !canBet,
+    currentActor: street === 'SHOWDOWN' || !canBet ? null : nextPostflopActor(players, state.dealerSeat)
+  })
+}
+
+function finishUncontested(state: InternalHandState): InternalHandState {
+  return Object.freeze({
+    ...state,
+    street: 'FINISHED',
+    currentActor: null,
+    bettingRoundComplete: true
+  })
+}
+
+function advanceOneStreet(state: InternalHandState): InternalHandState {
+  const street = nextStreet(state.street)
+  if (street === 'SHOWDOWN') {
+    return Object.freeze({
+      ...state,
+      street,
+      currentActor: null,
+      bettingRoundComplete: true
+    })
+  }
+
+  const cardsNeeded = cardsNeededForStreet(state.street)
+  if (state.deck.remainingCount < cardsNeeded) {
+    throw new Error(`Cannot advance to ${street}; the deck does not contain enough cards.`)
+  }
+  const burnCards = [...state.burnCards, state.deck.deal()]
+  const board = [...state.board, ...state.deck.dealMany(street === 'FLOP' ? 3 : 1)]
+  return resetStreetState(state, street, board, burnCards)
+}
+
 /** Starts a new preflop hand with blinds posted and two cards dealt per player. */
 export function startHand(options: StartHandOptions): InternalHandState {
   const { players, smallBlind, bigBlind } = options
@@ -214,9 +298,27 @@ export function startHand(options: StartHandOptions): InternalHandState {
     bettingRoundComplete: currentActor === null,
     currentActor,
     deck,
+    burnCards: Object.freeze([]),
     lastActedAtBet: Object.freeze([])
   })
   return state
+}
+
+/**
+ * Advances a completed betting round, dealing the next community cards from
+ * the same server-owned deck. If fewer than two players can still act, the
+ * remaining streets run out automatically to showdown.
+ */
+export function advanceStreet(state: InternalHandState): InternalHandState {
+  if (state.street === 'SHOWDOWN' || state.street === 'FINISHED') {
+    throw new Error(`Cannot advance street from ${state.street}.`)
+  }
+  if (!state.bettingRoundComplete) throw new Error('Betting round must be complete before advancing the street.')
+  if (nonFoldedPlayers(state.players).length <= 1) return finishUncontested(state)
+
+  const next = advanceOneStreet(state)
+  if (next.street === 'SHOWDOWN' || next.street === 'FINISHED' || !next.bettingRoundComplete) return next
+  return advanceStreet(next)
 }
 
 /** Hides opponents' hole cards and the internal deck before a state is shared with a player. */
