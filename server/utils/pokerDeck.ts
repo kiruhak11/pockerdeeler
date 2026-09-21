@@ -11,6 +11,11 @@ export type Card = Readonly<{
   rank: Rank
 }>
 
+export type DeckSnapshot = Readonly<{
+  cards: readonly Card[]
+  position: number
+}>
+
 function cardKey(card: Card): string {
   return `${card.rank}:${card.suit}`
 }
@@ -66,6 +71,13 @@ export class Deck {
     return this.sequence.slice(this.position)
   }
 
+  snapshot(): DeckSnapshot {
+    return Object.freeze({
+      cards: Object.freeze(this.sequence.map(card => Object.freeze({ ...card }))),
+      position: this.position
+    })
+  }
+
   hasAvailable(card: Card): boolean {
     return this.availableCards.some(candidate => candidate.suit === card.suit && candidate.rank === card.rank)
   }
@@ -82,6 +94,25 @@ export class Deck {
     if (count > this.remainingCount) throw new Error('Cannot deal more cards than remain in the deck.')
     return Array.from({ length: count }, () => this.deal())
   }
+}
+
+/** Captures the server-owned deck sequence and cursor without exposing mutable references. */
+export function snapshotDeck(deck: Deck): DeckSnapshot {
+  if (!(deck instanceof Deck)) throw new Error('A valid deck is required.')
+  return deck.snapshot()
+}
+
+/** Restores a deck snapshot while validating cards and cursor bounds. */
+export function restoreDeck(snapshot: DeckSnapshot): Deck {
+  if (!snapshot || !Array.isArray(snapshot.cards) || !Number.isSafeInteger(snapshot.position)) {
+    throw new Error('Invalid deck snapshot.')
+  }
+  if (snapshot.position < 0 || snapshot.position > snapshot.cards.length) {
+    throw new Error('Invalid deck snapshot position.')
+  }
+  const deck = new Deck(snapshot.cards)
+  for (let index = 0; index < snapshot.position; index += 1) deck.deal()
+  return deck
 }
 
 export function createStandardDeck(): Deck {
