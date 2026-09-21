@@ -44,6 +44,7 @@ function postflopLike(state = start()): InternalHandState {
     currentBet: 0,
     lastFullRaiseSize: state.bigBlind,
     actedThisRound: Object.freeze([]),
+    lastActedAtBet: Object.freeze([]),
     bettingRoundComplete: currentActor === null,
     currentActor
   })
@@ -160,11 +161,257 @@ test('full all-in raise is accepted', () => {
   assert.equal(player.status, 'ALL_IN')
 })
 
-test('short all-in raise is explicitly deferred', () => {
+test('short all-in raise is accepted without changing the full raise size', () => {
   const input = players(3)
   input[1] = { ...input[1]!, stack: 25 }
   const raised = action(startWith(input), 'player-1', 'raise', 20)
-  assert.throws(() => action(raised, 'player-2', 'all-in'), /Short all-in raises are not supported/)
+  const next = action(raised, 'player-2', 'all-in')
+  const player = next.players.find(item => item.playerId === 'player-2')!
+  assert.equal(next.currentBet, 25)
+  assert.equal(next.lastFullRaiseSize, 10)
+  assert.equal(player.streetContribution, 25)
+  assert.equal(player.stack, 0)
+  assert.equal(player.status, 'ALL_IN')
+  assert.equal(next.pot, 55)
+  assert.equal(next.currentActor, 3)
+})
+
+function afterShortAllIn(playerThreeStack = 100): InternalHandState {
+  const input = players(3)
+  input[1] = { ...input[1]!, stack: 25 }
+  input[2] = { ...input[2]!, stack: playerThreeStack }
+  let state = action(startWith(input), 'player-1', 'raise', 20)
+  state = action(state, 'player-2', 'all-in')
+  return state
+}
+
+test('one short all-in does not reopen raise for an earlier actor', () => {
+  let state = afterShortAllIn()
+  state = action(state, 'player-3', 'call')
+  assert.equal(state.currentActor, 1)
+  assert.throws(() => action(state, 'player-1', 'raise', 35), /not reopened/)
+})
+
+test('a short all-in does not reduce the minimum raise target', () => {
+  const state = afterShortAllIn()
+  assert.equal(state.currentBet, 25)
+  assert.equal(state.lastFullRaiseSize, 10)
+  assert.equal(getMinimumRaiseTo(state), 35)
+})
+
+test('a closed player cannot use a full raise action to bypass reopening', () => {
+  let state = afterShortAllIn()
+  state = action(state, 'player-3', 'call')
+  assert.throws(() => action(state, 'player-1', 'raise', 45), /not reopened/)
+})
+
+test('a closed player may use all-in only as an all-in call', () => {
+  const input = players(3)
+  input[0] = { ...input[0]!, stack: 25 }
+  input[1] = { ...input[1]!, stack: 25 }
+  let state = action(startWith(input), 'player-1', 'raise', 20)
+  state = action(state, 'player-2', 'all-in')
+  state = action(state, 'player-3', 'call')
+  state = action(state, 'player-1', 'all-in')
+  assert.equal(state.players.find(player => player.playerId === 'player-1')!.status, 'ALL_IN')
+  assert.equal(state.currentBet, 25)
+})
+
+test('short all-in cannot be submitted as an ordinary under-minimum raise', () => {
+  const state = afterShortAllIn()
+  assert.throws(() => action(state, 'player-3', 'raise', 30), /at least 10/)
+})
+
+test('short all-in bet after a check preserves earlier action history', () => {
+  let state = postflopLike()
+  state = action(state, 'player-1', 'check')
+  state = Object.freeze({
+    ...state,
+    players: Object.freeze(state.players.map(player => player.playerId === 'player-2'
+      ? Object.freeze({ ...player, stack: 5, status: 'ACTIVE' as const })
+      : player)),
+    currentActor: 2
+  })
+  state = action(state, 'player-2', 'all-in')
+  assert.deepEqual(state.actedThisRound, ['player-1', 'player-2'])
+  assert.equal(state.currentBet, 5)
+  assert.equal(state.lastFullRaiseSize, 10)
+  assert.equal(state.currentActor, 3)
+})
+
+test('a short all-in leaves the round open for the next actionable player', () => {
+  const state = afterShortAllIn()
+  assert.equal(state.bettingRoundComplete, false)
+  assert.equal(state.currentActor, 3)
+})
+
+test('short all-in records the action level used for reopening decisions', () => {
+  const state = afterShortAllIn()
+  assert.deepEqual(state.lastActedAtBet, [
+    { playerId: 'player-1', bet: 20 },
+    { playerId: 'player-2', bet: 25 }
+  ])
+})
+
+test('short all-in keeps the all-in player stack at zero and contributions balanced', () => {
+  const state = afterShortAllIn()
+  const player = state.players.find(item => item.playerId === 'player-2')!
+  assert.equal(player.stack, 0)
+  assert.equal(player.contribution, 25)
+  assert.equal(player.streetContribution, 25)
+  assert.ok(state.players.every(item => item.stack >= 0))
+})
+
+test('two short all-ins preserve the original full raise size', () => {
+  let state = afterShortAllIn(29)
+  state = action(state, 'player-3', 'all-in')
+  assert.equal(state.currentBet, 29)
+  assert.equal(state.lastFullRaiseSize, 10)
+  assert.equal(getMinimumRaiseTo(state), 39)
+})
+
+test('full raise after cumulative short all-ins uses the current target contribution', () => {
+  let state = afterShortAllIn(30)
+  state = action(state, 'player-3', 'all-in')
+  state = action(state, 'player-1', 'raise', 40)
+  const player = state.players.find(item => item.playerId === 'player-1')!
+  assert.equal(player.streetContribution, 40)
+  assert.equal(player.contribution, 40)
+})
+
+test('short all-in player is skipped on every subsequent turn', () => {
+  const state = afterShortAllIn()
+  assert.equal(state.currentActor, 3)
+  assert.throws(() => action(state, 'player-2', 'call'), /not this player\'s turn/)
+})
+
+test('an earlier actor may call after a short all-in closes raising', () => {
+  let state = afterShortAllIn()
+  state = action(state, 'player-3', 'call')
+  state = action(state, 'player-1', 'call')
+  assert.equal(state.players.find(player => player.playerId === 'player-1')!.streetContribution, 25)
+  assert.equal(state.bettingRoundComplete, true)
+})
+
+test('an earlier actor may fold after a short all-in closes raising', () => {
+  let state = afterShortAllIn()
+  state = action(state, 'player-3', 'call')
+  state = action(state, 'player-1', 'fold')
+  assert.equal(state.players.find(player => player.playerId === 'player-1')!.status, 'FOLDED')
+  assert.equal(state.bettingRoundComplete, true)
+})
+
+test('an unacted player may make a full raise after a short all-in', () => {
+  const state = afterShortAllIn()
+  assert.equal(state.currentActor, 3)
+  assert.equal(getMinimumRaiseTo(state), 35)
+  const next = action(state, 'player-3', 'raise', 35)
+  assert.equal(next.currentBet, 35)
+  assert.equal(next.lastFullRaiseSize, 10)
+})
+
+test('cumulative short all-ins below the threshold do not reopen raising', () => {
+  let state = afterShortAllIn(29)
+  state = action(state, 'player-3', 'all-in')
+  assert.equal(state.currentBet, 29)
+  assert.equal(state.currentBet - 20, 9)
+  assert.throws(() => action(state, 'player-1', 'raise', 39), /not reopened/)
+})
+
+test('cumulative short all-ins at the exact threshold reopen raising', () => {
+  let state = afterShortAllIn(30)
+  state = action(state, 'player-3', 'all-in')
+  assert.equal(state.currentBet - 20, 10)
+  const next = action(state, 'player-1', 'raise', 40)
+  assert.equal(next.currentBet, 40)
+})
+
+test('cumulative short all-ins above the threshold reopen raising', () => {
+  let state = afterShortAllIn(31)
+  state = action(state, 'player-3', 'all-in')
+  assert.equal(state.currentBet - 20, 11)
+  const next = action(state, 'player-1', 'raise', 41)
+  assert.equal(next.currentBet, 41)
+})
+
+test('a reopened player can make a full raise after cumulative short all-ins', () => {
+  let state = afterShortAllIn(30)
+  state = action(state, 'player-3', 'all-in')
+  state = action(state, 'player-1', 'raise', 45)
+  assert.equal(state.currentBet, 45)
+  assert.equal(state.lastFullRaiseSize, 15)
+})
+
+test('a full raise after a short all-in reopens the normal action sequence', () => {
+  let state = afterShortAllIn()
+  state = action(state, 'player-3', 'raise', 35)
+  assert.equal(state.currentActor, 1)
+  state = action(state, 'player-1', 'raise', 45)
+  assert.equal(state.currentBet, 45)
+  assert.equal(state.lastFullRaiseSize, 10)
+})
+
+test('a larger full raise after a short all-in updates lastFullRaiseSize', () => {
+  let state = afterShortAllIn()
+  state = action(state, 'player-3', 'raise', 35)
+  state = action(state, 'player-1', 'raise', 50)
+  assert.equal(state.currentBet, 50)
+  assert.equal(state.lastFullRaiseSize, 15)
+  assert.equal(getMinimumRaiseTo(state), 65)
+})
+
+test('all-in cannot bypass a closed raise right', () => {
+  let state = afterShortAllIn()
+  state = action(state, 'player-3', 'call')
+  assert.throws(() => action(state, 'player-1', 'all-in'), /not reopened/)
+})
+
+test('short all-in followed by calls completes the betting round', () => {
+  let state = afterShortAllIn()
+  state = action(state, 'player-3', 'call')
+  state = action(state, 'player-1', 'call')
+  assert.equal(state.bettingRoundComplete, true)
+  assert.equal(state.currentActor, null)
+})
+
+test('short all-in followed by a fold completes the betting round', () => {
+  let state = afterShortAllIn()
+  state = action(state, 'player-3', 'call')
+  state = action(state, 'player-1', 'fold')
+  assert.equal(state.bettingRoundComplete, true)
+  assert.equal(state.currentActor, null)
+})
+
+test('multiple short all-ins accumulate and update the pot once each', () => {
+  let state = afterShortAllIn(29)
+  assert.equal(state.pot, 55)
+  state = action(state, 'player-3', 'all-in')
+  assert.equal(state.currentBet, 29)
+  assert.equal(state.pot, 74)
+  state = action(state, 'player-1', 'call')
+  assert.equal(state.pot, 83)
+  assert.equal(state.bettingRoundComplete, true)
+})
+
+test('heads-up short all-in does not reopen an insufficient raise', () => {
+  const input = players(2)
+  input[1] = { ...input[1]!, stack: 25 }
+  let state = action(startWith(input), 'player-1', 'raise', 20)
+  state = action(state, 'player-2', 'all-in')
+  assert.equal(state.currentActor, 1)
+  assert.throws(() => action(state, 'player-1', 'raise', 35), /not reopened/)
+  state = action(state, 'player-1', 'call')
+  assert.equal(state.bettingRoundComplete, true)
+})
+
+test('heads-up exact cumulative threshold reopens raising', () => {
+  const input = players(2)
+  input[1] = { ...input[1]!, stack: 30 }
+  let state = action(startWith(input), 'player-1', 'raise', 20)
+  state = action(state, 'player-2', 'all-in')
+  assert.equal(state.currentBet - 20, 10)
+  state = action(state, 'player-1', 'raise', 40)
+  assert.equal(state.currentBet, 40)
 })
 
 test('fold keeps committed chips and removes the player from future turns', () => {

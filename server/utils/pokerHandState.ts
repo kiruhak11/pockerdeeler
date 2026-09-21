@@ -41,8 +41,14 @@ export type HandState = Readonly<{
   currentActor: number | null
 }>
 
+export type BetActionLevel = Readonly<{
+  playerId: string
+  bet: number
+}>
+
 export type InternalHandState = HandState & Readonly<{
   deck: Deck
+  lastActedAtBet: readonly BetActionLevel[]
 }>
 
 export type PlayerSafeHandPlayer = Readonly<Omit<HandPlayerState, 'holeCards'> & {
@@ -207,7 +213,8 @@ export function startHand(options: StartHandOptions): InternalHandState {
     actedThisRound: Object.freeze([]),
     bettingRoundComplete: currentActor === null,
     currentActor,
-    deck
+    deck,
+    lastActedAtBet: Object.freeze([])
   })
   return state
 }

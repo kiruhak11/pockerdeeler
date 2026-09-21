@@ -1,4 +1,4 @@
-import type { HandPlayerState, InternalHandState } from './pokerHandState'
+import type { BetActionLevel, HandPlayerState, InternalHandState } from './pokerHandState'
 
 export const BETTING_ACTION_TYPES = ['check', 'call', 'bet', 'raise', 'fold', 'all-in'] as const
 export type BettingActionType = typeof BETTING_ACTION_TYPES[number]
@@ -57,6 +57,16 @@ function markActed(acted: readonly string[], playerId: string): string[] {
   return acted.includes(playerId) ? [...acted] : [...acted, playerId]
 }
 
+function recordActionLevel(levels: readonly BetActionLevel[], playerId: string, bet: number): BetActionLevel[] {
+  return [...levels.filter(level => level.playerId !== playerId), Object.freeze({ playerId, bet })]
+}
+
+function hasRaiseRights(state: InternalHandState, playerId: string): boolean {
+  const level = state.lastActedAtBet.find(candidate => candidate.playerId === playerId)
+  if (!level) return true
+  return state.currentBet - level.bet >= state.lastFullRaiseSize
+}
+
 function orderedSeats(state: InternalHandState): number[] {
   return state.players.map(player => player.seat).sort((left, right) => left - right)
 }
@@ -89,7 +99,8 @@ function nextState(
   currentBet: number,
   lastFullRaiseSize: number,
   actedThisRound: readonly string[],
-  changedPlayer: HandPlayerState
+  changedPlayer: HandPlayerState,
+  actionLevel: number
 ): InternalHandState {
   const players = Object.freeze(state.players.map(candidate => candidate.playerId === player.playerId ? changedPlayer : candidate))
   const bettingRoundComplete = roundComplete(players, currentBet, actedThisRound)
@@ -104,7 +115,8 @@ function nextState(
     lastFullRaiseSize,
     actedThisRound: Object.freeze([...actedThisRound]),
     bettingRoundComplete,
-    currentActor
+    currentActor,
+    lastActedAtBet: Object.freeze(recordActionLevel(state.lastActedAtBet, player.playerId, actionLevel))
   })
 }
 
@@ -127,14 +139,14 @@ export function applyBettingAction(state: InternalHandState, action: BettingActi
   switch (action.type) {
     case 'check': {
       if (toCall !== 0) throw new Error(`Cannot check; ${toCall} chips are required to call.`)
-      return nextState(state, player, state.currentBet, state.lastFullRaiseSize, markActed(state.actedThisRound, player.playerId), player)
+      return nextState(state, player, state.currentBet, state.lastFullRaiseSize, markActed(state.actedThisRound, player.playerId), player, state.currentBet)
     }
 
     case 'call': {
       if (toCall === 0) throw new Error('Cannot call when there is nothing to call; use check.')
       const target = Math.min(state.currentBet, available)
       const changedPlayer = withCommittedAmount(player, target)
-      return nextState(state, player, state.currentBet, state.lastFullRaiseSize, markActed(state.actedThisRound, player.playerId), changedPlayer)
+      return nextState(state, player, state.currentBet, state.lastFullRaiseSize, markActed(state.actedThisRound, player.playerId), changedPlayer, state.currentBet)
     }
 
     case 'bet': {
@@ -151,8 +163,9 @@ export function applyBettingAction(state: InternalHandState, action: BettingActi
         player,
         target,
         fullBet ? target : state.lastFullRaiseSize,
-        [player.playerId],
-        changedPlayer
+        fullBet ? [player.playerId] : markActed(state.actedThisRound, player.playerId),
+        changedPlayer,
+        target
       )
     }
 
@@ -161,17 +174,18 @@ export function applyBettingAction(state: InternalHandState, action: BettingActi
       const target = positiveAmount(action)
       if (target <= state.currentBet) throw new Error(`Raise must be greater than the current bet (${state.currentBet}).`)
       if (target > available) throw new Error('Raise amount exceeds the player stack.')
+      if (!hasRaiseRights(state, player.playerId)) throw new Error('Raise is not reopened for this player.')
       const raiseSize = target - state.currentBet
       if (raiseSize < state.lastFullRaiseSize) {
         throw new Error(`Raise must increase the current bet by at least ${state.lastFullRaiseSize}.`)
       }
       const changedPlayer = withCommittedAmount(player, target)
-      return nextState(state, player, target, raiseSize, [player.playerId], changedPlayer)
+      return nextState(state, player, target, raiseSize, [player.playerId], changedPlayer, target)
     }
 
     case 'fold': {
       const changedPlayer = Object.freeze({ ...player, status: 'FOLDED' as const })
-      return nextState(state, player, state.currentBet, state.lastFullRaiseSize, markActed(state.actedThisRound, player.playerId), changedPlayer)
+      return nextState(state, player, state.currentBet, state.lastFullRaiseSize, markActed(state.actedThisRound, player.playerId), changedPlayer, state.currentBet)
     }
 
     case 'all-in': {
@@ -179,20 +193,38 @@ export function applyBettingAction(state: InternalHandState, action: BettingActi
       if (state.currentBet === 0) {
         const fullBet = target >= state.bigBlind
         const changedPlayer = withCommittedAmount(player, target)
-        return nextState(state, player, target, fullBet ? target : state.lastFullRaiseSize, [player.playerId], changedPlayer)
+        return nextState(
+          state,
+          player,
+          target,
+          fullBet ? target : state.lastFullRaiseSize,
+          fullBet ? [player.playerId] : markActed(state.actedThisRound, player.playerId),
+          changedPlayer,
+          target
+        )
       }
 
       if (target <= state.currentBet) {
         const changedPlayer = withCommittedAmount(player, target)
-        return nextState(state, player, state.currentBet, state.lastFullRaiseSize, markActed(state.actedThisRound, player.playerId), changedPlayer)
+        return nextState(state, player, state.currentBet, state.lastFullRaiseSize, markActed(state.actedThisRound, player.playerId), changedPlayer, state.currentBet)
       }
 
+      if (!hasRaiseRights(state, player.playerId)) throw new Error('Raise is not reopened for this player.')
       const raiseSize = target - state.currentBet
       if (raiseSize < state.lastFullRaiseSize) {
-        throw new Error('Short all-in raises are not supported in this betting round.')
+        const changedPlayer = withCommittedAmount(player, target)
+        return nextState(
+          state,
+          player,
+          target,
+          state.lastFullRaiseSize,
+          markActed(state.actedThisRound, player.playerId),
+          changedPlayer,
+          target
+        )
       }
       const changedPlayer = withCommittedAmount(player, target)
-      return nextState(state, player, target, raiseSize, [player.playerId], changedPlayer)
+      return nextState(state, player, target, raiseSize, [player.playerId], changedPlayer, target)
     }
 
     default:
