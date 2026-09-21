@@ -6,7 +6,8 @@ import type {
   PlayerAction as DbPlayerAction,
   GameSession as DbGameSession,
   AuditLog as DbAuditLog,
-  RoomChatMessage as DbRoomChatMessage
+  RoomChatMessage as DbRoomChatMessage,
+  RoomParticipant as DbRoomParticipant
 } from '@prisma/client'
 import { randomUUID } from 'node:crypto'
 import { createError } from 'h3'
@@ -23,6 +24,7 @@ import type { BuyInSettings, PredictionSettings, RoomSettings, RosterSettings } 
 import { ACHIEVEMENTS } from './achievementService'
 import { notifyAdminTelegram } from './adminTelegramNotificationService'
 import { getDistributionPermissionsForUsers, type DistributionCategory } from './distributionConsentService'
+import { claimRoomCode, normalizeGlobalRoomCode } from './roomCodeRegistryService'
 
 export interface CreateRoomPayload {
   accessMode?: 'public' | 'private'
@@ -368,16 +370,10 @@ function validateExtendedSettings(buyIn: BuyInSettings, predictions: PredictionS
   if (predictions.enabled && predictions.treasuryInitialBalance < predictions.virtualLiquidityPerMarket) throw createError({ statusCode: 400, statusMessage: 'Резерв прогнозов должен покрывать хотя бы один рынок' })
 }
 
-async function createUniqueRoomCode(tx: Prisma.TransactionClient) {
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    const candidate = generateRoomCode(6)
-    const exists = await tx.room.findUnique({ where: { code: candidate }, select: { id: true } })
-    if (!exists) {
-      return candidate
-    }
-  }
-
-  throw createError({ statusCode: 500, statusMessage: 'Не удалось сгенерировать код комнаты' })
+async function createUniqueRoomCode(tx: Prisma.TransactionClient, targetId: string) {
+  const candidate = normalizeGlobalRoomCode(generateRoomCode(6))
+  await claimRoomCode(tx, { code: candidate, roomType: 'HOME', targetId })
+  return candidate
 }
 
 export async function createRoom(payload: CreateRoomPayload, appUrl: string) {
@@ -389,7 +385,10 @@ export async function createRoom(payload: CreateRoomPayload, appUrl: string) {
   if (settings.accessMode === 'private' && (!payload.password || payload.password.length < 4)) throw createError({ statusCode: 400, statusMessage: 'Пароль комнаты должен содержать минимум 4 символа' })
   const passwordHash = settings.accessMode === 'private' ? await hashLobbyPassword(payload.password!) : null
 
-  const created = await prisma.$transaction(async (tx) => {
+  let created: { room: DbRoom; dealerParticipant: DbRoomParticipant } | undefined
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    try {
+      created = await prisma.$transaction(async (tx) => {
     const dealerUser = verifiedUser
       ? await tx.user.findUnique({ where: { id: verifiedUser.userId } })
       : null
@@ -398,10 +397,12 @@ export async function createRoom(payload: CreateRoomPayload, appUrl: string) {
       throw createError({ statusCode: 401, statusMessage: 'Аккаунт дилера не найден' })
     }
 
-    const code = await createUniqueRoomCode(tx)
+    const roomId = randomUUID()
+    const code = await createUniqueRoomCode(tx, roomId)
 
     const room = await tx.room.create({
       data: {
+        id: roomId,
         code,
         name: payload.name,
         status: 'lobby',
@@ -445,7 +446,15 @@ export async function createRoom(payload: CreateRoomPayload, appUrl: string) {
       room,
       dealerParticipant: dealerParticipantFinal
     }
-  })
+      })
+      break
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'P2002' && attempt < 11) continue
+      throw error
+    }
+  }
+
+  if (!created) throw createError({ statusCode: 500, statusMessage: 'Не удалось сгенерировать код комнаты' })
 
   const roomCode = created.room.code
   const base = appUrl.replace(/\/$/, '')

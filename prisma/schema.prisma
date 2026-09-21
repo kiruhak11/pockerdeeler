@@ -45,6 +45,35 @@ model Room {
   @@map("rooms")
 }
 
+model RoomCodeRegistry {
+  code      String   @id @db.VarChar(8)
+  roomType  String   @map("room_type") @db.VarChar(16)
+  targetId  String   @map("target_id") @db.VarChar(128)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([roomType, targetId])
+  @@index([roomType])
+  @@index([targetId])
+  @@map("room_code_registry")
+}
+
+model OnlineRoom {
+  id                    String   @id @default(uuid()) @db.Uuid
+  roomCode              String   @unique @map("room_code") @db.VarChar(8)
+  visibility            String   @db.VarChar(8)
+  ownerId               String   @map("owner_id") @db.VarChar(128)
+  status                String   @db.VarChar(16)
+  maxPlayers            Int      @default(6) @map("max_players")
+  privateJoinSecretHash String?  @map("private_join_secret_hash") @db.Text
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([visibility, status])
+  @@index([ownerId])
+  @@map("online_rooms")
+}
+
 model User {
   id                      String           @id @default(uuid()) @db.Uuid
   username                String           @unique @db.VarChar(64)
