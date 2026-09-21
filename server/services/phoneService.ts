@@ -4,6 +4,7 @@ import { prisma } from '../db/client'
 import { hashPassword, sessionHash, issueUserAuthToken, getUserProfile, getUserByToken } from './userAccountService'
 import { acceptRegistrationLegalDocuments, assertRegistrationLegalConfirmations, type RegistrationLegalConfirmationInput } from './legalService'
 import { isolatedAuthTests, accountCookie } from '../utils/accountCookie'
+import { assertPhoneStartLimit } from '../utils/phoneStartLimit'
 
 export function normalizePhone(value: string): string {
   const digits = value.replace(/[\s()+-]/g, '')
@@ -49,6 +50,7 @@ export async function startPhoneVerification(event: H3Event, input: { phone: str
       // that same request after the server is fixed, without duplicating pending
       // or verified requests and without bypassing the hourly rate limit below.
       if (duplicate.status === 'failed' && duplicate.expiresAt > new Date()) {
+        await assertPhoneStartLimit(event, phone)
         const retried = await tx.phoneVerification.update({ where: { id: duplicate.id }, data: { status: 'creating', providerId: null, callPhone: null, checkedAt: null } })
         return { value: retried, created: true }
       }
@@ -56,6 +58,7 @@ export async function startPhoneVerification(event: H3Event, input: { phone: str
     }
     const pending = await tx.phoneVerification.findFirst({ where: { browserHash, phone, purpose: input.purpose, consumedAt: null, expiresAt: { gt: new Date() }, status: { in: ['creating', 'pending', 'verified'] } } })
     if (pending) return { value: pending, created: false }
+    await assertPhoneStartLimit(event, phone)
     const retryable = await tx.phoneVerification.findFirst({ where: { browserHash, phone, purpose: input.purpose, consumedAt: null, expiresAt: { gt: new Date() }, status: 'failed' }, orderBy: { createdAt: 'desc' } })
     if (retryable) {
       const retried = await tx.phoneVerification.update({ where: { id: retryable.id }, data: { status: 'creating', requestId: input.requestId, providerId: null, callPhone: null, checkedAt: null } })

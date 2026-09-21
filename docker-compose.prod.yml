@@ -64,6 +64,7 @@ services:
       YOOKASSA_SHOP_ID: ${YOOKASSA_SHOP_ID:-1468251}
       YOOKASSA_SECRET_KEY: ${YOOKASSA_SECRET_KEY:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      PHONE_TRUSTED_PROXY_IPS: ${PHONE_TRUSTED_PROXY_IPS:-}
       SMS_RU_API_ID: ${SMS_RU_API_ID:?SMS_RU_API_ID must be set in the production environment}
       OWNER_PHONE: ${OWNER_PHONE:?OWNER_PHONE must be set in the production environment}
       ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD:?ADMIN_BOOTSTRAP_PASSWORD must be set in the production environment}
