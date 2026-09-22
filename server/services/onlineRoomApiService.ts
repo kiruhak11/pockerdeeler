@@ -38,6 +38,17 @@ import { publishOnlineRoomChanged } from './onlineRoomRealtimeService'
 import { OnlineRoomPresenceError } from './onlineRoomPresenceService'
 import { isDatabaseUnavailableError } from '../utils/databaseErrors'
 import { resolveRoomSecretPepper } from '../utils/roomSecretPepper'
+import {
+  activateOnlineBuyIn,
+  cancelOnlineBuyIn,
+  clearOnlineCashOut,
+  completeOnlineCashOut,
+  pendingOnlineCashOuts,
+  pendingOnlineBuyIns,
+  prepareOnlineCashOut,
+  reserveOnlineBuyIn,
+  type OnlineBuyInReservation
+} from './onlineRoomAccountingService'
 
 const DEFAULT_OWNER_STACK = 1_000
 const DEFAULT_SMALL_BLIND = 5
@@ -94,7 +105,6 @@ export type OnlineRoomConcurrencyInput = Readonly<{
 }>
 
 export type JoinAuthenticatedOnlineRoomInput = Partial<OnlineRoomConcurrencyInput> & Readonly<{
-  stack?: number
   seat?: number
   joinSecret?: string
 }>
@@ -138,6 +148,7 @@ type PersistentRoom = Readonly<{
   status: 'WAITING' | 'CLOSED'
   maxPlayers: 6
   privateJoinSecretHash: string | null
+  startingStack: number
   createdAt: Date
 }>
 
@@ -310,12 +321,21 @@ function mapRuntimeError(error: unknown): OnlineRoomApiError {
     return new OnlineRoomApiError('CONFLICT', 'The requested room operation conflicts with its current state.', 409)
   }
   if (error instanceof Error) {
+    const errorText = `${error.message} ${(error as { statusMessage?: string }).statusMessage ?? ''}`
+    if (/недостаточно|insufficient/i.test(errorText)) return new OnlineRoomApiError('CONFLICT', 'Недостаточно фишек для входа за стол.', 409)
     if (/not this player['’]s turn/i.test(error.message)) return new OnlineRoomApiError('NOT_YOUR_TURN', error.message, 409)
     if (/round is complete|cannot act|cannot check|cannot call|no longer in the hand|unknown betting action|amount must be|bet is only|raise is only|raise is not reopened|must be at least|must increase|amount exceeds/i.test(error.message)) {
       return new OnlineRoomApiError('INVALID_ACTION', error.message, 400)
     }
   }
   throw error
+}
+
+function firstAvailableOnlineSeat(room: OnlineRoomState, requestedSeat: number | undefined): number {
+  if (requestedSeat !== undefined) return requestedSeat
+  const occupied = new Set(room.pokerTable.players.map(player => player.seat))
+  for (let seat = 1; seat <= 6; seat += 1) if (!occupied.has(seat)) return seat
+  fail('CONFLICT', 'The online room is full.', 409)
 }
 
 function normalizeMetadata(row: {
@@ -326,11 +346,14 @@ function normalizeMetadata(row: {
   status: string
   maxPlayers: number
   privateJoinSecretHash: string | null
+  startingStack: bigint
   createdAt: Date
 }): PersistentRoom {
   if (row.visibility !== 'PUBLIC' && row.visibility !== 'PRIVATE') fail('UNAVAILABLE', 'Stored online room metadata is invalid.', 503)
   if (row.status !== 'WAITING' && row.status !== 'CLOSED') fail('UNAVAILABLE', 'Stored online room metadata is invalid.', 503)
   if (row.maxPlayers !== 6) fail('UNAVAILABLE', 'Stored online room metadata is invalid.', 503)
+  const startingStack = Number(row.startingStack)
+  if (!Number.isSafeInteger(startingStack) || startingStack < 1) fail('UNAVAILABLE', 'Stored online room metadata is invalid.', 503)
   return Object.freeze({
     id: row.id,
     roomCode: normalizeGlobalRoomCode(row.roomCode),
@@ -339,6 +362,7 @@ function normalizeMetadata(row: {
     status: row.status,
     maxPlayers: 6,
     privateJoinSecretHash: row.privateJoinSecretHash,
+    startingStack,
     createdAt: row.createdAt
   })
 }
@@ -354,7 +378,7 @@ async function loadPersistentRoom(code: string): Promise<PersistentRoom> {
   if (!resolution || resolution.roomType !== 'ONLINE') fail('NOT_FOUND', 'Online room was not found.', 404)
   const row = await prisma.onlineRoom.findUnique({
     where: { id: resolution.targetId },
-    select: { id: true, roomCode: true, visibility: true, ownerId: true, status: true, maxPlayers: true, privateJoinSecretHash: true, createdAt: true }
+    select: { id: true, roomCode: true, visibility: true, ownerId: true, status: true, maxPlayers: true, privateJoinSecretHash: true, startingStack: true, createdAt: true }
   })
   if (!row) fail('NOT_FOUND', 'Online room was not found.', 404)
   return normalizeMetadata(row)
@@ -379,6 +403,36 @@ async function requireRuntime(room: PersistentRoom, dependencies?: OnlineRoomApi
 
 async function markClosed(roomId: string): Promise<void> {
   await prisma.onlineRoom.update({ where: { id: roomId }, data: { status: 'CLOSED' } })
+}
+
+async function recoverPendingOnlineCashOuts(roomId: string, dependencies?: OnlineRoomApiDependencies): Promise<void> {
+  const pending = await pendingOnlineCashOuts(roomId)
+  if (pending.length === 0) return
+  let runtime: OnlineRoomRuntimeRecord | null
+  try {
+    runtime = await runtimeStore(dependencies).get(roomId)
+  } catch {
+    // Redis outage must not turn an unresolved reservation into a cash-out.
+    return
+  }
+  const seated = new Set(runtime?.state.pokerTable.players.map(player => player.playerId) ?? [])
+  for (const userId of pending) if (!seated.has(userId)) await completeOnlineCashOut({ roomId, userId })
+}
+
+async function recoverPendingOnlineBuyIns(roomId: string, dependencies?: OnlineRoomApiDependencies): Promise<void> {
+  const pending = await pendingOnlineBuyIns(roomId)
+  if (pending.length === 0) return
+  let runtime: OnlineRoomRuntimeRecord | null
+  try {
+    runtime = await runtimeStore(dependencies).get(roomId)
+  } catch {
+    return
+  }
+  const seated = new Set(runtime?.state.pokerTable.players.map(player => player.playerId) ?? [])
+  for (const reservation of pending) {
+    if (seated.has(reservation.userId)) await activateOnlineBuyIn({ roomId, userId: reservation.userId, sequence: reservation.sequence, seat: runtime!.state.pokerTable.players.find(player => player.playerId === reservation.userId)!.seat })
+    else if (!runtime) await cancelOnlineBuyIn({ roomId, userId: reservation.userId, sequence: reservation.sequence })
+  }
 }
 
 async function syncMetadataAfterMutation(room: PersistentRoom, next: OnlineRoomState): Promise<void> {
@@ -458,7 +512,7 @@ export async function createAuthenticatedOnlineRoom(userId: string, input: Creat
   try {
     // Reserve the code in a closed state first. The metadata becomes joinable only
     // after the authoritative Redis runtime has been created successfully.
-    const created = await createPersistentOnlineRoom({ ownerId: userId, visibility, status: 'CLOSED', maxPlayers: 6, privateJoinSecretHash })
+    const created = await createPersistentOnlineRoom({ ownerId: userId, visibility, status: 'CLOSED', maxPlayers: 6, privateJoinSecretHash, startingStack })
     metadata = Object.freeze({
       ...created,
       privateJoinSecretHash: privateJoinSecretHash ?? null,
@@ -480,12 +534,16 @@ export async function createAuthenticatedOnlineRoom(userId: string, input: Creat
     createdAt: metadata.createdAt,
     ...(privateJoinSecretHash ? { privateJoinSecret: privateJoinSecretHash } : {})
   })
+  let ownerReservation: OnlineBuyInReservation | null = null
   try {
+    ownerReservation = await reserveOnlineBuyIn({ roomId: metadata.id, userId, seat: ownerSeat, amount: startingStack })
     const record = await runtimeStore(dependencies).create(state)
+    await activateOnlineBuyIn({ roomId: metadata.id, userId, sequence: ownerReservation.sequence, seat: ownerSeat })
     try {
       await prisma.onlineRoom.update({ where: { id: metadata.id }, data: { status: 'WAITING' } })
     } catch (error) {
       await runtimeStore(dependencies).remove(metadata.id, record.runtimeRevision).catch(() => undefined)
+      if (ownerReservation) await cancelOnlineBuyIn({ roomId: metadata.id, userId, sequence: ownerReservation.sequence }).catch(() => undefined)
       throw error
     }
     const result = Object.freeze({
@@ -504,6 +562,7 @@ export async function createAuthenticatedOnlineRoom(userId: string, input: Creat
     // The registry claim is deliberately retained, while the metadata is made closed.
     // This prevents an active persistent room without runtime state and prevents code reuse.
     await markClosed(metadata.id).catch(() => undefined)
+    if (ownerReservation) await cancelOnlineBuyIn({ roomId: metadata.id, userId, sequence: ownerReservation.sequence }).catch(() => undefined)
     throw mapRuntimeError(error)
   }
 }
@@ -511,6 +570,12 @@ export async function createAuthenticatedOnlineRoom(userId: string, input: Creat
 export async function getAuthenticatedOnlineRoom(userId: string, code: string, dependencies?: OnlineRoomApiDependencies): Promise<ApiOnlineRoomResult> {
   requireUserId(userId)
   const metadata = await loadPersistentRoom(code)
+  try {
+    await recoverPendingOnlineBuyIns(metadata.id, dependencies)
+    await recoverPendingOnlineCashOuts(metadata.id, dependencies)
+  } catch (error) {
+    throw mapRuntimeError(error)
+  }
   ensureOpen(metadata)
   let record: OnlineRoomRuntimeRecord
   try {
@@ -629,27 +694,99 @@ async function updateRoom(
 }
 
 export async function joinAuthenticatedOnlineRoom(userId: string, code: string, input: JoinAuthenticatedOnlineRoomInput, dependencies?: OnlineRoomApiDependencies): Promise<ApiOnlineRoomResult> {
+  requireUserId(userId)
   const metadata = await loadPersistentRoom(code)
   ensureOpen(metadata)
-  const stack = requireInteger(input.stack ?? DEFAULT_OWNER_STACK, 'Stack', 0, 1_000_000_000)
   const seat = input.seat === undefined ? undefined : requireInteger(input.seat, 'Seat', 1, 6)
   if (metadata.visibility === 'PRIVATE') {
     if (!metadata.privateJoinSecretHash || typeof input.joinSecret !== 'string' || !verifySecret(input.joinSecret, metadata.privateJoinSecretHash)) {
       fail('FORBIDDEN', 'A valid private room credential is required.', 403)
     }
   }
+  const currentRecord = await requireRuntime(metadata, dependencies)
+  const currentPlayer = currentRecord.state.pokerTable.players.find(player => player.playerId === userId)
+  if (currentPlayer) {
+    // A retry/reconnect never buys in again. Keep the historical conflict
+    // semantics for a second seat attempt while returning no new mutation.
+    fail('CONFLICT', 'The authenticated user is already seated in this room.', 409)
+  }
+  const targetSeat = firstAvailableOnlineSeat(currentRecord.state, seat)
+  let reservation: OnlineBuyInReservation
+  try {
+    reservation = await reserveOnlineBuyIn({ roomId: metadata.id, userId, seat: targetSeat, amount: metadata.startingStack })
+  } catch (error) {
+    throw mapRuntimeError(error)
+  }
+  let runtimeJoined = false
   const currentInput: OnlineRoomConcurrencyInput = input.concurrencyToken
     ? { concurrencyToken: input.concurrencyToken, expectedRoomVersion: input.expectedRoomVersion }
-    : { ...input, concurrencyToken: issueConcurrencyToken(metadata.id, (await requireRuntime(metadata, dependencies)).runtimeRevision) }
-  return updateRoom(userId, code, currentInput, state => {
-    const joinSecret = metadata.privateJoinSecretHash ?? undefined
-    if (metadata.visibility === 'PRIVATE' && state.privateJoinSecret !== joinSecret) fail('UNAVAILABLE', 'Private room authorization state is inconsistent.', 503)
-    return joinOnlineRoom(state, { playerId: userId, stack, ...(seat === undefined ? {} : { seat }), ...(joinSecret ? { joinSecret } : {}), expectedRoomVersion: input.expectedRoomVersion })
-  }, dependencies)
+    : { ...input, concurrencyToken: issueConcurrencyToken(metadata.id, currentRecord.runtimeRevision) }
+  try {
+    const result = await updateRoom(userId, code, currentInput, state => {
+      const joinSecret = metadata.privateJoinSecretHash ?? undefined
+      if (metadata.visibility === 'PRIVATE' && state.privateJoinSecret !== joinSecret) fail('UNAVAILABLE', 'Private room authorization state is inconsistent.', 503)
+      const next = joinOnlineRoom(state, { playerId: userId, stack: reservation.amount, seat: reservation.seat, ...(joinSecret ? { joinSecret } : {}), expectedRoomVersion: input.expectedRoomVersion })
+      runtimeJoined = true
+      return next
+    }, dependencies)
+    await activateOnlineBuyIn({ roomId: metadata.id, userId, sequence: reservation.sequence, seat: reservation.seat })
+    return result
+  } catch (error) {
+    if (!runtimeJoined) {
+      // A competing request may have won the Redis CAS after this request's
+      // reservation. Refund only when the authoritative runtime confirms that
+      // the player was never seated; on Redis failure keep the reservation for
+      // recovery instead of risking a free table stack.
+      let playerStillSeated = true
+      try {
+        const latest = await runtimeStore(dependencies).get(metadata.id)
+        playerStillSeated = Boolean(latest?.state.pokerTable.players.some(player => player.playerId === userId))
+      } catch {
+        playerStillSeated = true
+      }
+      if (!playerStillSeated) await cancelOnlineBuyIn({ roomId: metadata.id, userId, sequence: reservation.sequence }).catch(() => undefined)
+    }
+    throw mapRuntimeError(error)
+  }
 }
 
 export async function leaveAuthenticatedOnlineRoom(userId: string, code: string, input: OnlineRoomConcurrencyInput, dependencies?: OnlineRoomApiDependencies): Promise<ApiOnlineRoomResult> {
-  return updateRoom(userId, code, input, state => leaveOnlineRoom(state, userId, { expectedRoomVersion: input.expectedRoomVersion }), dependencies)
+  requireUserId(userId)
+  const metadata = await loadPersistentRoom(code)
+  ensureOpen(metadata)
+  const current = await requireRuntime(metadata, dependencies)
+  const player = current.state.pokerTable.players.find(candidate => candidate.playerId === userId)
+  if (!player) fail('NOT_FOUND', 'The authenticated user is not seated in this room.', 404)
+  const runningHand = current.state.pokerTable.currentHand !== null && current.state.pokerTable.currentHand.street !== 'FINISHED'
+  if (runningHand) {
+    return updateRoom(userId, code, input, state => leaveOnlineRoom(state, userId, { expectedRoomVersion: input.expectedRoomVersion }), dependencies)
+  }
+
+  let prepared: boolean
+  try {
+    prepared = await prepareOnlineCashOut({ roomId: metadata.id, userId, amount: player.stack })
+  } catch (error) {
+    throw mapRuntimeError(error)
+  }
+  let runtimeLeft = false
+  try {
+    const result = await updateRoom(userId, code, input, state => leaveOnlineRoom(state, userId, { expectedRoomVersion: input.expectedRoomVersion }), dependencies)
+    runtimeLeft = true
+    await completeOnlineCashOut({ roomId: metadata.id, userId })
+    return result
+  } catch (error) {
+    if (prepared && !runtimeLeft) {
+      try {
+        const latest = await runtimeStore(dependencies).get(metadata.id)
+        if (latest?.state.pokerTable.players.some(candidate => candidate.playerId === userId)) {
+          await clearOnlineCashOut({ roomId: metadata.id, userId }).catch(() => undefined)
+        }
+      } catch {
+        // Keep the pending reservation through a Redis outage.
+      }
+    }
+    throw mapRuntimeError(error)
+  }
 }
 
 export async function setAuthenticatedOnlineRoomReady(userId: string, code: string, input: ReadyAuthenticatedOnlineRoomInput, dependencies?: OnlineRoomApiDependencies): Promise<ApiOnlineRoomResult> {
@@ -724,13 +861,45 @@ export async function startAuthenticatedOnlineRoomHand(
   }
   const current = await getAuthenticatedOnlineRoom(userId, code, dependencies)
   if (current.room.ownerId !== userId) fail('FORBIDDEN', 'Only the room owner can start a hand.', 403)
+  const metadata = await loadPersistentRoom(code)
+  const currentRecord = await requireRuntime(metadata, dependencies)
+  const settledBeforeStart = advanceCompletedStreet(currentRecord.state, expectedTableStateVersion)
+  const pendingCashOuts = canStartNextHand(settledBeforeStart.pokerTable)
+    ? settledBeforeStart.pendingLeaves.map(playerId => ({
+        userId: playerId,
+        amount: settledBeforeStart.pokerTable.players.find(player => player.playerId === playerId)?.stack ?? 0
+      }))
+    : []
+  try {
+    for (const pending of pendingCashOuts) await prepareOnlineCashOut({ roomId: metadata.id, userId: pending.userId, amount: pending.amount })
+  } catch (error) {
+    throw mapRuntimeError(error)
+  }
+  let runtimeStarted = false
   const updated = await updateRoomInternal(userId, code, { concurrencyToken: current.concurrencyToken }, state => {
     if (state.ownerId !== userId) fail('FORBIDDEN', 'Only the room owner can start a hand.', 403)
     const settled = advanceCompletedStreet(state, expectedTableStateVersion)
     if (!canStartNextHand(settled.pokerTable)) fail('INVALID_ACTION', 'At least two eligible players are required to start a hand.', 409)
     const started = startOnlineRoomHand(settled, { expectedStateVersion: settled.pokerTable.stateVersion })
+    runtimeStarted = true
     return withNextTurnDeadline(advanceCompletedStreet(started))
-  }, dependencies)
+  }, dependencies).catch(async error => {
+    if (!runtimeStarted) {
+      try {
+        const latest = await runtimeStore(dependencies).get(metadata.id)
+        for (const pending of pendingCashOuts) {
+          if (latest?.state.pokerTable.players.some(player => player.playerId === pending.userId)) {
+            await clearOnlineCashOut({ roomId: metadata.id, userId: pending.userId }).catch(() => undefined)
+          }
+        }
+      } catch {
+        // Keep the pending cash-out when Redis is unavailable; recovery will
+        // reconcile it after the authoritative runtime is reachable.
+      }
+    }
+    throw error
+  })
+  for (const pending of pendingCashOuts) await completeOnlineCashOut({ roomId: metadata.id, userId: pending.userId })
   await reconcileTurnTimer(updated.result, dependencies, updated.runtimeRevision)
   return updated.result
 }

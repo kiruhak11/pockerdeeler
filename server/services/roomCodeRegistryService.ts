@@ -23,6 +23,7 @@ export type CreatePersistentOnlineRoomOptions = Readonly<{
   status?: 'WAITING' | 'CLOSED'
   maxPlayers?: 6
   privateJoinSecretHash?: string
+  startingStack?: number
   roomId?: string
   createdAt?: Date
   /** Server-only test seam; production uses crypto-random online codes. */
@@ -39,6 +40,7 @@ export type PersistentOnlineRoomMetadata = Readonly<{
   maxPlayers: 6
   createdAt: string
   updatedAt: string
+  startingStack: number
 }>
 
 function isUniqueConstraintError(error: unknown): boolean {
@@ -77,10 +79,13 @@ function mapOnlineRoom(row: {
   maxPlayers: number
   createdAt: Date
   updatedAt: Date
+  startingStack: bigint
 }): PersistentOnlineRoomMetadata {
   if (row.visibility !== 'PUBLIC' && row.visibility !== 'PRIVATE') throw new Error('Stored online room has invalid visibility.')
   if (row.status !== 'WAITING' && row.status !== 'CLOSED') throw new Error('Stored online room has invalid status.')
   if (row.maxPlayers !== 6) throw new Error('Stored online room has invalid player limit.')
+  const startingStack = Number(row.startingStack)
+  if (!Number.isSafeInteger(startingStack) || startingStack < 1) throw new Error('Stored online room has invalid starting stack.')
   return Object.freeze({
     id: row.id,
     roomCode: normalizeGlobalRoomCode(row.roomCode),
@@ -89,7 +94,8 @@ function mapOnlineRoom(row: {
     status: row.status,
     maxPlayers: 6,
     createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString()
+    updatedAt: row.updatedAt.toISOString(),
+    startingStack
   })
 }
 
@@ -104,6 +110,8 @@ export async function createPersistentOnlineRoom(options: CreatePersistentOnline
   if (!Number.isSafeInteger(maxAttempts) || maxAttempts <= 0 || maxAttempts > 32) throw new Error('maxAttempts must be between 1 and 32.')
 
   const codeGenerator = options.codeGenerator ?? generateOnlineRoomCode
+  const startingStack = options.startingStack ?? 1_000
+  if (!Number.isSafeInteger(startingStack) || startingStack < 1 || startingStack > 1_000_000_000) throw new Error('Starting stack must be a positive safe integer.')
   const roomId = options.roomId
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const candidate = normalizeGlobalRoomCode(codeGenerator())
@@ -119,6 +127,7 @@ export async function createPersistentOnlineRoom(options: CreatePersistentOnline
             status: options.status ?? 'WAITING',
             maxPlayers: 6,
             privateJoinSecretHash: options.privateJoinSecretHash,
+            startingStack: BigInt(startingStack),
             ...(options.createdAt ? { createdAt: options.createdAt } : {})
           }
         })

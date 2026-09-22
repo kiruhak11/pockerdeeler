@@ -50,6 +50,8 @@ function statusCode(error: unknown): number | undefined {
 
 function friendlyError(error: unknown): string {
   const status = statusCode(error)
+  const message = String((error as { statusMessage?: string; data?: { statusMessage?: string; message?: string } }).statusMessage ?? (error as { data?: { statusMessage?: string; message?: string } }).data?.statusMessage ?? (error as { data?: { message?: string } }).data?.message ?? '')
+  if (status === 409 && /недостаточно|insufficient/i.test(message)) return 'Недостаточно фишек для входа за стол.'
   if (status === 401 || status === 403) return 'Войдите в аккаунт, чтобы открыть этот стол.'
   if (status === 404 || status === 410) return 'Стол не найден или уже закрыт.'
   if (status === 503) return 'Сервис стола временно недоступен. Попробуйте ещё раз.'

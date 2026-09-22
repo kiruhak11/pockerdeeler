@@ -7,7 +7,6 @@ import { assertOnlineRoomMutationOrigin, requireOnlineRoomUser } from '../../../
 const schema = z.object({
   concurrencyToken: z.string().min(32).max(2048).optional(),
   expectedRoomVersion: z.number().int().min(0).optional(),
-  stack: z.number().int().min(0).max(1_000_000_000).optional(),
   seat: z.number().int().min(1).max(6).optional(),
   joinSecret: z.string().min(1).max(128).optional()
 }).strict()

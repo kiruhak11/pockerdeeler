@@ -66,12 +66,37 @@ model OnlineRoom {
   status                String   @db.VarChar(16)
   maxPlayers            Int      @default(6) @map("max_players")
   privateJoinSecretHash String?  @map("private_join_secret_hash") @db.Text
+  startingStack         BigInt   @default(1000) @map("starting_stack")
   createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt             DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  players              OnlineRoomPlayer[]
 
   @@index([visibility, status])
   @@index([ownerId])
   @@map("online_rooms")
+}
+
+model OnlineRoomPlayer {
+  id             String    @id @default(uuid()) @db.Uuid
+  roomId         String    @map("room_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  seat           Int
+  buyIn          BigInt    @map("buy_in")
+  status         String    @default("RESERVING") @db.VarChar(24)
+  cashOutPending BigInt?   @map("cash_out_pending")
+  buyInSequence  Int       @default(0) @map("buy_in_sequence")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  cashedOutAt    DateTime? @map("cashed_out_at") @db.Timestamptz(6)
+
+  room OnlineRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+  @@index([userId, status])
+  @@index([roomId, status])
+  @@map("online_room_players")
 }
 
 model User {
@@ -115,6 +140,7 @@ model User {
   receivedRoomInvites          RoomInvite[]                         @relation("RoomInviteReceiver")
   roomChatMessages             RoomChatMessage[]
   wallet                       UserWallet?
+  onlineRoomPlayers            OnlineRoomPlayer[]
   roomMemberAccounts           RoomMemberAccount[]
   predictionRatingEvents       PredictionRatingEvent[]
   tableRatingEvents            TableRatingEvent[]
