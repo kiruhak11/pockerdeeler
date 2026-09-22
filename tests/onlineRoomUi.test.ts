@@ -274,6 +274,16 @@ test('online page synchronizes HTTP concurrency token from WebSocket snapshots',
   assert.match(source, /applyAuthoritativeState\(next, token\)/)
 })
 
+test('ONLINE create exposes the HOME poker settings', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/pages/online/create.vue'), 'utf8')
+  assert.match(source, /startingStack/)
+  assert.match(source, /smallBlind/)
+  assert.match(source, /bigBlind/)
+  assert.match(source, /startingStack: startingStack\.value/)
+  assert.match(source, /smallBlind: smallBlind\.value/)
+  assert.match(source, /bigBlind: bigBlind\.value/)
+})
+
 test('online page ignores older HTTP snapshots and clears stale notices after success', () => {
   const source = readFileSync(resolve(process.cwd(), 'app/pages/online/[code].vue'), 'utf8')
   assert.match(source, /next\.roomVersion < state\.value\.roomVersion/)

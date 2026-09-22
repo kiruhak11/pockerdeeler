@@ -7,6 +7,9 @@ const account = useAccountStore()
 const { loadMe } = useAccountAuth()
 const visibility = ref<'PUBLIC' | 'PRIVATE'>('PUBLIC')
 const privateJoinSecret = ref('')
+const startingStack = ref(1000)
+const smallBlind = ref(5)
+const bigBlind = ref(10)
 const busy = ref(false)
 const error = ref('')
 
@@ -22,7 +25,13 @@ async function createRoom() {
     }
     const result = await $fetch<{ room: { roomCode: string } }>('/api/online/rooms', {
       method: 'POST',
-      body: { visibility: visibility.value, ...(visibility.value === 'PRIVATE' ? { privateJoinSecret: privateJoinSecret.value } : {}) },
+      body: {
+        visibility: visibility.value,
+        startingStack: startingStack.value,
+        smallBlind: smallBlind.value,
+        bigBlind: bigBlind.value,
+        ...(visibility.value === 'PRIVATE' ? { privateJoinSecret: privateJoinSecret.value } : {})
+      },
       retry: 0
     })
     privateJoinSecret.value = ''
@@ -58,6 +67,17 @@ useHead({ title: 'Создать онлайн-стол · Poker Dealer Desk' })
         <input v-model="privateJoinSecret" class="input" type="password" autocomplete="new-password" maxlength="128" placeholder="Придумайте пароль">
       </label>
       <p v-if="visibility === 'PRIVATE'" class="page-subtitle">Пароль не добавляется в ссылку и не сохраняется в браузере.</p>
+      <div class="online-create__settings">
+        <label>Стартовый стек
+          <input v-model.number="startingStack" class="input" type="number" min="1" max="1000000" required>
+        </label>
+        <label>Малый блайнд
+          <input v-model.number="smallBlind" class="input" type="number" min="1" max="1000000" required>
+        </label>
+        <label>Большой блайнд
+          <input v-model.number="bigBlind" class="input" type="number" :min="smallBlind" max="1000000" required>
+        </label>
+      </div>
       <p v-if="error" class="online-create__error" role="alert">{{ error }}</p>
       <button class="btn" type="button" :disabled="busy || (visibility === 'PRIVATE' && !privateJoinSecret)" @click="createRoom">{{ busy ? 'Создаём…' : 'Создать стол' }}</button>
     </section>
@@ -70,8 +90,10 @@ useHead({ title: 'Создать онлайн-стол · Poker Dealer Desk' })
 .online-create__panel { display: grid; gap: 1rem; margin-top: .8rem; padding: clamp(1rem, 4vw, 2rem); border-color: rgba(102,190,255,.3); background: linear-gradient(145deg, #173b46, #10252e); }
 .online-create h1 { margin: .2rem 0 0; }
 .online-create label { display: grid; gap: .4rem; }
+.online-create__settings { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .7rem; }
 .online-create__visibility { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .4rem; padding: .3rem; border-radius: 16px; background: rgba(0,0,0,.2); }
 .online-create__visibility button { min-height: 46px; border: 1px solid transparent; border-radius: 13px; color: var(--text-muted); background: transparent; cursor: pointer; }
 .online-create__visibility button.active { border-color: rgba(102,190,255,.35); color: var(--text-primary); background: rgba(102,190,255,.14); }
 .online-create__error { margin: 0; color: var(--danger); }
+@media (max-width: 620px) { .online-create__settings { grid-template-columns: 1fr; } }
 </style>

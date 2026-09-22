@@ -440,7 +440,7 @@ export async function createAuthenticatedOnlineRoom(userId: string, input: Creat
   requireUserId(userId)
   const visibility = input.visibility ?? 'PUBLIC'
   if (visibility !== 'PUBLIC' && visibility !== 'PRIVATE') fail('BAD_REQUEST', 'Room visibility must be PUBLIC or PRIVATE.', 400)
-  const startingStack = requireInteger(input.startingStack ?? DEFAULT_OWNER_STACK, 'Starting stack', 0, 1_000_000_000)
+  const startingStack = requireInteger(input.startingStack ?? DEFAULT_OWNER_STACK, 'Starting stack', 1, 1_000_000_000)
   const smallBlind = requireInteger(input.smallBlind ?? DEFAULT_SMALL_BLIND, 'Small blind', 1, 1_000_000_000)
   const bigBlind = requireInteger(input.bigBlind ?? DEFAULT_BIG_BLIND, 'Big blind', smallBlind, 1_000_000_000)
   const ownerSeat = requireInteger(input.ownerSeat ?? 1, 'Owner seat', 1, 6)

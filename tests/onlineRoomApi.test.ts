@@ -41,11 +41,14 @@ function runtime(): OnlineRoomRuntimeStore {
   return new OnlineRoomRuntimeStore({ redis: redis!, keyPrefix, ttlSeconds: 60 })
 }
 
-async function createRoomApi(options: { visibility?: 'PUBLIC' | 'PRIVATE'; secret?: string } = {}): Promise<{ result: ApiOnlineRoomResult; runtime: OnlineRoomRuntimeStore; ownerId: string }> {
+async function createRoomApi(options: { visibility?: 'PUBLIC' | 'PRIVATE'; secret?: string; startingStack?: number; smallBlind?: number; bigBlind?: number } = {}): Promise<{ result: ApiOnlineRoomResult; runtime: OnlineRoomRuntimeStore; ownerId: string }> {
   const ownerId = `owner-${randomUUID()}`
   const runtimeStore = runtime()
   const result = await createAuthenticatedOnlineRoom(ownerId, {
     visibility: options.visibility,
+    ...(options.startingStack === undefined ? {} : { startingStack: options.startingStack }),
+    ...(options.smallBlind === undefined ? {} : { smallBlind: options.smallBlind }),
+    ...(options.bigBlind === undefined ? {} : { bigBlind: options.bigBlind }),
     ...(options.secret === undefined ? {} : { privateJoinSecret: options.secret })
   }, { runtime: runtimeStore })
   roomIds.push(result.room.roomId)
@@ -141,6 +144,23 @@ test('public ONLINE room creation validates public settings', { skip: !isolated 
   const room = await createRoomApi({ visibility: 'PUBLIC' })
   assert.equal(room.result.room.visibility, 'PUBLIC')
   assert.equal((room.result.room as Record<string, unknown>).privateJoinSecret, undefined)
+})
+
+test('ONLINE creation persists HOME poker settings and uses them for the first hand', { skip: !isolated }, async () => {
+  const room = await createRoomApi({ visibility: 'PUBLIC', startingStack: 321, smallBlind: 7, bigBlind: 14 })
+  assert.equal(room.result.room.pokerTable.smallBlind, 7)
+  assert.equal(room.result.room.pokerTable.bigBlind, 14)
+  assert.equal(room.result.room.pokerTable.players[0]?.stack, 321)
+  const player = await join(room, 'settings-player')
+  const active = await activeRoom(room, room.ownerId, player.playerId)
+  assert.equal(active.room.pokerTable.currentHand?.smallBlind, 7)
+  assert.equal(active.room.pokerTable.currentHand?.bigBlind, 14)
+  assert.equal(active.room.pokerTable.currentHand?.pot, 21)
+})
+
+test('ONLINE starting stack and blind settings reject invalid values server-side', { skip: !isolated }, async () => {
+  await assert.rejects(createAuthenticatedOnlineRoom('invalid-settings', { startingStack: 0 }, { runtime: runtime() }), (error: unknown) => error instanceof OnlineRoomApiError && error.statusCode === 400)
+  await assert.rejects(createAuthenticatedOnlineRoom('invalid-blinds', { smallBlind: 20, bigBlind: 10 }, { runtime: runtime() }), (error: unknown) => error instanceof OnlineRoomApiError && error.statusCode === 400)
 })
 
 test('private ONLINE creation stores no plaintext credential in metadata or safe state', { skip: !isolated }, async () => {

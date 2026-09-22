@@ -6,7 +6,7 @@ import { assertOnlineRoomMutationOrigin, requireOnlineRoomUser } from '../../../
 
 const schema = z.object({
   visibility: z.enum(['PUBLIC', 'PRIVATE']).optional(),
-  startingStack: z.number().int().min(0).max(1_000_000_000).optional(),
+  startingStack: z.number().int().min(1).max(1_000_000_000).optional(),
   smallBlind: z.number().int().min(1).max(1_000_000_000).optional(),
   bigBlind: z.number().int().min(1).max(1_000_000_000).optional(),
   ownerSeat: z.number().int().min(1).max(6).optional(),
