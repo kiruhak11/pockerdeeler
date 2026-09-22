@@ -342,6 +342,7 @@ function serializeState(state: OnlineRoomState): JsonRecord {
     maxPlayers: state.maxPlayers,
     pokerTable: serializeTable(state.pokerTable),
     roomVersion: state.roomVersion,
+    turnDeadlineAt: state.turnDeadlineAt,
     pendingLeaves: [...state.pendingLeaves],
     ...(state.privateJoinSecret === undefined ? {} : { privateJoinSecret: state.privateJoinSecret })
   }
@@ -366,6 +367,9 @@ function deserializeState(value: unknown): OnlineRoomState {
     maxPlayers: ONLINE_ROOM_MAX_PLAYERS,
     pokerTable: deserializeTable(raw.pokerTable),
     roomVersion: requireSafeInteger(raw.roomVersion, 'Room version'),
+    turnDeadlineAt: raw.turnDeadlineAt === null || raw.turnDeadlineAt === undefined
+      ? null
+      : requireSafeInteger(raw.turnDeadlineAt, 'Turn deadline', 1),
     pendingLeaves: Object.freeze(requireArray(raw.pendingLeaves, 'Pending leaves').map((id, index) => requireString(id, `Pending leave ${index}`))),
     ...(privateJoinSecret === undefined ? {} : { privateJoinSecret })
   })

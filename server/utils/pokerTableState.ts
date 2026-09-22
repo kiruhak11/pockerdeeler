@@ -2,6 +2,7 @@ import { applyBettingAction, type BettingAction } from './pokerBetting'
 import { type Card, type Deck } from './pokerDeck'
 import { prepareNextHand, type NextHandPlayer } from './pokerNextHand'
 import {
+  advanceStreet,
   type HandPlayerState,
   type InternalHandState,
   type PlayerSafeHandPlayer
@@ -341,6 +342,7 @@ export type PublicTableHandState = Readonly<{
   currentBet: number
   bettingRoundComplete: boolean
   currentActor: number | null
+  turnDeadlineAt: number | null
   players: readonly PublicTableHandPlayer[]
 }>
 
@@ -350,7 +352,7 @@ export type PlayerSafeTableState = Readonly<Omit<PokerTableState, 'currentHand' 
   currentHand: PublicTableHandState | null
 }>
 
-function safeHand(hand: InternalHandState, viewerPlayerId?: string): PublicTableHandState {
+function safeHand(hand: InternalHandState, viewerPlayerId: string | undefined, turnDeadlineAt: number | null): PublicTableHandState {
   const players = Object.freeze(hand.players.map(player => Object.freeze({
     playerId: player.playerId,
     seat: player.seat,
@@ -373,12 +375,13 @@ function safeHand(hand: InternalHandState, viewerPlayerId?: string): PublicTable
     currentBet: hand.currentBet,
     bettingRoundComplete: hand.bettingRoundComplete,
     currentActor: hand.currentActor,
+    turnDeadlineAt,
     players
   })
 }
 
 /** Builds a public table snapshot; unknown/spectator viewers receive no hole cards. */
-export function toPlayerSafeTableState(table: PokerTableState, viewerPlayerId?: string): PlayerSafeTableState {
+export function toPlayerSafeTableState(table: PokerTableState, viewerPlayerId?: string, turnDeadlineAt: number | null = null): PlayerSafeTableState {
   assertTable(table)
   return Object.freeze({
     tableId: table.tableId,
@@ -391,6 +394,19 @@ export function toPlayerSafeTableState(table: PokerTableState, viewerPlayerId?: 
     bigBlind: table.bigBlind,
     seats: Object.freeze(table.seats.map(seat => Object.freeze({ ...seat }))),
     players: Object.freeze(table.players.map(player => Object.freeze({ ...player }))),
-    currentHand: table.currentHand ? safeHand(table.currentHand, viewerPlayerId) : null
+    currentHand: table.currentHand ? safeHand(table.currentHand, viewerPlayerId, turnDeadlineAt) : null
+  })
+}
+
+/** Advances a completed hand street through the existing server-side street engine. */
+export function advanceTableStreet(table: PokerTableState, expectedStateVersion?: number): PokerTableState {
+  assertTable(table)
+  assertExpectedVersion(table, expectedStateVersion)
+  if (!table.currentHand || table.currentHand.street === 'FINISHED') fail('NO_ACTIVE_HAND', 'The table has no active hand.')
+  const hand = advanceStreet(table.currentHand)
+  return withVersion(table, {
+    players: syncPlayersFromHand(table, hand),
+    currentHand: hand,
+    status: hand.street === 'FINISHED' ? 'WAITING' : 'IN_HAND'
   })
 }

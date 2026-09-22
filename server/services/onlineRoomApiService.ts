@@ -8,13 +8,21 @@ import {
   setOnlineRoomReady,
   setOnlineRoomSittingOut,
   setOnlineRoomConnected,
+  setOnlineRoomTurnDeadline,
   startOnlineRoomHand,
   toPlayerSafeOnlineRoomState,
   type ApplyOnlineRoomActionOptions,
   OnlineRoomError,
   type OnlineRoomState
 } from '../utils/pokerOnlineRoom'
-import { PokerTableError, canStartNextHand } from '../utils/pokerTableState'
+import { PokerTableError, advanceTableStreet, canStartNextHand } from '../utils/pokerTableState'
+import { getToCall } from '../utils/pokerBetting'
+import {
+  getOnlineRoomTurnTimerService,
+  ONLINE_ROOM_TURN_TIMEOUT_MS,
+  type OnlineRoomTurnTimerJob,
+  type OnlineRoomTurnTimerService
+} from './onlineRoomTurnTimerService'
 import { hashSecret, verifySecret } from './authService'
 import {
   createPersistentOnlineRoom,
@@ -66,6 +74,7 @@ function fail(code: OnlineRoomApiErrorCode, message: string, statusCode: number)
 
 export type OnlineRoomApiDependencies = Readonly<{
   runtime?: OnlineRoomRuntimeStore
+  timer?: OnlineRoomTurnTimerService
 }>
 
 export type CreateAuthenticatedOnlineRoomInput = Readonly<{
@@ -127,6 +136,67 @@ let defaultRuntime: OnlineRoomRuntimeStore | undefined
 function runtimeStore(dependencies?: OnlineRoomApiDependencies): OnlineRoomRuntimeStore {
   if (dependencies?.runtime) return dependencies.runtime
   return (defaultRuntime ??= new OnlineRoomRuntimeStore())
+}
+
+function timerStore(dependencies?: OnlineRoomApiDependencies): OnlineRoomTurnTimerService {
+  if (dependencies?.timer) return dependencies.timer
+  return getOnlineRoomTurnTimerService()
+}
+
+function advanceCompletedStreet(room: OnlineRoomState): OnlineRoomState {
+  const hand = room.pokerTable.currentHand
+  if (!hand || !hand.bettingRoundComplete || hand.street === 'SHOWDOWN' || hand.street === 'FINISHED') return room
+  const pokerTable = advanceTableStreet(room.pokerTable)
+  return Object.freeze({
+    ...room,
+    pokerTable,
+    status: pokerTable.status === 'WAITING' ? 'WAITING' as const : 'IN_HAND' as const
+  })
+}
+
+function nextTurnDeadline(room: OnlineRoomState, now = Date.now()): number | null {
+  const hand = room.pokerTable.currentHand
+  if (!hand || hand.street === 'SHOWDOWN' || hand.street === 'FINISHED' || hand.bettingRoundComplete || hand.currentActor === null) return null
+  const actor = hand.players.find(player => player.seat === hand.currentActor)
+  if (!actor || actor.status !== 'ACTIVE' || actor.stack <= 0) return null
+  return now + ONLINE_ROOM_TURN_TIMEOUT_MS
+}
+
+function withNextTurnDeadline(room: OnlineRoomState, now = Date.now()): OnlineRoomState {
+  return setOnlineRoomTurnDeadline(room, nextTurnDeadline(room, now))
+}
+
+function timerJobFromSafeResult(result: ApiOnlineRoomResult, runtimeRevision?: number): Omit<OnlineRoomTurnTimerJob, 'jobId'> | null {
+  const hand = result.room.pokerTable.currentHand
+  const deadlineAt = hand?.turnDeadlineAt ?? null
+  if (!hand || deadlineAt === null || hand.currentActor === null || hand.street === 'SHOWDOWN' || hand.street === 'FINISHED' || hand.bettingRoundComplete) return null
+  const actor = hand.players.find(player => player.seat === hand.currentActor)
+  if (!actor || actor.status !== 'ACTIVE' || actor.stack <= 0) return null
+  return {
+    roomId: result.room.roomId,
+    roomCode: result.room.roomCode,
+    playerId: actor.playerId,
+    expectedTableStateVersion: result.room.pokerTable.stateVersion,
+    handId: hand.handId,
+    street: hand.street,
+    deadlineAt,
+    ...(runtimeRevision === undefined ? {} : { runtimeRevision })
+  }
+}
+
+async function reconcileTurnTimer(result: ApiOnlineRoomResult, dependencies?: OnlineRoomApiDependencies, runtimeRevision?: number): Promise<void> {
+  const timer = timerStore(dependencies)
+  const job = timerJobFromSafeResult(result, runtimeRevision)
+  if (!job) {
+    await timer.clear(result.room.roomId)
+    return
+  }
+  timer.start(jobToProcessor(dependencies))
+  await timer.schedule(job)
+}
+
+function jobToProcessor(dependencies?: OnlineRoomApiDependencies) {
+  return async (job: OnlineRoomTurnTimerJob) => processAuthenticatedOnlineRoomTimeout(job, dependencies)
 }
 
 function requireInteger(value: unknown, label: string, min: number, max: number): number {
@@ -387,7 +457,18 @@ export async function getAuthenticatedOnlineRoom(userId: string, code: string, d
   if (metadata.visibility === 'PRIVATE' && !record.state.pokerTable.players.some(player => player.playerId === userId)) {
     fail('FORBIDDEN', 'Join the private room before viewing its state.', 403)
   }
-  return Object.freeze({ room: toPlayerSafeOnlineRoomState(record.state, userId), concurrencyToken: issueConcurrencyToken(record.state.roomId, record.runtimeRevision) })
+  const result = Object.freeze({ room: toPlayerSafeOnlineRoomState(record.state, userId), concurrencyToken: issueConcurrencyToken(record.state.roomId, record.runtimeRevision) })
+  if (result.room.pokerTable.currentHand?.turnDeadlineAt !== null && result.room.pokerTable.currentHand?.turnDeadlineAt !== undefined) {
+    try {
+      const timer = timerStore(dependencies)
+      timer.start(jobToProcessor(dependencies))
+      const job = timerJobFromSafeResult(result, record.runtimeRevision)
+      if (job) await timer.schedule(job)
+    } catch {
+      // Redis remains authoritative; a request cannot execute a local timeout fallback.
+    }
+  }
+  return result
 }
 
 /**
@@ -427,6 +508,7 @@ type RuntimeActionInput = Readonly<{
 type InternalRoomUpdateResult = Readonly<{
   result: ApiOnlineRoomResult
   duplicate: boolean
+  runtimeRevision: number
 }>
 
 async function updateRoomInternal(
@@ -464,7 +546,8 @@ async function updateRoomInternal(
     }
     return Object.freeze({
       result: Object.freeze({ room: toPlayerSafeOnlineRoomState(updated.record.state, userId), concurrencyToken: issueConcurrencyToken(updated.record.state.roomId, updated.record.runtimeRevision) }),
-      duplicate: updated.duplicate
+      duplicate: updated.duplicate,
+      runtimeRevision: updated.record.runtimeRevision
     })
   } catch (error) {
     throw mapRuntimeError(error)
@@ -550,13 +633,14 @@ export async function applyAuthenticatedOnlineRoomAction(
     userId,
     code,
     { concurrencyToken: current.concurrencyToken },
-    state => applyOnlineRoomAction(state, {
+    state => withNextTurnDeadline(advanceCompletedStreet(applyOnlineRoomAction(state, {
       action: { ...input.action, playerId: userId },
       expectedStateVersion: input.expectedTableStateVersion
-    }),
+    }))),
     dependencies,
     { playerId: userId, actionId: input.actionId, fingerprint: actionFingerprint(input) }
   )
+  if (!updated.duplicate) await reconcileTurnTimer(updated.result, dependencies, updated.runtimeRevision)
   return Object.freeze({ ...updated.result, duplicate: updated.duplicate })
 }
 
@@ -573,9 +657,68 @@ export async function startAuthenticatedOnlineRoomHand(
   }
   const current = await getAuthenticatedOnlineRoom(userId, code, dependencies)
   if (current.room.ownerId !== userId) fail('FORBIDDEN', 'Only the room owner can start a hand.', 403)
-  return updateRoom(userId, code, { concurrencyToken: current.concurrencyToken }, state => {
+  const updated = await updateRoomInternal(userId, code, { concurrencyToken: current.concurrencyToken }, state => {
     if (state.ownerId !== userId) fail('FORBIDDEN', 'Only the room owner can start a hand.', 403)
     if (!canStartNextHand(state.pokerTable)) fail('INVALID_ACTION', 'At least two eligible players are required to start a hand.', 409)
-    return startOnlineRoomHand(state, { expectedStateVersion: expectedTableStateVersion })
+    return withNextTurnDeadline(advanceCompletedStreet(startOnlineRoomHand(state, { expectedStateVersion: expectedTableStateVersion })))
   }, dependencies)
+  await reconcileTurnTimer(updated.result, dependencies, updated.runtimeRevision)
+  return updated.result
+}
+
+/** Executes one claimed timeout through the same authoritative poker action path. */
+export async function processAuthenticatedOnlineRoomTimeout(
+  job: OnlineRoomTurnTimerJob,
+  dependencies?: OnlineRoomApiDependencies
+): Promise<'COMPLETED' | 'STALE' | 'RETRY'> {
+  let current: OnlineRoomRuntimeRecord | null
+  try {
+    current = await runtimeStore(dependencies).get(job.roomId)
+  } catch {
+    return 'RETRY'
+  }
+  if (!current) return 'STALE'
+  if (job.deadlineAt > Date.now() || (job.runtimeRevision !== undefined && current.runtimeRevision !== job.runtimeRevision)) return 'STALE'
+  const state = current.state
+  const hand = state.pokerTable.currentHand
+  if (!hand || state.turnDeadlineAt !== job.deadlineAt || state.pokerTable.stateVersion !== job.expectedTableStateVersion ||
+      hand.handId !== job.handId || hand.street !== job.street || hand.currentActor === null || hand.bettingRoundComplete) {
+    return 'STALE'
+  }
+  const actor = hand.players.find(player => player.seat === hand.currentActor)
+  if (!actor || actor.playerId !== job.playerId || actor.status !== 'ACTIVE' || actor.stack <= 0) return 'STALE'
+
+  const timeoutType = getToCall(hand, actor.playerId) === 0 ? 'check' as const : 'fold' as const
+  try {
+    const updated = await runtimeStore(dependencies).update(state.roomId, current.runtimeRevision, latest => {
+      const latestHand = latest.pokerTable.currentHand
+      if (!latestHand || latest.turnDeadlineAt !== job.deadlineAt || latest.pokerTable.stateVersion !== job.expectedTableStateVersion ||
+          (job.runtimeRevision !== undefined && current.runtimeRevision !== job.runtimeRevision) ||
+          latestHand.handId !== job.handId || latestHand.street !== job.street || latestHand.currentActor === null || latestHand.bettingRoundComplete) {
+        throw new OnlineRoomApiError('STALE_STATE', 'The turn timer is stale.', 409)
+      }
+      const latestActor = latestHand.players.find(player => player.seat === latestHand.currentActor)
+      if (!latestActor || latestActor.playerId !== job.playerId || latestActor.status !== 'ACTIVE' || latestActor.stack <= 0) {
+        throw new OnlineRoomApiError('STALE_STATE', 'The turn timer is stale.', 409)
+      }
+      return withNextTurnDeadline(advanceCompletedStreet(applyOnlineRoomAction(latest, {
+        action: { playerId: job.playerId, type: timeoutType },
+        expectedStateVersion: job.expectedTableStateVersion
+      })))
+    })
+    const safe = Object.freeze({ room: toPlayerSafeOnlineRoomState(updated.state), concurrencyToken: issueConcurrencyToken(updated.state.roomId, updated.runtimeRevision) })
+    void publishOnlineRoomChanged({
+      type: 'ROOM_CHANGED',
+      roomId: updated.state.roomId,
+      roomCode: updated.state.roomCode,
+      roomVersion: updated.state.roomVersion,
+      tableStateVersion: updated.state.pokerTable.stateVersion
+    }).catch(() => undefined)
+    await reconcileTurnTimer(safe, dependencies, updated.runtimeRevision)
+    return 'COMPLETED'
+  } catch (error) {
+    if (error instanceof OnlineRoomApiError && error.code === 'STALE_STATE') return 'STALE'
+    if (error instanceof OnlineRoomRuntimeStoreError && error.code === 'STALE_STATE') return 'STALE'
+    return 'RETRY'
+  }
 }

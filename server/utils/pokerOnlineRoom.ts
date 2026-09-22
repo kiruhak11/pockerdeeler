@@ -42,6 +42,8 @@ export type OnlineRoomState = Readonly<{
   maxPlayers: typeof ONLINE_ROOM_MAX_PLAYERS
   pokerTable: PokerTableState
   roomVersion: number
+  /** Server-authoritative deadline for the current actor, or null when no timer is active. */
+  turnDeadlineAt: number | null
   /** Players who requested leave during a hand; released after the hand. */
   pendingLeaves: readonly string[]
   /** Internal server-only authorization material for private rooms. */
@@ -290,6 +292,7 @@ export function createOnlineRoom(options: CreateOnlineRoomOptions): OnlineRoomSt
     maxPlayers: ONLINE_ROOM_MAX_PLAYERS,
     pokerTable,
     roomVersion: 1,
+    turnDeadlineAt: null,
     pendingLeaves: [],
     ...(visibility === 'PRIVATE' ? { privateJoinSecret: options.privateJoinSecret ?? createPrivateSecret() } : {})
   })
@@ -414,8 +417,19 @@ export function startOnlineRoomHand(room: OnlineRoomState, options: StartOnlineR
     ...reconciled,
     pokerTable,
     status: roomStatusForTable(pokerTable),
+    turnDeadlineAt: null,
     pendingLeaves: reconciled.pendingLeaves
   })
+}
+
+/** Sets the server-owned turn deadline without changing table state or gameplay. */
+export function setOnlineRoomTurnDeadline(room: OnlineRoomState, deadlineAt: number | null): OnlineRoomState {
+  assertRoom(room)
+  if (deadlineAt !== null && (!Number.isSafeInteger(deadlineAt) || deadlineAt <= 0)) {
+    throw new Error('Turn deadline must be null or a positive safe integer.')
+  }
+  if (room.turnDeadlineAt === deadlineAt) return room
+  return withRoomVersion(room, { turnDeadlineAt: deadlineAt })
 }
 
 /** Applies one server-authoritative betting action without changing room membership version. */
@@ -464,6 +478,6 @@ export function toPlayerSafeOnlineRoomState(room: OnlineRoomState, viewerPlayerI
     createdAt: room.createdAt,
     maxPlayers: room.maxPlayers,
     roomVersion: room.roomVersion,
-    pokerTable: toPlayerSafeTableState(room.pokerTable, viewerPlayerId)
+    pokerTable: toPlayerSafeTableState(room.pokerTable, viewerPlayerId, room.turnDeadlineAt)
   })
 }
