@@ -27,23 +27,34 @@ import { createStandardDeck } from '../server/utils/pokerDeck'
 const redisUrl = process.env.ONLINE_ROOM_TEST_REDIS_URL
 const isolated = Boolean(redisUrl && /^redis:\/\/127\.0\.0\.1:\d+\/\d+$/.test(redisUrl))
 const redis = isolated ? new Redis(redisUrl!, { lazyConnect: true }) : undefined
-const prefixes: string[] = []
+const TIMER_TEST_NAMESPACE_PREFIXES = [
+  'pocker:test:turn-',
+  'pocker:test:broken-timer:'
+] as const
 
 function timer(): OnlineRoomTurnTimerService {
   const prefix = `pocker:test:turn-timer:${randomUUID()}:`
-  prefixes.push(prefix)
   return new OnlineRoomTurnTimerService({ redis: redis!, keyPrefix: prefix, pollIntervalMs: 50 })
 }
 
 function timerWithPrefix(prefix: string): OnlineRoomTurnTimerService {
-  if (!prefixes.includes(prefix)) prefixes.push(prefix)
   return new OnlineRoomTurnTimerService({ redis: redis!, keyPrefix: prefix, pollIntervalMs: 50 })
 }
 
 function runtime(): OnlineRoomRuntimeStore {
-  const store = new OnlineRoomRuntimeStore({ redis: redis!, keyPrefix: `pocker:test:turn-runtime:${randomUUID()}:`, ttlSeconds: 60 })
-  prefixes.push(store.keyFor('cleanup'))
-  return store
+  return new OnlineRoomRuntimeStore({ redis: redis!, keyPrefix: `pocker:test:turn-runtime:${randomUUID()}:`, ttlSeconds: 60 })
+}
+
+async function cleanupTimerTestKeys(): Promise<void> {
+  if (!isolated) return
+  for (const prefix of TIMER_TEST_NAMESPACE_PREFIXES) {
+    let cursor = '0'
+    do {
+      const [nextCursor, keys] = await redis!.scan(cursor, 'MATCH', `${prefix}*`, 'COUNT', 100)
+      if (keys.length > 0) await redis!.del(...keys)
+      cursor = nextCursor
+    } while (cursor !== '0')
+  }
 }
 
 function runningRoom(): OnlineRoomState {
@@ -76,12 +87,13 @@ test.before(async () => {
   if (isolated) await redis!.connect()
 })
 
+test.afterEach(async () => {
+  await cleanupTimerTestKeys()
+})
+
 test.after(async () => {
   if (isolated) {
-    for (const prefix of prefixes) {
-      const keys = await redis!.keys(`${prefix}*`)
-      if (keys.length > 0) await redis!.del(...keys)
-    }
+    await cleanupTimerTestKeys()
     redis!.disconnect()
   }
 })
