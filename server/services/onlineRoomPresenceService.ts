@@ -8,11 +8,13 @@ export const ONLINE_ROOM_DISCONNECT_GRACE_SECONDS = 20
 const REGISTER_SCRIPT = `
 local key = KEYS[1]
 local graceKey = KEYS[2]
+local fenceKey = KEYS[3]
 local now = tonumber(ARGV[1])
 local expiresAt = tonumber(ARGV[2])
 local indexTtl = tonumber(ARGV[3])
 local connectionId = ARGV[4]
 redis.call('ZREMRANGEBYSCORE', key, '-inf', now)
+if redis.call('EXISTS', fenceKey) == 1 then return { -1, 0, '', 1 } end
 local before = redis.call('ZCARD', key)
 redis.call('ZADD', key, expiresAt, connectionId)
 redis.call('EXPIRE', key, indexTtl)
@@ -99,6 +101,34 @@ end
 return 0
 `
 
+const ACQUIRE_GRACE_FENCE_SCRIPT = `
+local key = KEYS[1]
+local graceKey = KEYS[2]
+local fenceKey = KEYS[3]
+local now = tonumber(ARGV[1])
+local token = ARGV[2]
+local fenceTtl = tonumber(ARGV[3])
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now)
+if redis.call('ZCARD', key) > 0 then return 0 end
+if redis.call('GET', graceKey) ~= 'claim:' .. token then return 0 end
+if redis.call('EXISTS', fenceKey) == 1 then return 0 end
+redis.call('SET', fenceKey, 'fence:' .. token, 'EX', fenceTtl)
+return 1
+`
+
+const RELEASE_GRACE_FENCE_SCRIPT = `
+local fenceKey = KEYS[1]
+local token = ARGV[1]
+if redis.call('GET', fenceKey) == 'fence:' .. token then
+  return redis.call('DEL', fenceKey)
+end
+return 0
+`
+
+const GRACE_FENCE_TTL_SECONDS = 60
+const REGISTER_FENCE_RETRY_ATTEMPTS = 40
+const REGISTER_FENCE_RETRY_DELAY_MS = 10
+
 export type OnlineRoomPresenceErrorCode = 'REDIS_UNAVAILABLE' | 'INVALID_ARGUMENT' | 'CONNECTION_NOT_FOUND'
 
 export class OnlineRoomPresenceError extends Error {
@@ -134,6 +164,12 @@ export type PresenceUnregisterResult = Readonly<{
 export type PresenceClaimResult = Readonly<{
   claimed: boolean
   token: string | null
+}>
+
+export type PresenceGraceClaim = Readonly<{
+  roomId: string
+  userId: string
+  token: string
 }>
 
 type PresenceOptions = Readonly<{
@@ -214,6 +250,10 @@ export class OnlineRoomPresenceService {
     return `${this.key(roomId, userId)}:grace`
   }
 
+  private fenceKey(roomId: string, userId: string): string {
+    return `${this.graceKey(roomId, userId)}:fence`
+  }
+
   keyFor(roomId: string, userId: string): string {
     return this.key(roomId, userId)
   }
@@ -243,19 +283,28 @@ export class OnlineRoomPresenceService {
   async registerConnection(roomId: string, userId: string): Promise<PresenceRegisterResult> {
     const key = this.key(roomId, userId)
     const graceKey = this.graceKey(roomId, userId)
+    const fenceKey = this.fenceKey(roomId, userId)
     const connectionId = randomUUID()
-    const now = Date.now()
     try {
       await this.connect()
-      const result = await this.redis.eval(REGISTER_SCRIPT, 2, key, graceKey, now, now + this.ttlSeconds * 1000, this.ttlSeconds + this.graceSeconds + 60, connectionId) as unknown[]
-      const before = integerResult(result[0], 'Presence register')
-      const liveConnections = integerResult(result[1], 'Presence register')
-      return Object.freeze({
-        registration: Object.freeze({ roomId, userId, connectionId }),
-        liveConnections,
-        becameConnected: before === 0,
-        cancelledGrace: typeof result[2] === 'string' && (result[2] as string).length > 0
-      })
+      for (let attempt = 0; attempt < REGISTER_FENCE_RETRY_ATTEMPTS; attempt += 1) {
+        const now = Date.now()
+        const result = await this.redis.eval(REGISTER_SCRIPT, 3, key, graceKey, fenceKey, now, now + this.ttlSeconds * 1000, this.ttlSeconds + this.graceSeconds + 60, connectionId) as unknown[]
+        const status = Number(result[0])
+        if (status === -1) {
+          await new Promise(resolve => setTimeout(resolve, REGISTER_FENCE_RETRY_DELAY_MS))
+          continue
+        }
+        const before = integerResult(status, 'Presence register')
+        const liveConnections = integerResult(result[1], 'Presence register')
+        return Object.freeze({
+          registration: Object.freeze({ roomId, userId, connectionId }),
+          liveConnections,
+          becameConnected: before === 0,
+          cancelledGrace: typeof result[2] === 'string' && (result[2] as string).length > 0
+        })
+      }
+      throw new OnlineRoomPresenceError('REDIS_UNAVAILABLE', 'Presence registration is fenced by an active disconnect transition.')
     } catch (error) {
       if (error instanceof OnlineRoomPresenceError) throw error
       throw new OnlineRoomPresenceError('REDIS_UNAVAILABLE', error instanceof Error ? error.message : 'Presence registration failed.')
@@ -357,6 +406,48 @@ export class OnlineRoomPresenceService {
     }
   }
 
+  /**
+   * Holds a Redis fence while the authoritative room CAS performs a grace
+   * disconnect. A concurrent register is retried until this short transition
+   * finishes, so it cannot invalidate the claim between validation and CAS.
+   */
+  async withGraceClaim<T>(claim: PresenceGraceClaim, callback: () => Promise<T>): Promise<T | null> {
+    assertId(claim.roomId, 'Room id')
+    assertId(claim.userId, 'User id')
+    assertId(claim.token, 'Grace token')
+    const key = this.key(claim.roomId, claim.userId)
+    const graceKey = this.graceKey(claim.roomId, claim.userId)
+    const fenceKey = this.fenceKey(claim.roomId, claim.userId)
+    try {
+      await this.connect()
+      const acquired = integerResult(await this.redis.eval(
+        ACQUIRE_GRACE_FENCE_SCRIPT,
+        3,
+        key,
+        graceKey,
+        fenceKey,
+        Date.now(),
+        claim.token,
+        GRACE_FENCE_TTL_SECONDS
+      ), 'Grace fence acquisition')
+      if (acquired !== 1) return null
+    } catch (error) {
+      if (error instanceof OnlineRoomPresenceError) throw error
+      throw new OnlineRoomPresenceError('REDIS_UNAVAILABLE', error instanceof Error ? error.message : 'Grace fence failed.')
+    }
+
+    try {
+      return await callback()
+    } finally {
+      try {
+        await this.redis.eval(RELEASE_GRACE_FENCE_SCRIPT, 1, fenceKey, claim.token)
+      } catch (error) {
+        if (error instanceof OnlineRoomPresenceError) throw error
+        throw new OnlineRoomPresenceError('REDIS_UNAVAILABLE', error instanceof Error ? error.message : 'Grace fence release failed.')
+      }
+    }
+  }
+
   private connectionTimerKey(registration: OnlineRoomPresenceRegistration): string {
     return `${registration.roomId}:${registration.userId}:${registration.connectionId}`
   }
@@ -393,7 +484,7 @@ export class OnlineRoomPresenceService {
     this.connectionTimers.set(timerKey, timer)
   }
 
-  scheduleGraceExpiry(roomId: string, userId: string, callback: () => Promise<void>): void {
+  scheduleGraceExpiry(roomId: string, userId: string, callback: (claimToken: string) => Promise<void>): void {
     const timerKey = `${roomId}:${userId}`
     const previous = this.graceTimers.get(timerKey)
     if (previous) clearTimeout(previous)
@@ -403,7 +494,8 @@ export class OnlineRoomPresenceService {
           const claim = await this.claimExpiredGrace(roomId, userId)
           if (!claim.claimed || !claim.token) return
           try {
-            await callback()
+            const fenced = await this.withGraceClaim({ roomId, userId, token: claim.token }, () => callback(claim.token!))
+            if (fenced === null) return
             await this.completeGraceDisconnect(roomId, userId, claim.token)
           } catch (error) {
             await this.releaseGrace(roomId, userId, claim.token).catch(() => undefined)

@@ -5,7 +5,8 @@ import Redis from 'ioredis'
 import { PrismaClient } from '@prisma/client'
 import {
   OnlineRoomPresenceError,
-  OnlineRoomPresenceService
+  OnlineRoomPresenceService,
+  type PresenceGraceClaim
 } from '../server/services/onlineRoomPresenceService'
 import {
   createAuthenticatedOnlineRoom,
@@ -233,4 +234,275 @@ test('disconnected seated player is excluded between hands without leaving the r
   const next = startOnlineRoomHand(stored.state, { deck: createStandardDeck() })
   assert.equal(next.pokerTable.currentHand, null)
   assert.equal(next.pokerTable.players.some(player => player.playerId === room.ownerId), true)
+})
+
+test('reconnect invalidates a claimed grace before the disconnect fence is acquired', { skip: !redisIsolated }, async () => {
+  const service = presence()
+  const registered = await service.registerConnection('room-race-before-fence', 'user-race-before-fence')
+  const closed = await service.unregisterConnection(registered.registration)
+  assert.equal(closed.graceStarted, true)
+  const claim = await service.claimExpiredGrace('room-race-before-fence', 'user-race-before-fence', closed.graceExpiresAt! + 1)
+  assert.equal(claim.claimed, true)
+  assert.ok(claim.token)
+
+  const reconnect = await service.registerConnection('room-race-before-fence', 'user-race-before-fence')
+  assert.equal(reconnect.cancelledGrace, true)
+  const fenced = await service.withGraceClaim({
+    roomId: 'room-race-before-fence',
+    userId: 'user-race-before-fence',
+    token: claim.token!
+  }, async () => 'must-not-run')
+  assert.equal(fenced, null)
+  assert.equal(await service.liveConnectionCount('room-race-before-fence', 'user-race-before-fence'), 1)
+  await service.disconnect()
+})
+
+test('old worker cannot mark the room disconnected after reconnect has registered', { skip: !isolated }, async () => {
+  const room = await createRoom()
+  const service = presence()
+  const first = await service.registerConnection(room.room.room.roomId, room.ownerId)
+  const closed = await service.unregisterConnection(first.registration)
+  const claim = await service.claimExpiredGrace(room.room.room.roomId, room.ownerId, closed.graceExpiresAt! + 1)
+  assert.equal(claim.claimed, true)
+  assert.ok(claim.token)
+  const reconnect = await service.registerConnection(room.room.room.roomId, room.ownerId)
+  assert.equal(await service.liveConnectionCount(room.room.room.roomId, room.ownerId), 1)
+  const stale = await service.withGraceClaim({ roomId: room.room.room.roomId, userId: room.ownerId, token: claim.token! }, async () => {
+    await setAuthenticatedOnlineRoomPresence(room.ownerId, room.room.roomCode, false, { runtime: room.runtime })
+    return 'must-not-run'
+  })
+  assert.equal(stale, null)
+  const after = await room.runtime.get(room.room.room.roomId)
+  assert.ok(after)
+  assert.equal(after.state.pokerTable.players.find(player => player.playerId === room.ownerId)?.connected, true)
+  await service.unregisterConnection(reconnect.registration)
+  await service.disconnect()
+})
+
+test('claimed grace fence blocks reconnect until the authoritative disconnect CAS finishes', { skip: !isolated }, async () => {
+  const room = await createRoom()
+  let current = room.room
+  let result = await setAuthenticatedOnlineRoomReady(room.ownerId, current.room.roomCode, { concurrencyToken: current.concurrencyToken, ready: true }, { runtime: room.runtime })
+  result = await setAuthenticatedOnlineRoomReady(room.playerId, result.room.roomCode, { concurrencyToken: result.concurrencyToken, ready: true }, { runtime: room.runtime })
+  current = result
+  const loaded = await room.runtime.get(current.room.roomId)
+  assert.ok(loaded)
+  const active = await room.runtime.update(current.room.roomId, loaded.runtimeRevision, state => startOnlineRoomHand(state, { deck: createStandardDeck() }))
+  const before = active.state.pokerTable.currentHand
+  assert.ok(before)
+  const deadline = active.state.turnDeadlineAt
+
+  const service = presence()
+  const registered = await service.registerConnection(current.room.roomId, room.ownerId)
+  const closed = await service.unregisterConnection(registered.registration)
+  const claim = await service.claimExpiredGrace(current.room.roomId, room.ownerId, closed.graceExpiresAt! + 1)
+  assert.equal(claim.claimed, true)
+  assert.ok(claim.token)
+  const graceClaim: PresenceGraceClaim = { roomId: current.room.roomId, userId: room.ownerId, token: claim.token! }
+
+  let entered!: () => void
+  const enteredPromise = new Promise<void>(resolve => { entered = resolve })
+  let release!: () => void
+  const releasePromise = new Promise<void>(resolve => { release = resolve })
+  const worker = service.withGraceClaim(graceClaim, async () => {
+    entered()
+    await releasePromise
+    await setAuthenticatedOnlineRoomPresence(room.ownerId, current.room.roomCode, false, { runtime: room.runtime })
+    return true
+  })
+  await enteredPromise
+
+  const fenceKey = `${service.keyFor(current.room.roomId, room.ownerId)}:grace:fence`
+  const reconnectPromise = service.registerConnection(current.room.roomId, room.ownerId)
+  assert.equal(await redis!.exists(fenceKey), 1)
+
+  release()
+  assert.equal(await worker, true)
+  await service.completeGraceDisconnect(current.room.roomId, room.ownerId, claim.token!)
+  const reconnect = await reconnectPromise
+  await setAuthenticatedOnlineRoomPresence(room.ownerId, current.room.roomCode, true, { runtime: room.runtime })
+
+  const after = await room.runtime.get(current.room.roomId)
+  assert.ok(after)
+  const player = after.state.pokerTable.players.find(candidate => candidate.playerId === room.ownerId)
+  assert.equal(player?.connected, true)
+  assert.deepEqual(after.state.pokerTable.currentHand, before)
+  assert.equal(after.state.turnDeadlineAt, deadline)
+  assert.equal(await service.liveConnectionCount(current.room.roomId, room.ownerId), 1)
+  await service.unregisterConnection(reconnect.registration)
+  await service.disconnect()
+})
+
+test('only the current claimed worker may acquire the grace fence', { skip: !redisIsolated }, async () => {
+  const keyPrefix = `pocker:test:presence-duplicate-fence:${randomUUID()}:`
+  prefixes.push(keyPrefix)
+  const first = new OnlineRoomPresenceService({ redis: redis!, keyPrefix, ttlSeconds: 2, graceSeconds: 1 })
+  const second = new OnlineRoomPresenceService({ redis: redis!, keyPrefix, ttlSeconds: 2, graceSeconds: 1 })
+  const registered = await first.registerConnection('room-duplicate-fence', 'user-duplicate-fence')
+  const closed = await first.unregisterConnection(registered.registration)
+  const claim = await first.claimExpiredGrace('room-duplicate-fence', 'user-duplicate-fence', closed.graceExpiresAt! + 1)
+  assert.equal(claim.claimed, true)
+  assert.ok(claim.token)
+
+  let firstRan = 0
+  let entered!: () => void
+  const enteredPromise = new Promise<void>(resolve => { entered = resolve })
+  let release!: () => void
+  const releasePromise = new Promise<void>(resolve => { release = resolve })
+  const firstFence = first.withGraceClaim({ roomId: 'room-duplicate-fence', userId: 'user-duplicate-fence', token: claim.token! }, async () => {
+    firstRan += 1
+    entered()
+    await releasePromise
+    return 'first'
+  })
+  await enteredPromise
+  const secondFence = await second.withGraceClaim({ roomId: 'room-duplicate-fence', userId: 'user-duplicate-fence', token: claim.token! }, async () => 'second')
+  assert.equal(secondFence, null)
+  release()
+  assert.equal(await firstFence, 'first')
+  assert.equal(firstRan, 1)
+  await first.completeGraceDisconnect('room-duplicate-fence', 'user-duplicate-fence', claim.token!)
+  await first.disconnect()
+  await second.disconnect()
+})
+
+test('multi-instance reconnect wins over a stale claimed grace worker', { skip: !redisIsolated }, async () => {
+  const keyPrefix = `pocker:test:presence-cross-instance-race:${randomUUID()}:`
+  prefixes.push(keyPrefix)
+  const first = new OnlineRoomPresenceService({ redis: redis!, keyPrefix, ttlSeconds: 2, graceSeconds: 1 })
+  const second = new OnlineRoomPresenceService({ redis: redis!, keyPrefix, ttlSeconds: 2, graceSeconds: 1 })
+  const registered = await first.registerConnection('room-cross-instance-race', 'user-cross-instance-race')
+  const closed = await first.unregisterConnection(registered.registration)
+  const claim = await first.claimExpiredGrace('room-cross-instance-race', 'user-cross-instance-race', closed.graceExpiresAt! + 1)
+  assert.equal(claim.claimed, true)
+  assert.ok(claim.token)
+  const reconnect = await second.registerConnection('room-cross-instance-race', 'user-cross-instance-race')
+  assert.equal(reconnect.cancelledGrace, true)
+  const stale = await first.withGraceClaim({ roomId: 'room-cross-instance-race', userId: 'user-cross-instance-race', token: claim.token! }, async () => 'must-not-run')
+  assert.equal(stale, null)
+  assert.equal(await first.liveConnectionCount('room-cross-instance-race', 'user-cross-instance-race'), 1)
+  await first.disconnect()
+  await second.disconnect()
+})
+
+test('fence performs a second live-connection check before claiming disconnect', { skip: !redisIsolated }, async () => {
+  const service = presence()
+  const registered = await service.registerConnection('room-live-recheck', 'user-live-recheck')
+  const closed = await service.unregisterConnection(registered.registration)
+  const claim = await service.claimExpiredGrace('room-live-recheck', 'user-live-recheck', closed.graceExpiresAt! + 1)
+  assert.equal(claim.claimed, true)
+  assert.ok(claim.token)
+  const key = service.keyFor('room-live-recheck', 'user-live-recheck')
+  await redis!.zadd(key, Date.now() + 10_000, 'live-before-fence')
+  const fenced = await service.withGraceClaim({ roomId: 'room-live-recheck', userId: 'user-live-recheck', token: claim.token! }, async () => 'must-not-run')
+  assert.equal(fenced, null)
+  await redis!.del(key)
+  await service.disconnect()
+})
+
+test('callback failure releases the fence without creating a local fallback', { skip: !redisIsolated }, async () => {
+  const service = presence()
+  const registered = await service.registerConnection('room-fence-error', 'user-fence-error')
+  const closed = await service.unregisterConnection(registered.registration)
+  const claim = await service.claimExpiredGrace('room-fence-error', 'user-fence-error', closed.graceExpiresAt! + 1)
+  assert.equal(claim.claimed, true)
+  assert.ok(claim.token)
+  await assert.rejects(
+    service.withGraceClaim({ roomId: 'room-fence-error', userId: 'user-fence-error', token: claim.token! }, async () => {
+      throw new Error('forced transition failure')
+    }),
+    /forced transition failure/
+  )
+  const reconnect = await service.registerConnection('room-fence-error', 'user-fence-error')
+  assert.equal(reconnect.liveConnections, 1)
+  await service.disconnect()
+})
+
+test('only the claim token owner can complete a grace transition', { skip: !redisIsolated }, async () => {
+  const service = presence()
+  const registered = await service.registerConnection('room-token-owner', 'user-token-owner')
+  const closed = await service.unregisterConnection(registered.registration)
+  const claim = await service.claimExpiredGrace('room-token-owner', 'user-token-owner', closed.graceExpiresAt! + 1)
+  assert.equal(claim.claimed, true)
+  assert.ok(claim.token)
+  await service.completeGraceDisconnect('room-token-owner', 'user-token-owner', 'wrong-token')
+  const fenced = await service.withGraceClaim({ roomId: 'room-token-owner', userId: 'user-token-owner', token: claim.token! }, async () => 'owned')
+  assert.equal(fenced, 'owned')
+  await service.completeGraceDisconnect('room-token-owner', 'user-token-owner', claim.token!)
+  await service.disconnect()
+})
+
+test('stale worker cannot fence a claim after a reconnect starts a new grace cycle', { skip: !redisIsolated }, async () => {
+  const service = presence()
+  const first = await service.registerConnection('room-new-cycle', 'user-new-cycle')
+  const closed = await service.unregisterConnection(first.registration)
+  const oldClaim = await service.claimExpiredGrace('room-new-cycle', 'user-new-cycle', closed.graceExpiresAt! + 1)
+  assert.equal(oldClaim.claimed, true)
+  assert.ok(oldClaim.token)
+  const reconnect = await service.registerConnection('room-new-cycle', 'user-new-cycle')
+  await service.unregisterConnection(reconnect.registration)
+  const next = await service.claimExpiredGrace('room-new-cycle', 'user-new-cycle', Date.now() + 2_000)
+  assert.equal(next.claimed, true)
+  assert.ok(next.token)
+  const stale = await service.withGraceClaim({ roomId: 'room-new-cycle', userId: 'user-new-cycle', token: oldClaim.token! }, async () => 'must-not-run')
+  assert.equal(stale, null)
+  await service.completeGraceDisconnect('room-new-cycle', 'user-new-cycle', next.token!)
+  await service.disconnect()
+})
+
+test('grace claim fencing is shared by independent presence service instances', { skip: !redisIsolated }, async () => {
+  const keyPrefix = `pocker:test:presence-fence-shared:${randomUUID()}:`
+  prefixes.push(keyPrefix)
+  const first = new OnlineRoomPresenceService({ redis: redis!, keyPrefix, ttlSeconds: 2, graceSeconds: 1 })
+  const second = new OnlineRoomPresenceService({ redis: redis!, keyPrefix, ttlSeconds: 2, graceSeconds: 1 })
+  const registered = await first.registerConnection('room-shared-fence', 'user-shared-fence')
+  const closed = await first.unregisterConnection(registered.registration)
+  const claim = await first.claimExpiredGrace('room-shared-fence', 'user-shared-fence', closed.graceExpiresAt! + 1)
+  assert.equal(claim.claimed, true)
+  assert.ok(claim.token)
+  let entered!: () => void
+  const enteredPromise = new Promise<void>(resolve => { entered = resolve })
+  let release!: () => void
+  const releasePromise = new Promise<void>(resolve => { release = resolve })
+  const firstFence = first.withGraceClaim({ roomId: 'room-shared-fence', userId: 'user-shared-fence', token: claim.token! }, async () => {
+    entered()
+    await releasePromise
+    return 'first'
+  })
+  await enteredPromise
+  const secondFence = await second.withGraceClaim({ roomId: 'room-shared-fence', userId: 'user-shared-fence', token: claim.token! }, async () => 'second')
+  assert.equal(secondFence, null)
+  release()
+  assert.equal(await firstFence, 'first')
+  await first.completeGraceDisconnect('room-shared-fence', 'user-shared-fence', claim.token!)
+  await first.disconnect()
+  await second.disconnect()
+})
+
+test('a valid grace transition keeps the seated player and active hand intact', { skip: !isolated }, async () => {
+  const room = await createRoom()
+  let current = room.room
+  let ready = await setAuthenticatedOnlineRoomReady(room.ownerId, current.room.roomCode, { concurrencyToken: current.concurrencyToken, ready: true }, { runtime: room.runtime })
+  ready = await setAuthenticatedOnlineRoomReady(room.playerId, ready.room.roomCode, { concurrencyToken: ready.concurrencyToken, ready: true }, { runtime: room.runtime })
+  current = ready
+  const loaded = await room.runtime.get(current.room.roomId)
+  assert.ok(loaded)
+  const active = await room.runtime.update(current.room.roomId, loaded.runtimeRevision, state => startOnlineRoomHand(state, { deck: createStandardDeck() }))
+  const before = active.state.pokerTable.currentHand
+  assert.ok(before)
+  const service = presence()
+  const registered = await service.registerConnection(current.room.roomId, room.ownerId)
+  const closed = await service.unregisterConnection(registered.registration)
+  const claim = await service.claimExpiredGrace(current.room.roomId, room.ownerId, closed.graceExpiresAt! + 1)
+  assert.equal(claim.claimed, true)
+  assert.ok(claim.token)
+  await service.withGraceClaim({ roomId: current.room.roomId, userId: room.ownerId, token: claim.token! }, async () => {
+    await setAuthenticatedOnlineRoomPresence(room.ownerId, current.room.roomCode, false, { runtime: room.runtime })
+  })
+  await service.completeGraceDisconnect(current.room.roomId, room.ownerId, claim.token!)
+  const after = await room.runtime.get(current.room.roomId)
+  assert.ok(after)
+  assert.equal(after.state.pokerTable.players.some(player => player.playerId === room.ownerId), true)
+  assert.deepEqual(after.state.pokerTable.currentHand, before)
+  await service.disconnect()
 })
