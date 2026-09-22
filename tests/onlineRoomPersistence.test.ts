@@ -1,8 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { PrismaClient } from '@prisma/client'
 import { createRoom } from '../server/services/roomService'
-import { createPersistentOnlineRoom, resolveRoomCode } from '../server/services/roomCodeRegistryService'
+import { claimRoomCode, createPersistentOnlineRoom, resolveRoomCode } from '../server/services/roomCodeRegistryService'
 import { generateOnlineRoomCode } from '../server/utils/pokerOnlineRoom'
 import { hashSecret } from '../server/services/authService'
 
@@ -10,6 +11,8 @@ const dbUrl = process.env.DATABASE_URL
 const db = new PrismaClient()
 const onlineIds: string[] = []
 const homeIds: string[] = []
+const homeCodes: string[] = []
+const fixtureCodes = ['AB2345', 'CD2345', 'EF3456']
 
 async function createOnline(code: string, extra: Record<string, unknown> = {}) {
   const room = await createPersistentOnlineRoom({
@@ -34,6 +37,26 @@ async function createHome() {
   }, 'http://test')
   const row = await db.room.findUniqueOrThrow({ where: { code: result.roomCode } })
   homeIds.push(row.id)
+  return row
+}
+
+async function createHomeWithCode(code: string) {
+  const row = await db.$transaction(async tx => {
+    const room = await tx.room.create({
+      data: {
+        id: randomUUID(),
+        code,
+        name: 'Deterministic collision fixture',
+        status: 'lobby',
+        dealerSecretHash: 'fixture-dealer-secret-hash',
+        settings: {}
+      }
+    })
+    await claimRoomCode(tx, { code, roomType: 'HOME', targetId: room.id })
+    return room
+  })
+  homeIds.push(row.id)
+  homeCodes.push(row.code)
   return row
 }
 
@@ -67,9 +90,9 @@ test('new ONLINE metadata and registry claim are created atomically', { skip: !d
 })
 
 test('HOME and ONLINE collision retries with a new candidate', { skip: !dbUrl }, async () => {
-  const home = await createHome()
-  const retryCode = generateOnlineRoomCode()
-  const candidates = [home.code.toLowerCase(), retryCode]
+  const home = await createHomeWithCode('AB2345')
+  const retryCode = 'CD2345'
+  const candidates = [home.code, retryCode]
   const room = await createPersistentOnlineRoom({
     ownerId: 'collision-retry-owner',
     visibility: 'PUBLIC',
@@ -111,7 +134,7 @@ test('concurrent identical candidate claims allow only one ONLINE room', { skip:
 })
 
 test('collision failure rolls back metadata and leaves no orphan ONLINE row', { skip: !dbUrl }, async () => {
-  const home = await createHome()
+  const home = await createHomeWithCode('EF3456')
   await assert.rejects(createPersistentOnlineRoom({
     ownerId: 'rollback-owner',
     visibility: 'PUBLIC',
@@ -164,5 +187,6 @@ test.after(async () => {
   }
   await db.onlineRoom.deleteMany({ where: { id: { in: onlineIds } } })
   await db.room.deleteMany({ where: { id: { in: homeIds } } })
+  await db.roomCodeRegistry.deleteMany({ where: { code: { in: [...homeCodes, ...fixtureCodes] } } })
   await db.$disconnect()
 })
