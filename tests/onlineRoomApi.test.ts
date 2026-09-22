@@ -20,6 +20,8 @@ import {
 } from '../server/services/onlineRoomApiService'
 import { OnlineRoomRuntimeStore, serializeOnlineRoomRuntimeState } from '../server/services/onlineRoomRuntimeStore'
 import { setOnlineRoomReady, startOnlineRoomHand } from '../server/utils/pokerOnlineRoom'
+import { applyTableAction, advanceTableStreet } from '../server/utils/pokerTableState'
+import { getToCall } from '../server/utils/pokerBetting'
 import { createStandardDeck } from '../server/utils/pokerDeck'
 import { hashSecret } from '../server/services/authService'
 
@@ -401,4 +403,129 @@ test('stale table action is rejected before poker mutation', { skip: !isolated }
   await assert.rejects(applyAuthenticatedOnlineRoomAction(room.ownerId, room.result.room.roomCode, {
     actionId: 'ws-stale-second', expectedTableStateVersion: expected, action: { type: 'call' }
   }, { runtime: room.runtime }), (error: unknown) => error instanceof OnlineRoomApiError && error.code === 'STALE_STATE' && error.statusCode === 409)
+})
+
+test('ONLINE API settles a contested hand exactly once and allows the next hand', { skip: !isolated }, async () => {
+  const room = await createRoomApi()
+  const player = await join(room, 'settlement-player')
+  await readyBoth(room, room.ownerId, player.playerId)
+  room.result = await startAuthenticatedOnlineRoomHand(room.ownerId, room.result.room.roomCode, room.result.room.pokerTable.stateVersion, { runtime: room.runtime })
+  const startingTotal = room.result.room.pokerTable.players.reduce((sum, item) => sum + item.stack, 0) + room.result.room.pokerTable.currentHand!.pot
+  let lastAction: { userId: string; input: { actionId: string; expectedTableStateVersion: number; action: { type: 'check' | 'call' } } } | undefined
+
+  for (let guard = 0; guard < 100; guard += 1) {
+    const hand = room.result.room.pokerTable.currentHand
+    if (!hand || hand.street === 'FINISHED') break
+    assert.ok(hand.currentActor !== null)
+    const actor = hand.players.find(item => item.seat === hand.currentActor)!
+    const input = {
+      actionId: `settle-${guard}-${randomUUID()}`,
+      expectedTableStateVersion: room.result.room.pokerTable.stateVersion,
+      action: { type: (hand.currentBet > actor.streetContribution ? 'call' : 'check') as 'check' | 'call' }
+    }
+    lastAction = { userId: actor.playerId, input }
+    room.result = await applyAuthenticatedOnlineRoomAction(actor.playerId, room.result.room.roomCode, input, { runtime: room.runtime })
+  }
+
+  assert.equal(room.result.room.pokerTable.currentHand?.street, 'FINISHED')
+  assert.equal(room.result.room.pokerTable.status, 'WAITING')
+  assert.equal(room.result.room.pokerTable.finalizedHandId, room.result.room.pokerTable.currentHand?.handId)
+  assert.equal(room.result.room.pokerTable.players.reduce((sum, item) => sum + item.stack, 0), startingTotal)
+  assert.ok(lastAction)
+  const retries = await Promise.all([
+    applyAuthenticatedOnlineRoomAction(lastAction!.userId, room.result.room.roomCode, lastAction!.input, { runtime: room.runtime }),
+    applyAuthenticatedOnlineRoomAction(lastAction!.userId, room.result.room.roomCode, lastAction!.input, { runtime: room.runtime })
+  ])
+  assert.equal(retries.every(retry => retry.duplicate), true)
+  assert.deepEqual(retries[0]!.room.pokerTable.players, room.result.room.pokerTable.players)
+
+  room.result = await startAuthenticatedOnlineRoomHand(room.ownerId, room.result.room.roomCode, room.result.room.pokerTable.stateVersion, { runtime: room.runtime })
+  assert.equal(room.result.room.pokerTable.handSequence, 2)
+  assert.equal(room.result.room.pokerTable.currentHand?.street, 'PREFLOP')
+})
+
+test('ONLINE API settles an uncontested fold before starting the next hand', { skip: !isolated }, async () => {
+  const room = await createRoomApi()
+  const player = await join(room, 'uncontested-player')
+  await readyBoth(room, room.ownerId, player.playerId)
+  room.result = await startAuthenticatedOnlineRoomHand(room.ownerId, room.result.room.roomCode, room.result.room.pokerTable.stateVersion, { runtime: room.runtime })
+  const hand = room.result.room.pokerTable.currentHand!
+  const startingTotal = room.result.room.pokerTable.players.reduce((sum, item) => sum + item.stack, 0) + hand.pot
+  const actor = hand.players.find(item => item.seat === hand.currentActor)!
+  room.result = await applyAuthenticatedOnlineRoomAction(actor.playerId, room.result.room.roomCode, {
+    actionId: `uncontested-${randomUUID()}`,
+    expectedTableStateVersion: room.result.room.pokerTable.stateVersion,
+    action: { type: 'fold' }
+  }, { runtime: room.runtime })
+  assert.equal(room.result.room.pokerTable.currentHand?.street, 'FINISHED')
+  assert.equal(room.result.room.pokerTable.status, 'WAITING')
+  assert.equal(room.result.room.pokerTable.players.reduce((sum, item) => sum + item.stack, 0), startingTotal)
+  room.result = await startAuthenticatedOnlineRoomHand(room.ownerId, room.result.room.roomCode, room.result.room.pokerTable.stateVersion, { runtime: room.runtime })
+  assert.equal(room.result.room.pokerTable.handSequence, 2)
+})
+
+test('ONLINE API settles three-player and six-player contested hands', { skip: !isolated }, async () => {
+  for (const count of [3, 6]) {
+    const room = await createRoomApi()
+    const playerIds = [room.ownerId]
+    for (let index = 2; index <= count; index += 1) {
+      const player = await join(room, `settlement-${count}-${index}`)
+      playerIds.push(player.playerId)
+    }
+    for (const playerId of playerIds) {
+      room.result = await setAuthenticatedOnlineRoomReady(playerId, room.result.room.roomCode, {
+        concurrencyToken: room.result.concurrencyToken,
+        ready: true
+      }, { runtime: room.runtime })
+    }
+    room.result = await startAuthenticatedOnlineRoomHand(room.ownerId, room.result.room.roomCode, room.result.room.pokerTable.stateVersion, { runtime: room.runtime })
+    const startingTotal = room.result.room.pokerTable.players.reduce((sum, item) => sum + item.stack, 0) + room.result.room.pokerTable.currentHand!.pot
+    for (let guard = 0; guard < 150 && room.result.room.pokerTable.currentHand?.street !== 'FINISHED'; guard += 1) {
+      const hand = room.result.room.pokerTable.currentHand!
+      assert.ok(hand.currentActor !== null)
+      const actor = hand.players.find(item => item.seat === hand.currentActor)!
+      room.result = await applyAuthenticatedOnlineRoomAction(actor.playerId, room.result.room.roomCode, {
+        actionId: `settlement-${count}-${guard}-${randomUUID()}`,
+        expectedTableStateVersion: room.result.room.pokerTable.stateVersion,
+        action: { type: hand.currentBet > actor.streetContribution ? 'call' : 'check' }
+      }, { runtime: room.runtime })
+    }
+    assert.equal(room.result.room.pokerTable.currentHand?.street, 'FINISHED')
+    assert.equal(room.result.room.pokerTable.players.reduce((sum, item) => sum + item.stack, 0), startingTotal)
+  }
+})
+
+test('ONLINE API recovers an unsettled terminal hand before starting the next hand', { skip: !isolated }, async () => {
+  const room = await createRoomApi()
+  const player = await join(room, 'recovery-player')
+  await readyBoth(room, room.ownerId, player.playerId)
+  room.result = await startAuthenticatedOnlineRoomHand(room.ownerId, room.result.room.roomCode, room.result.room.pokerTable.stateVersion, { runtime: room.runtime })
+
+  const current = await room.runtime.get(room.result.room.roomId)
+  assert.ok(current)
+  let terminal = current.state.pokerTable
+  for (let guard = 0; guard < 100 && terminal.currentHand?.street !== 'SHOWDOWN'; guard += 1) {
+    const hand = terminal.currentHand
+    assert.ok(hand)
+    assert.notEqual(hand.currentActor, null)
+    const actor = hand.players.find(item => item.seat === hand.currentActor)!
+    terminal = applyTableAction(terminal, {
+      playerId: actor.playerId,
+      type: getToCall(hand, actor.playerId) > 0 ? 'call' : 'check'
+    })
+    if (terminal.currentHand?.bettingRoundComplete && terminal.currentHand.street !== 'SHOWDOWN') {
+      terminal = advanceTableStreet(terminal)
+    }
+  }
+  assert.equal(terminal.currentHand?.street, 'SHOWDOWN')
+  await room.runtime.update(room.result.room.roomId, current.runtimeRevision, state => Object.freeze({
+    ...state,
+    status: 'IN_HAND' as const,
+    pokerTable: terminal
+  }))
+
+  const unsettled = await getAuthenticatedOnlineRoom(room.ownerId, room.result.room.roomCode, { runtime: room.runtime })
+  const next = await startAuthenticatedOnlineRoomHand(room.ownerId, room.result.room.roomCode, unsettled.room.pokerTable.stateVersion, { runtime: room.runtime })
+  assert.equal(next.room.pokerTable.handSequence, 2)
+  assert.equal(next.room.pokerTable.currentHand?.street, 'PREFLOP')
 })

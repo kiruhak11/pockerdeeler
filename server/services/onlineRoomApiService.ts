@@ -15,7 +15,7 @@ import {
   OnlineRoomError,
   type OnlineRoomState
 } from '../utils/pokerOnlineRoom'
-import { PokerTableError, advanceTableStreet, canStartNextHand } from '../utils/pokerTableState'
+import { PokerTableError, advanceTableStreet, canStartNextHand, finalizeTableHand } from '../utils/pokerTableState'
 import { getToCall } from '../utils/pokerBetting'
 import {
   getOnlineRoomTurnTimerService,
@@ -151,10 +151,33 @@ function timerStore(dependencies?: OnlineRoomApiDependencies): OnlineRoomTurnTim
   return getOnlineRoomTurnTimerService()
 }
 
-function advanceCompletedStreet(room: OnlineRoomState): OnlineRoomState {
+function assertTableStateVersion(room: OnlineRoomState, expectedTableStateVersion: number | undefined): void {
+  if (expectedTableStateVersion === undefined) return
+  if (!Number.isSafeInteger(expectedTableStateVersion) || expectedTableStateVersion !== room.pokerTable.stateVersion) {
+    throw new PokerTableError('STALE_STATE_VERSION', `Expected table state version ${String(expectedTableStateVersion)} does not match ${room.pokerTable.stateVersion}.`)
+  }
+}
+
+function advanceCompletedStreet(room: OnlineRoomState, expectedTableStateVersion?: number): OnlineRoomState {
+  assertTableStateVersion(room, expectedTableStateVersion)
   const hand = room.pokerTable.currentHand
-  if (!hand || !hand.bettingRoundComplete || hand.street === 'SHOWDOWN' || hand.street === 'FINISHED') return room
-  const pokerTable = advanceTableStreet(room.pokerTable)
+  if (!hand) return room
+  if (hand.street === 'SHOWDOWN' || hand.street === 'FINISHED') {
+    if (room.pokerTable.finalizedHandId === hand.handId) return room
+    const pokerTable = finalizeTableHand(room.pokerTable)
+    return Object.freeze({
+      ...room,
+      pokerTable,
+      status: 'WAITING' as const,
+      turnDeadlineAt: null
+    })
+  }
+  if (!hand.bettingRoundComplete) return room
+  let pokerTable = advanceTableStreet(room.pokerTable, expectedTableStateVersion)
+  const advancedHand = pokerTable.currentHand
+  if (advancedHand && (advancedHand.street === 'SHOWDOWN' || advancedHand.street === 'FINISHED')) {
+    pokerTable = finalizeTableHand(pokerTable)
+  }
   return Object.freeze({
     ...room,
     pokerTable,
@@ -698,8 +721,10 @@ export async function startAuthenticatedOnlineRoomHand(
   if (current.room.ownerId !== userId) fail('FORBIDDEN', 'Only the room owner can start a hand.', 403)
   const updated = await updateRoomInternal(userId, code, { concurrencyToken: current.concurrencyToken }, state => {
     if (state.ownerId !== userId) fail('FORBIDDEN', 'Only the room owner can start a hand.', 403)
-    if (!canStartNextHand(state.pokerTable)) fail('INVALID_ACTION', 'At least two eligible players are required to start a hand.', 409)
-    return withNextTurnDeadline(advanceCompletedStreet(startOnlineRoomHand(state, { expectedStateVersion: expectedTableStateVersion })))
+    const settled = advanceCompletedStreet(state, expectedTableStateVersion)
+    if (!canStartNextHand(settled.pokerTable)) fail('INVALID_ACTION', 'At least two eligible players are required to start a hand.', 409)
+    const started = startOnlineRoomHand(settled, { expectedStateVersion: settled.pokerTable.stateVersion })
+    return withNextTurnDeadline(advanceCompletedStreet(started))
   }, dependencies)
   await reconcileTurnTimer(updated.result, dependencies, updated.runtimeRevision)
   return updated.result

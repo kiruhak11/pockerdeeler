@@ -1,5 +1,6 @@
 import { applyBettingAction, type BettingAction } from './pokerBetting'
 import { type Card, type Deck } from './pokerDeck'
+import { finishHand } from './pokerHandFinalizer'
 import { prepareNextHand, type NextHandPlayer } from './pokerNextHand'
 import {
   advanceStreet,
@@ -36,6 +37,8 @@ export type PokerTableState = Readonly<{
   status: PokerTableStatus
   stateVersion: number
   handSequence: number
+  /** Identifies the terminal hand whose payout has already been applied. */
+  finalizedHandId: string | null
   smallBlind: number
   bigBlind: number
 }>
@@ -201,6 +204,7 @@ export function createPokerTable(options: CreatePokerTableOptions): PokerTableSt
     status: 'WAITING',
     stateVersion: 0,
     handSequence: 0,
+    finalizedHandId: null,
     smallBlind: options.smallBlind,
     bigBlind: options.bigBlind
   })
@@ -304,7 +308,8 @@ export function startTableHand(table: PokerTableState, options: StartTableHandOp
     currentHand: prepared.hand,
     dealerSeat: prepared.hand.dealerSeat,
     status: 'IN_HAND',
-    handSequence: table.handSequence + 1
+    handSequence: table.handSequence + 1,
+    finalizedHandId: null
   })
 }
 
@@ -390,6 +395,7 @@ export function toPlayerSafeTableState(table: PokerTableState, viewerPlayerId?: 
     dealerSeat: table.dealerSeat,
     stateVersion: table.stateVersion,
     handSequence: table.handSequence,
+    finalizedHandId: table.finalizedHandId,
     smallBlind: table.smallBlind,
     bigBlind: table.bigBlind,
     seats: Object.freeze(table.seats.map(seat => Object.freeze({ ...seat }))),
@@ -408,5 +414,34 @@ export function advanceTableStreet(table: PokerTableState, expectedStateVersion?
     players: syncPlayersFromHand(table, hand),
     currentHand: hand,
     status: hand.street === 'FINISHED' ? 'WAITING' : 'IN_HAND'
+  })
+}
+
+/** Applies a completed hand's payout to table stacks exactly once. */
+export function finalizeTableHand(table: PokerTableState, expectedStateVersion?: number): PokerTableState {
+  assertTable(table)
+  assertExpectedVersion(table, expectedStateVersion)
+  const hand = table.currentHand
+  if (!hand || (hand.street !== 'SHOWDOWN' && hand.street !== 'FINISHED')) {
+    fail('NO_ACTIVE_HAND', 'The table does not have a terminal hand to finalize.')
+  }
+  if (table.finalizedHandId === hand.handId) return table
+
+  const result = finishHand(hand)
+  const resultByPlayer = new Map(result.players.map(player => [player.playerId, player.stack]))
+  const finalizedHand = Object.freeze({
+    ...hand,
+    street: 'FINISHED' as const,
+    currentActor: null,
+    bettingRoundComplete: true
+  })
+  return withVersion(table, {
+    players: table.players.map(player => {
+      const stack = resultByPlayer.get(player.playerId)
+      return stack === undefined ? player : freezePlayer({ ...player, stack })
+    }),
+    currentHand: finalizedHand,
+    status: 'WAITING',
+    finalizedHandId: hand.handId
   })
 }

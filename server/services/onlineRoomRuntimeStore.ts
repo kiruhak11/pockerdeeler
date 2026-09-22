@@ -273,6 +273,7 @@ function serializeTable(table: PokerTableState): JsonRecord {
     status: table.status,
     stateVersion: table.stateVersion,
     handSequence: table.handSequence,
+    finalizedHandId: table.finalizedHandId,
     smallBlind: table.smallBlind,
     bigBlind: table.bigBlind
   }
@@ -322,6 +323,9 @@ function deserializeTable(value: unknown): PokerTableState {
     status: raw.status as PokerTableState['status'],
     stateVersion: requireSafeInteger(raw.stateVersion, 'Table state version'),
     handSequence: requireSafeInteger(raw.handSequence, 'Table hand sequence'),
+    finalizedHandId: raw.finalizedHandId === undefined || raw.finalizedHandId === null
+      ? null
+      : requireString(raw.finalizedHandId, 'Finalized hand id'),
     smallBlind: requireSafeInteger(raw.smallBlind, 'Table small blind', 1),
     bigBlind: requireSafeInteger(raw.bigBlind, 'Table big blind', 1)
   })
