@@ -14,11 +14,17 @@ const errorStatus = ref<'not-found' | 'unauthorized' | 'unavailable' | 'error' |
 const notice = ref('')
 const ready = ref(false)
 const sittingOut = ref(false)
+const joinPrompt = ref(false)
+const privateRoom = ref(false)
+const joinSecret = ref('')
+const joinBusy = ref(false)
 
 const socket = useOnlineRoomSocket(code, {
   onState(next) {
     state.value = next
     const player = next.pokerTable.players.find(candidate => candidate.playerId === account.user?.id)
+    privateRoom.value = next.visibility === 'PRIVATE'
+    joinPrompt.value = !player
     ready.value = player?.ready ?? false
     sittingOut.value = player?.sittingOut ?? false
   },
@@ -29,6 +35,7 @@ const canStart = computed(() => Boolean(state.value && state.value.ownerId === a
 const connectionStatus = computed(() => socket.status.value)
 const pendingActionId = computed(() => socket.pendingActionId.value)
 const socketNotice = computed(() => socket.errorMessage.value)
+const viewerIsMember = computed(() => Boolean(state.value?.pokerTable.players.some(player => player.playerId === account.user?.id)))
 
 function statusCode(error: unknown): number | undefined {
   return (error as { statusCode?: number; status?: number }).statusCode ?? (error as { status?: number }).status
@@ -45,18 +52,55 @@ function friendlyError(error: unknown): string {
 async function loadState() {
   loading.value = true
   errorStatus.value = null
+  joinPrompt.value = false
   try {
     const result = await $fetch<OnlineApiResult>(`/api/online/rooms/${encodeURIComponent(code.value)}/state`, { retry: 0 })
     state.value = result.room
     concurrencyToken.value = result.concurrencyToken
     const player = result.room.pokerTable.players.find(candidate => candidate.playerId === account.user?.id)
+    privateRoom.value = result.room.visibility === 'PRIVATE'
+    joinPrompt.value = !player
     ready.value = player?.ready ?? false
     sittingOut.value = player?.sittingOut ?? false
     loading.value = false
   } catch (error) {
     loading.value = false
     const status = statusCode(error)
+    if (status === 403 && account.user) {
+      privateRoom.value = true
+      joinPrompt.value = true
+      return
+    }
     errorStatus.value = status === 401 || status === 403 ? 'unauthorized' : status === 404 || status === 410 ? 'not-found' : status === 503 ? 'unavailable' : 'error'
+  }
+}
+
+async function joinRoom() {
+  if (joinBusy.value || !account.user) {
+    if (!account.user) await navigateTo(`/login?redirect=${encodeURIComponent(`/online/${code.value}`)}`)
+    return
+  }
+  joinBusy.value = true
+  notice.value = ''
+  try {
+    const result = await $fetch<OnlineApiResult>(`/api/online/rooms/${encodeURIComponent(code.value)}/join`, {
+      method: 'POST',
+      body: {
+        ...(concurrencyToken.value ? { concurrencyToken: concurrencyToken.value } : {}),
+        ...(state.value?.roomVersion === undefined ? {} : { expectedRoomVersion: state.value.roomVersion }),
+        ...(joinSecret.value ? { joinSecret: joinSecret.value } : {})
+      },
+      retry: 0
+    })
+    state.value = result.room
+    concurrencyToken.value = result.concurrencyToken
+    joinSecret.value = ''
+    joinPrompt.value = false
+    socket.reconnect()
+  } catch (error) {
+    notice.value = friendlyError(error)
+  } finally {
+    joinBusy.value = false
   }
 }
 
@@ -101,12 +145,26 @@ useHead(() => ({ title: state.value ? `ONLINE ${state.value.roomCode} · Poker` 
     <section class="panel">
       <h1>{{ errorStatus === 'not-found' ? 'Стол не найден' : errorStatus === 'unauthorized' ? 'Нужен вход' : 'Не удалось открыть стол' }}</h1>
       <p>{{ errorStatus === 'unauthorized' ? 'Войдите в аккаунт и откройте ссылку на стол ещё раз.' : errorStatus === 'not-found' ? 'Проверьте код комнаты.' : 'Сервис временно недоступен. Попробуйте снова.' }}</p>
+      <NuxtLink v-if="errorStatus === 'unauthorized'" class="btn" :to="`/login?redirect=${encodeURIComponent(`/online/${code}`)}`">Войти</NuxtLink>
       <NuxtLink class="btn" to="/rooms">К списку столов</NuxtLink>
       <button v-if="errorStatus === 'unavailable' || errorStatus === 'error'" class="btn btn--ghost" type="button" @click="loadState">Повторить</button>
     </section>
   </main>
+  <main v-else-if="joinPrompt" class="online-state page-shell">
+    <section class="panel online-join-panel">
+      <span class="eyebrow">ONLINE · {{ code }}</span>
+      <h1>Войти за онлайн-стол</h1>
+      <p>{{ privateRoom ? 'Введите пароль приглашения. Он не попадёт в адресную строку.' : 'Подтвердите вход, чтобы занять место за этим столом.' }}</p>
+      <label v-if="privateRoom">Пароль
+        <input v-model="joinSecret" class="input" type="password" autocomplete="current-password" maxlength="128" placeholder="Пароль комнаты">
+      </label>
+      <p v-if="notice || socketNotice" class="online-state__error" role="alert">{{ notice || socketNotice }}</p>
+      <button class="btn" type="button" :disabled="joinBusy || (privateRoom && !joinSecret)" @click="joinRoom">{{ joinBusy ? 'Подключаем…' : 'Войти в комнату' }}</button>
+      <NuxtLink class="btn btn--ghost" to="/rooms">Назад к столам</NuxtLink>
+    </section>
+  </main>
   <OnlinePokerTable
-    v-else-if="state"
+    v-else-if="state && viewerIsMember"
     :state="state"
     :viewer-id="account.user?.id || null"
     :connection-status="connectionStatus"
@@ -129,4 +187,7 @@ useHead(() => ({ title: state.value ? `ONLINE ${state.value.roomCode} · Poker` 
 .online-state .panel { display: grid; gap: .7rem; max-width: 420px; justify-items: center; }
 .online-state h1 { margin: 0; font-family: 'Space Grotesk', sans-serif; }
 .online-state p { margin: 0; color: var(--text-muted); }
+.online-join-panel { width: min(100%, 430px); }
+.online-join-panel label { width: 100%; display: grid; gap: .35rem; text-align: left; color: var(--text-muted); }
+.online-state__error { color: var(--danger) !important; }
 </style>

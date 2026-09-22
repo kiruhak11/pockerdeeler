@@ -91,10 +91,18 @@ export type OnlineRoomConcurrencyInput = Readonly<{
   expectedRoomVersion?: number
 }>
 
-export type JoinAuthenticatedOnlineRoomInput = OnlineRoomConcurrencyInput & Readonly<{
+export type JoinAuthenticatedOnlineRoomInput = Partial<OnlineRoomConcurrencyInput> & Readonly<{
   stack?: number
   seat?: number
   joinSecret?: string
+}>
+
+export type OnlineRoomLobbyEntry = Readonly<{
+  code: string
+  playerCount: number
+  maxPlayers: 6
+  status: 'WAITING' | 'IN_HAND'
+  createdAt: string
 }>
 
 export type ReadyAuthenticatedOnlineRoomInput = OnlineRoomConcurrencyInput & Readonly<{
@@ -372,6 +380,34 @@ export async function resolveOnlineRoomCode(code: string): Promise<Readonly<{ ty
     : Object.freeze({ type: 'NOT_FOUND' as const, code: normalizedCode })
 }
 
+/** Lists only public lobby metadata; private rooms and runtime internals stay server-side. */
+export async function listPublicOnlineRooms(): Promise<readonly OnlineRoomLobbyEntry[]> {
+  const rows = await prisma.onlineRoom.findMany({
+    where: { visibility: 'PUBLIC', status: 'WAITING' },
+    select: { id: true, roomCode: true, createdAt: true },
+    orderBy: { createdAt: 'desc' },
+    take: 100
+  })
+  const runtime = new OnlineRoomRuntimeStore()
+  try {
+    const entries: OnlineRoomLobbyEntry[] = []
+    for (const row of rows) {
+      const record = await runtime.get(row.id)
+      if (!record || record.state.status === 'CLOSED' || record.state.visibility !== 'PUBLIC') continue
+      entries.push(Object.freeze({
+        code: record.state.roomCode,
+        playerCount: record.state.pokerTable.players.length,
+        maxPlayers: 6,
+        status: record.state.pokerTable.status === 'IN_HAND' ? 'IN_HAND' : 'WAITING',
+        createdAt: row.createdAt.toISOString()
+      }))
+    }
+    return Object.freeze(entries)
+  } finally {
+    await runtime.disconnect().catch(() => undefined)
+  }
+}
+
 export async function createAuthenticatedOnlineRoom(userId: string, input: CreateAuthenticatedOnlineRoomInput = {}, dependencies?: OnlineRoomApiDependencies): Promise<ApiOnlineRoomResult> {
   requireUserId(userId)
   const visibility = input.visibility ?? 'PUBLIC'
@@ -574,7 +610,10 @@ export async function joinAuthenticatedOnlineRoom(userId: string, code: string, 
       fail('FORBIDDEN', 'A valid private room credential is required.', 403)
     }
   }
-  return updateRoom(userId, code, input, state => {
+  const currentInput: OnlineRoomConcurrencyInput = input.concurrencyToken
+    ? { concurrencyToken: input.concurrencyToken, expectedRoomVersion: input.expectedRoomVersion }
+    : { ...input, concurrencyToken: issueConcurrencyToken(metadata.id, (await requireRuntime(metadata, dependencies)).runtimeRevision) }
+  return updateRoom(userId, code, currentInput, state => {
     const joinSecret = metadata.privateJoinSecretHash ?? undefined
     if (metadata.visibility === 'PRIVATE' && state.privateJoinSecret !== joinSecret) fail('UNAVAILABLE', 'Private room authorization state is inconsistent.', 503)
     return joinOnlineRoom(state, { playerId: userId, stack, ...(seat === undefined ? {} : { seat }), ...(joinSecret ? { joinSecret } : {}), expectedRoomVersion: input.expectedRoomVersion })

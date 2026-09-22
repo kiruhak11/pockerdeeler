@@ -13,6 +13,7 @@ const { loadMe, logout } = useAccountAuth()
 const roomCode = ref('')
 const authError = ref('')
 const authLoading = ref(false)
+const roomLookupError = ref('')
 
 onMounted(() => {
   if (!gameStore.hydrated) {
@@ -44,11 +45,16 @@ async function continueLocalGame() {
 
 async function joinByCode() {
   const code = roomCode.value.trim().toUpperCase()
-  if (!code) {
-    return
+  roomLookupError.value = ''
+  if (!code) return
+  try {
+    const result = await $fetch<{ type: 'HOME' | 'ONLINE' | 'NOT_FOUND'; code: string }>(`/api/rooms/resolve?code=${encodeURIComponent(code)}`, { retry: 0 })
+    if (result.type === 'HOME') return await navigateTo(`/room/${result.code}/join`)
+    if (result.type === 'ONLINE') return await navigateTo(`/online/${result.code}`)
+    roomLookupError.value = 'Стол с таким кодом не найден.'
+  } catch (error) {
+    roomLookupError.value = getHttpErrorMessage(error, 'Не удалось проверить код стола. Попробуйте ещё раз.')
   }
-
-  await navigateTo(`/room/${code}/join`)
 }
 
 async function logoutAccount() {
@@ -73,12 +79,14 @@ async function logoutAccount() {
     <section class="panel home-page__join">
       <div><span class="home-page__number">01</span><p class="eyebrow">Быстрый вход</p><h2>Введите код стола</h2></div>
       <div class="home-page__join-row"><input v-model="roomCode" class="input" type="text" inputmode="text" maxlength="8" autocomplete="off" placeholder="A7K2M9" @keyup.enter="joinByCode"><button type="button" class="btn" @click="joinByCode">Войти за стол</button></div>
+      <p v-if="roomLookupError" class="home-page__error" role="alert">{{ roomLookupError }}</p>
       <NuxtLink class="home-page__text-link" to="/rooms">Посмотреть все открытые столы <AppIcon name="arrow-right" :size="16" /></NuxtLink>
     </section>
 
     <section class="home-page__choices">
-      <NuxtLink class="home-choice home-choice--accent" to="/create"><span>02</span><div><small>Для организатора</small><h2>Создать комнату</h2><p>Настройте блайнды, бай-ин и пригласите друзей.</p></div><b>＋</b></NuxtLink>
-    <button class="home-choice" type="button" @click="startNewLocalGame"><span>03</span><div><small>Без интернета</small><h2>Локальная игра</h2><p>Калькулятор дилера на одном устройстве.</p></div><AppIcon name="arrow-right" :size="20" /></button>
+      <NuxtLink class="home-choice home-choice--accent" to="/create"><span>02</span><div><small>Для организатора</small><h2>Домашняя игра</h2><p>Настройте блайнды, бай-ин и играйте настоящими картами.</p></div><b>＋</b></NuxtLink>
+      <NuxtLink class="home-choice home-choice--online" to="/online/create"><span>03</span><div><small>Для друзей онлайн</small><h2>Создать онлайн-стол</h2><p>Откройте цифровый стол и пригласите игроков по коду.</p></div><b>＋</b></NuxtLink>
+      <button class="home-choice" type="button" @click="startNewLocalGame"><span>04</span><div><small>Без интернета</small><h2>Локальная игра</h2><p>Калькулятор дилера на одном устройстве.</p></div><AppIcon name="arrow-right" :size="20" /></button>
     </section>
 
     <button v-if="hasSaved" type="button" class="home-page__continue" @click="continueLocalGame"><span>Сохранённая локальная игра</span><strong>Продолжить <AppIcon name="arrow-right" :size="17" /></strong></button>
@@ -100,12 +108,14 @@ async function logoutAccount() {
 .home-page__number { position: absolute; right: 1rem; top: -.7rem; color: #ffffff08; font: 800 6rem 'Space Grotesk'; }
 .home-page__join-row { align-self: center; display: grid; grid-template-columns: 1fr auto; gap: .6rem; .input { min-height: 54px; text-transform: uppercase; letter-spacing: .18em; font: 700 1.1rem 'Space Grotesk'; } }
 .home-page__text-link { grid-column: 2; color: var(--text-muted); font-size: .85rem; }
-.home-page__choices { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.home-page__choices { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
 .home-choice { display: grid; grid-template-columns: auto 1fr auto; gap: 1rem; align-items: center; min-height: 150px; padding: 1.2rem; border: 1px solid #ffffff14; border-radius: var(--radius-lg); color: inherit; background: linear-gradient(145deg, #1a2822, #101b16); text-align: left; text-decoration: none; cursor: pointer; > span { align-self: start; color: var(--text-muted); font: 700 .75rem 'Space Grotesk'; } small { color: var(--accent); text-transform: uppercase; letter-spacing: .08em; } h2 { margin: .2rem 0; } p { margin: 0; color: var(--text-muted); } > b { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; background: #ffffff0d; font-size: 1.4rem; } &--accent { background: linear-gradient(145deg, #3b4328, #163326); border-color: rgba(242,180,81,.28); } }
+.home-choice--online { border-color: rgba(102, 190, 255, .35); background: linear-gradient(145deg, #183f4e, #102a31); }
 .home-page__continue, .home-page__account { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: .9rem 1.1rem; border: 1px dashed rgba(242,180,81,.35); border-radius: var(--radius-md); color: inherit; background: transparent; }
 .home-page__continue { cursor: pointer; strong { color: var(--accent); } }
 .home-page__account { border-style: solid; background: #ffffff05; p { margin: .2rem 0 0; color: var(--text-muted); } }
 .home-page__session { text-align: right; button { border: 0; color: var(--text-muted); background: none; text-decoration: underline; cursor: pointer; } }
 .home-page__error { color: var(--danger); }
+@media (max-width: 900px) { .home-page__choices { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 700px) { .home-page { padding-top: 1rem; } .home-page__hero { grid-template-columns: 1fr; gap: 1rem; } .home-page__copy h1 { font-size: clamp(2.7rem, 14vw, 4.2rem); } .home-page__identity { grid-template-columns: auto 1fr auto; min-width: 0; } .home-page__identity a { grid-column: 3; grid-row: 1 / 3; align-self: center; } .home-page__join, .home-page__choices { grid-template-columns: 1fr; } .home-page__join-row { grid-template-columns: 1fr; } .home-page__text-link { grid-column: 1; } .home-choice { min-height: 128px; padding: 1rem; } .home-page__account { align-items: stretch; flex-direction: column; } }
 </style>
