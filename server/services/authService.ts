@@ -1,9 +1,9 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { adminContext } from '../utils/adminContext'
+import { resolveRoomSecretPepper } from '../utils/roomSecretPepper'
 
 function hashRaw(value: string): string {
-  const pepper = process.env.ROOM_SECRET_PEPPER || 'dev-pepper'
-  return createHash('sha256').update(`${value}:${pepper}`).digest('hex')
+  return createHash('sha256').update(`${value}:${resolveRoomSecretPepper()}`).digest('hex')
 }
 
 export function generateSecret(prefix: 'dealer' | 'player'): string {

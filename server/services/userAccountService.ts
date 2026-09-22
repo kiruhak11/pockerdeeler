@@ -4,6 +4,7 @@ import { prisma } from '../db/client'
 import { ensureUserWallet } from './walletService'
 import { toChipNumber } from '../utils/chips'
 import type { Prisma } from '@prisma/client'
+import { resolveRoomSecretPepper } from '../utils/roomSecretPepper'
 
 const DEFAULT_BALANCE = 5000
 const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30
@@ -14,8 +15,7 @@ function normalizeUsername(username: string): string {
 
 export function hashPassword(password: string, salt?: string): string {
   const localSalt = salt || randomBytes(16).toString('hex')
-  const pepper = process.env.ROOM_SECRET_PEPPER || 'dev-pepper'
-  const derived = scryptSync(`${password}:${pepper}`, localSalt, 64).toString('hex')
+  const derived = scryptSync(`${password}:${resolveRoomSecretPepper()}`, localSalt, 64).toString('hex')
   return `${localSalt}:${derived}`
 }
 

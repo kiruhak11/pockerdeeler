@@ -37,6 +37,7 @@ import {
 import { publishOnlineRoomChanged } from './onlineRoomRealtimeService'
 import { OnlineRoomPresenceError } from './onlineRoomPresenceService'
 import { isDatabaseUnavailableError } from '../utils/databaseErrors'
+import { resolveRoomSecretPepper } from '../utils/roomSecretPepper'
 
 const DEFAULT_OWNER_STACK = 1_000
 const DEFAULT_SMALL_BLIND = 5
@@ -243,7 +244,7 @@ function requireUserId(userId: string): void {
 }
 
 function cryptoKey(): Buffer {
-  return createHash('sha256').update(process.env.ROOM_SECRET_PEPPER || 'dev-pepper').digest()
+  return createHash('sha256').update(resolveRoomSecretPepper()).digest()
 }
 
 /** Opaque, authenticated concurrency token; the Redis revision is never sent as a field. */
