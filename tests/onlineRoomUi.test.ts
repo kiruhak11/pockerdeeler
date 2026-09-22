@@ -264,6 +264,23 @@ test('ROOM_STATE replacement is a complete snapshot', () => {
   assert.notEqual(first.pokerTable.players.length, second.pokerTable.players.length)
 })
 
+test('online page synchronizes HTTP concurrency token from WebSocket snapshots', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/pages/online/[code].vue'), 'utf8')
+  const socket = readFileSync(resolve(process.cwd(), 'app/composables/useOnlineRoomSocket.ts'), 'utf8')
+  const hub = readFileSync(resolve(process.cwd(), 'server/ws/onlineRoomHub.ts'), 'utf8')
+  assert.match(socket, /onState\?\: \(state: OnlineRoomState, concurrencyToken\?: string\)/)
+  assert.match(socket, /payload\.concurrencyToken/)
+  assert.match(hub, /concurrencyToken: result\.concurrencyToken/)
+  assert.match(source, /applyAuthoritativeState\(next, token\)/)
+})
+
+test('online page ignores older HTTP snapshots and clears stale notices after success', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/pages/online/[code].vue'), 'utf8')
+  assert.match(source, /next\.roomVersion < state\.value\.roomVersion/)
+  assert.match(source, /notice\.value = ''/)
+  assert.match(source, /if \(statusCode\(error\) === 409\) await loadState\(\)/)
+})
+
 test('countdown uses absolute server deadline', () => {
   assert.equal(remainingTurnSeconds(31_000, 1_000), 30)
   assert.equal(formatTurnSeconds(30), '00:30')

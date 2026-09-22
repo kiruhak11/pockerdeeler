@@ -2,7 +2,7 @@ import { actionMessage, createOnlineActionId, onlineSocketUrl, pingMessage, star
 import type { OnlineAction, OnlineConnectionStatus, OnlineRoomState } from '~/types/online'
 
 type SocketHandlers = Readonly<{
-  onState?: (state: OnlineRoomState) => void
+  onState?: (state: OnlineRoomState, concurrencyToken?: string) => void
   onNotice?: (message: string) => void
 }>
 
@@ -63,7 +63,7 @@ export function useOnlineRoomSocket(roomCode: MaybeRefOrGetter<string>, handlers
     if (payload.type === 'ROOM_STATE' || payload.type === 'ACTION_ACCEPTED') {
       if (payload.state && typeof payload.state === 'object') {
         stateVersion = Number(payload.state.pokerTable?.stateVersion ?? payload.tableStateVersion ?? stateVersion)
-        handlers.onState?.(payload.state as OnlineRoomState)
+        handlers.onState?.(payload.state as OnlineRoomState, typeof payload.concurrencyToken === 'string' ? payload.concurrencyToken : undefined)
       }
       if (payload.type === 'ACTION_ACCEPTED') pendingActionId.value = null
       status.value = 'connected'
@@ -80,7 +80,7 @@ export function useOnlineRoomSocket(roomCode: MaybeRefOrGetter<string>, handlers
       protocolError(String(payload.code || ''), String(payload.message || ''))
       if (payload.state) {
         stateVersion = Number(payload.state.pokerTable?.stateVersion ?? stateVersion)
-        handlers.onState?.(payload.state as OnlineRoomState)
+        handlers.onState?.(payload.state as OnlineRoomState, typeof payload.concurrencyToken === 'string' ? payload.concurrencyToken : undefined)
       }
       return
     }

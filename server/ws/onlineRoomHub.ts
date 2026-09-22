@@ -56,6 +56,7 @@ function sendSnapshot(connection: MutableConnection, result: ApiOnlineRoomResult
     roomId: result.room.roomId,
     roomVersion,
     tableStateVersion,
+    concurrencyToken: result.concurrencyToken,
     state: result.room
   })
 }
@@ -148,6 +149,7 @@ export function sendOnlineRoomAccepted(connection: OnlineRoomPeerConnection, typ
     roomId: result.room.roomId,
     roomVersion: result.room.roomVersion,
     tableStateVersion: result.room.pokerTable.stateVersion,
+    concurrencyToken: result.concurrencyToken,
     state: result.room,
     ...extra
   })

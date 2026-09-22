@@ -19,14 +19,21 @@ const privateRoom = ref(false)
 const joinSecret = ref('')
 const joinBusy = ref(false)
 
+function applyAuthoritativeState(next: OnlineRoomState, token?: string): boolean {
+  if (state.value && (next.roomVersion < state.value.roomVersion || (next.roomVersion === state.value.roomVersion && next.pokerTable.stateVersion < state.value.pokerTable.stateVersion))) return false
+  state.value = next
+  if (token) concurrencyToken.value = token
+  const player = next.pokerTable.players.find(candidate => candidate.playerId === account.user?.id)
+  privateRoom.value = next.visibility === 'PRIVATE'
+  joinPrompt.value = !player
+  ready.value = player?.ready ?? false
+  sittingOut.value = player?.sittingOut ?? false
+  return true
+}
+
 const socket = useOnlineRoomSocket(code, {
-  onState(next) {
-    state.value = next
-    const player = next.pokerTable.players.find(candidate => candidate.playerId === account.user?.id)
-    privateRoom.value = next.visibility === 'PRIVATE'
-    joinPrompt.value = !player
-    ready.value = player?.ready ?? false
-    sittingOut.value = player?.sittingOut ?? false
+  onState(next, token) {
+    if (applyAuthoritativeState(next, token)) notice.value = ''
   },
   onNotice(message) { notice.value = message }
 })
@@ -55,8 +62,7 @@ async function loadState() {
   joinPrompt.value = false
   try {
     const result = await $fetch<OnlineApiResult>(`/api/online/rooms/${encodeURIComponent(code.value)}/state`, { retry: 0 })
-    state.value = result.room
-    concurrencyToken.value = result.concurrencyToken
+    applyAuthoritativeState(result.room, result.concurrencyToken)
     const player = result.room.pokerTable.players.find(candidate => candidate.playerId === account.user?.id)
     privateRoom.value = result.room.visibility === 'PRIVATE'
     joinPrompt.value = !player
@@ -92,8 +98,7 @@ async function joinRoom() {
       },
       retry: 0
     })
-    state.value = result.room
-    concurrencyToken.value = result.concurrencyToken
+    applyAuthoritativeState(result.room, result.concurrencyToken)
     joinSecret.value = ''
     joinPrompt.value = false
     socket.reconnect()
@@ -108,8 +113,8 @@ async function mutate(path: 'ready' | 'sitting-out', payload: Record<string, unk
   if (!concurrencyToken.value) return
   try {
     const result = await $fetch<OnlineApiResult>(`/api/online/rooms/${encodeURIComponent(code.value)}/${path}`, { method: 'POST', body: { ...payload, concurrencyToken: concurrencyToken.value, expectedRoomVersion: state.value?.roomVersion }, retry: 0 })
-    state.value = result.room
-    concurrencyToken.value = result.concurrencyToken
+    applyAuthoritativeState(result.room, result.concurrencyToken)
+    notice.value = ''
     socket.requestState()
   } catch (error) {
     notice.value = friendlyError(error)
@@ -122,6 +127,7 @@ async function leave() {
   if (import.meta.client && !window.confirm('Выйти из этой комнаты?')) return
   try {
     await $fetch(`/api/online/rooms/${encodeURIComponent(code.value)}/leave`, { method: 'POST', body: { concurrencyToken: concurrencyToken.value, expectedRoomVersion: state.value?.roomVersion }, retry: 0 })
+    notice.value = ''
     socket.disconnect()
     await navigateTo('/rooms')
   } catch (error) {
