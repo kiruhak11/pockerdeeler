@@ -3,6 +3,7 @@ import { type Card, type Deck } from './pokerDeck'
 import { finishHand } from './pokerHandFinalizer'
 import { prepareNextHand, type NextHandPlayer } from './pokerNextHand'
 import { getViewerLiveHandStrength, type LiveHandStrength } from './pokerLiveHandStrength'
+import { buildFinalizedHandResult, type FinalizedHandResult } from './pokerShowdownPresentation'
 import {
   advanceStreet,
   type HandPlayerState,
@@ -40,6 +41,8 @@ export type PokerTableState = Readonly<{
   handSequence: number
   /** Identifies the terminal hand whose payout has already been applied. */
   finalizedHandId: string | null
+  /** Safe server-owned presentation data retained until the next hand starts. */
+  finalizedHand: FinalizedHandResult | null
   smallBlind: number
   bigBlind: number
 }>
@@ -206,6 +209,7 @@ export function createPokerTable(options: CreatePokerTableOptions): PokerTableSt
     stateVersion: 0,
     handSequence: 0,
     finalizedHandId: null,
+    finalizedHand: null,
     smallBlind: options.smallBlind,
     bigBlind: options.bigBlind
   })
@@ -310,7 +314,8 @@ export function startTableHand(table: PokerTableState, options: StartTableHandOp
     dealerSeat: prepared.hand.dealerSeat,
     status: 'IN_HAND',
     handSequence: table.handSequence + 1,
-    finalizedHandId: null
+    finalizedHandId: null,
+    finalizedHand: null
   })
 }
 
@@ -358,10 +363,13 @@ export type PublicTableHandState = Readonly<{
   players: readonly PublicTableHandPlayer[]
 }>
 
+export type PublicFinalizedHandResult = FinalizedHandResult
+
 export type PlayerSafeTableState = Readonly<Omit<PokerTableState, 'currentHand' | 'seats' | 'players'> & {
   seats: readonly PokerTableSeat[]
   players: readonly PublicTablePlayer[]
   currentHand: PublicTableHandState | null
+  finalizedHand: PublicFinalizedHandResult | null
 }>
 
 function safeHand(hand: InternalHandState, viewerPlayerId: string | undefined, turnDeadlineAt: number | null): PublicTableHandState {
@@ -406,11 +414,31 @@ export function toPlayerSafeTableState(table: PokerTableState, viewerPlayerId?: 
     stateVersion: table.stateVersion,
     handSequence: table.handSequence,
     finalizedHandId: table.finalizedHandId,
+    finalizedHand: table.finalizedHand ? safeFinalizedHand(table.finalizedHand) : null,
     smallBlind: table.smallBlind,
     bigBlind: table.bigBlind,
     seats: Object.freeze(table.seats.map(seat => Object.freeze({ ...seat }))),
     players: Object.freeze(table.players.map(player => Object.freeze({ ...player }))),
     currentHand: table.currentHand ? safeHand(table.currentHand, viewerPlayerId, turnDeadlineAt) : null
+  })
+}
+
+function safeFinalizedHand(result: FinalizedHandResult): PublicFinalizedHandResult {
+  return Object.freeze({
+    ...result,
+    board: Object.freeze([...result.board]),
+    players: Object.freeze(result.players.map(player => Object.freeze({
+      ...player,
+      holeCards: Object.freeze([...player.holeCards]),
+      contributingCardIds: Object.freeze([...player.contributingCardIds])
+    }))),
+    pots: Object.freeze(result.pots.map(pot => Object.freeze({
+      ...pot,
+      winnerIds: Object.freeze([...pot.winnerIds]),
+      oddChipRecipients: Object.freeze([...pot.oddChipRecipients]),
+      payouts: Object.freeze(pot.payouts.map(item => Object.freeze({ ...item })))
+    }))),
+    returnedExcess: Object.freeze(result.returnedExcess.map(item => Object.freeze({ ...item })))
   })
 }
 
@@ -438,6 +466,7 @@ export function finalizeTableHand(table: PokerTableState, expectedStateVersion?:
   if (table.finalizedHandId === hand.handId) return table
 
   const result = finishHand(hand)
+  const finalizedHandResult = buildFinalizedHandResult(hand, result)
   const resultByPlayer = new Map(result.players.map(player => [player.playerId, player.stack]))
   const finalizedHand = Object.freeze({
     ...hand,
@@ -452,6 +481,7 @@ export function finalizeTableHand(table: PokerTableState, expectedStateVersion?:
     }),
     currentHand: finalizedHand,
     status: 'WAITING',
-    finalizedHandId: hand.handId
+    finalizedHandId: hand.handId,
+    finalizedHand: finalizedHandResult
   })
 }

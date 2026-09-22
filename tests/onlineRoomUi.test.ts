@@ -402,6 +402,27 @@ test('live combination block is laid out inside controls without overlay positio
   assert.doesNotMatch(source, /\.hand-strength[^}]*position:\s*absolute/)
 })
 
+test('finished ROOM_STATE renders server finalized showdown results', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
+  assert.match(source, /finalizedHand/)
+  assert.match(source, /РЕЗУЛЬТАТ РАЗДАЧИ/)
+  assert.match(source, /finalizedWinners/)
+  assert.match(source, /\.payout/)
+})
+
+test('finished presentation uses server contributing card ids for gold winners', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
+  assert.match(source, /contributingCardIds\.includes/)
+  assert.match(source, /card--gold/)
+  assert.doesNotMatch(source, /evaluateHand\(/)
+})
+
+test('finished presentation keeps folded cards out of the finalized DTO and clears on next hand', () => {
+  const source = readFileSync(resolve(process.cwd(), 'server/utils/pokerShowdownPresentation.ts'), 'utf8')
+  assert.match(source, /player\.status !== 'FOLDED'/)
+  assert.match(readFileSync(resolve(process.cwd(), 'server/utils/pokerTableState.ts'), 'utf8'), /finalizedHand: null/)
+})
+
 test('no bots or client evaluator were added to the ONLINE page', () => {
   const source = readFileSync(resolve(process.cwd(), 'app/pages/online/[code].vue'), 'utf8')
   assert.equal(source.includes('evaluateHand'), false)

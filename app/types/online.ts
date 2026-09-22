@@ -56,6 +56,43 @@ export type OnlineHand = Readonly<{
   players: readonly OnlineHandPlayer[]
 }>
 
+export type OnlineFinalizedShowdownPlayer = Readonly<{
+  playerId: string
+  seat: number
+  status: OnlineHandPlayerStatus
+  holeCards: readonly OnlineCard[]
+  category: OnlineHandStrength['category'] | null
+  categoryRank: number | null
+  label: string | null
+  contributingCardIds: readonly string[]
+  payout: number
+  returnedExcess: number
+  winner: boolean
+  nickname?: string
+}>
+
+export type OnlineFinalizedShowdownPot = Readonly<{
+  potId: number
+  amount: number
+  winnerIds: readonly string[]
+  split: boolean
+  oddChipCount: number
+  oddChipRecipients: readonly string[]
+  payouts: readonly Readonly<{ playerId: string; amount: number }>[]
+}>
+
+export type OnlineFinalizedHand = Readonly<{
+  handId: string
+  type: 'CONTESTED' | 'UNCONTESTED'
+  reason: 'SHOWDOWN' | 'UNCONTESTED_FOLD'
+  board: readonly OnlineCard[]
+  players: readonly OnlineFinalizedShowdownPlayer[]
+  pots: readonly OnlineFinalizedShowdownPot[]
+  returnedExcess: readonly Readonly<{ playerId: string; amount: number }>[]
+  totalPayout: number
+  totalReturnedExcess: number
+}>
+
 export type OnlinePokerTable = Readonly<{
   tableId: string
   maxPlayers: 6
@@ -68,6 +105,7 @@ export type OnlinePokerTable = Readonly<{
   seats: readonly Readonly<{ seat: number; playerId: string | null }>[]
   players: readonly OnlineTablePlayer[]
   currentHand: OnlineHand | null
+  finalizedHand?: OnlineFinalizedHand | null
 }>
 
 export type OnlineRoomState = Readonly<{

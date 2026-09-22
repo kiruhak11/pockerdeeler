@@ -151,6 +151,7 @@ function fallbackPlayerNickname(seat: number): string {
 async function addPublicPlayerNicknames(room: SafeOnlineRoomState): Promise<SafeOnlineRoomState> {
   const ids = new Set<string>(room.pokerTable.players.map(player => player.playerId))
   for (const player of room.pokerTable.currentHand?.players ?? []) ids.add(player.playerId)
+  for (const player of room.pokerTable.finalizedHand?.players ?? []) ids.add(player.playerId)
   const userIds = [...ids].filter(id => UUID_PATTERN.test(id))
   const names = new Map<string, string>()
   if (userIds.length > 0) {
@@ -168,8 +169,15 @@ async function addPublicPlayerNicknames(room: SafeOnlineRoomState): Promise<Safe
     nickname: names.get(player.playerId) ?? fallbackPlayerNickname(player.seat)
   })))
   const currentHand = room.pokerTable.currentHand
+  const finalizedHand = room.pokerTable.finalizedHand
   const handPlayers = currentHand
     ? Object.freeze(currentHand.players.map(player => Object.freeze({
+      ...player,
+      nickname: names.get(player.playerId) ?? fallbackPlayerNickname(player.seat)
+    })))
+    : null
+  const finalizedPlayers = finalizedHand
+    ? Object.freeze(finalizedHand.players.map(player => Object.freeze({
       ...player,
       nickname: names.get(player.playerId) ?? fallbackPlayerNickname(player.seat)
     })))
@@ -179,7 +187,8 @@ async function addPublicPlayerNicknames(room: SafeOnlineRoomState): Promise<Safe
     pokerTable: Object.freeze({
       ...room.pokerTable,
       players,
-      ...(currentHand ? { currentHand: Object.freeze({ ...currentHand, players: handPlayers! }) } : {})
+      ...(currentHand ? { currentHand: Object.freeze({ ...currentHand, players: handPlayers! }) } : {}),
+      ...(finalizedHand ? { finalizedHand: Object.freeze({ ...finalizedHand, players: finalizedPlayers! }) } : {})
     })
   })
 }

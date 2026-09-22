@@ -17,6 +17,8 @@ import {
   type OnlineRoomState
 } from '../utils/pokerOnlineRoom'
 import { RANKS, SUITS, restoreDeck, snapshotDeck, type Card, type DeckSnapshot } from '../utils/pokerDeck'
+import { HAND_CATEGORIES } from '../utils/pokerHandEvaluator'
+import type { FinalizedHandResult } from '../utils/pokerShowdownPresentation'
 
 export const ONLINE_ROOM_RUNTIME_SCHEMA_VERSION = 1 as const
 export const ONLINE_ROOM_RUNTIME_DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60
@@ -262,6 +264,101 @@ function deserializeHand(value: unknown): InternalHandState {
   })
 }
 
+function serializeFinalizedHand(result: FinalizedHandResult): JsonRecord {
+  return {
+    handId: result.handId,
+    type: result.type,
+    reason: result.reason,
+    board: serializeCards(result.board),
+    players: result.players.map(player => ({
+      playerId: player.playerId,
+      seat: player.seat,
+      status: player.status,
+      holeCards: serializeCards(player.holeCards),
+      category: player.category,
+      categoryRank: player.categoryRank,
+      label: player.label,
+      contributingCardIds: [...player.contributingCardIds],
+      payout: player.payout,
+      returnedExcess: player.returnedExcess,
+      winner: player.winner
+    })),
+    pots: result.pots.map(pot => ({
+      potId: pot.potId,
+      amount: pot.amount,
+      winnerIds: [...pot.winnerIds],
+      split: pot.split,
+      oddChipCount: pot.oddChipCount,
+      oddChipRecipients: [...pot.oddChipRecipients],
+      payouts: pot.payouts.map(item => ({ playerId: item.playerId, amount: item.amount }))
+    })),
+    returnedExcess: result.returnedExcess.map(item => ({ playerId: item.playerId, amount: item.amount })),
+    totalPayout: result.totalPayout,
+    totalReturnedExcess: result.totalReturnedExcess
+  }
+}
+
+function deserializeFinalizedHand(value: unknown): FinalizedHandResult {
+  const raw = requireRecord(value, 'Finalized hand result')
+  const players = requireArray(raw.players, 'Finalized players').map(item => {
+    const player = requireRecord(item, 'Finalized player')
+    const holeCards = deserializeCards(player.holeCards, 'Finalized hole cards')
+    if (holeCards.length !== 0 && holeCards.length !== 2) fail('CORRUPTED_STATE', 'Finalized player hole cards must be empty or contain exactly two cards.')
+    const category = player.category === null ? null : HAND_CATEGORIES.includes(player.category as typeof HAND_CATEGORIES[number]) ? player.category as typeof HAND_CATEGORIES[number] : fail('CORRUPTED_STATE', 'Finalized hand category is invalid.')
+    const categoryRank = player.categoryRank === null ? null : requireSafeInteger(player.categoryRank, 'Finalized category rank')
+    const label = player.label === null ? null : requireString(player.label, 'Finalized category label')
+    const contributingCardIds = requireArray(player.contributingCardIds, 'Contributing cards').map((id, index) => requireString(id, `Contributing card ${index}`))
+    return Object.freeze({
+      playerId: requireString(player.playerId, 'Finalized player id'),
+      seat: requireSafeInteger(player.seat, 'Finalized player seat', 1),
+      status: HAND_PLAYER_STATUSES.includes(player.status as HandPlayerState['status']) ? player.status as HandPlayerState['status'] : fail('CORRUPTED_STATE', 'Finalized player status is invalid.'),
+      holeCards: Object.freeze(holeCards),
+      category,
+      categoryRank,
+      label,
+      contributingCardIds: Object.freeze(contributingCardIds),
+      payout: requireSafeInteger(player.payout, 'Finalized payout'),
+      returnedExcess: requireSafeInteger(player.returnedExcess, 'Finalized returned excess'),
+      winner: requireBoolean(player.winner, 'Finalized winner')
+    })
+  })
+  const pots = requireArray(raw.pots, 'Finalized pots').map(item => {
+    const pot = requireRecord(item, 'Finalized pot')
+    const winnerIds = requireArray(pot.winnerIds, 'Finalized winners').map((id, index) => requireString(id, `Winner ${index}`))
+    const oddChipRecipients = requireArray(pot.oddChipRecipients, 'Odd-chip recipients').map((id, index) => requireString(id, `Odd-chip recipient ${index}`))
+    const payouts = requireArray(pot.payouts, 'Finalized payouts').map(item => {
+      const payout = requireRecord(item, 'Finalized payout')
+      return Object.freeze({ playerId: requireString(payout.playerId, 'Finalized payout player id'), amount: requireSafeInteger(payout.amount, 'Finalized payout amount') })
+    })
+    return Object.freeze({
+      potId: requireSafeInteger(pot.potId, 'Finalized pot id', 1),
+      amount: requireSafeInteger(pot.amount, 'Finalized pot amount', 1),
+      winnerIds: Object.freeze(winnerIds),
+      split: requireBoolean(pot.split, 'Finalized pot split'),
+      oddChipCount: requireSafeInteger(pot.oddChipCount, 'Finalized odd-chip count'),
+      oddChipRecipients: Object.freeze(oddChipRecipients),
+      payouts: Object.freeze(payouts)
+    })
+  })
+  const returnedExcess = requireArray(raw.returnedExcess, 'Finalized returned excess').map(item => {
+    const returned = requireRecord(item, 'Finalized returned excess')
+    return Object.freeze({ playerId: requireString(returned.playerId, 'Returned-excess player id'), amount: requireSafeInteger(returned.amount, 'Returned-excess amount') })
+  })
+  if (raw.type !== 'CONTESTED' && raw.type !== 'UNCONTESTED') fail('CORRUPTED_STATE', 'Finalized hand type is invalid.')
+  if (raw.reason !== 'SHOWDOWN' && raw.reason !== 'UNCONTESTED_FOLD') fail('CORRUPTED_STATE', 'Finalized hand reason is invalid.')
+  return Object.freeze({
+    handId: requireString(raw.handId, 'Finalized hand id'),
+    type: raw.type,
+    reason: raw.reason,
+    board: deserializeCards(raw.board, 'Finalized board'),
+    players: Object.freeze(players),
+    pots: Object.freeze(pots),
+    returnedExcess: Object.freeze(returnedExcess),
+    totalPayout: requireSafeInteger(raw.totalPayout, 'Finalized total payout'),
+    totalReturnedExcess: requireSafeInteger(raw.totalReturnedExcess, 'Finalized total returned excess')
+  })
+}
+
 function serializeTable(table: PokerTableState): JsonRecord {
   if (!table || !Array.isArray(table.players) || !Array.isArray(table.seats)) fail('INVALID_STATE', 'Table state is invalid.')
   return {
@@ -282,6 +379,7 @@ function serializeTable(table: PokerTableState): JsonRecord {
     stateVersion: table.stateVersion,
     handSequence: table.handSequence,
     finalizedHandId: table.finalizedHandId,
+    finalizedHand: table.finalizedHand ? serializeFinalizedHand(table.finalizedHand) : null,
     smallBlind: table.smallBlind,
     bigBlind: table.bigBlind
   }
@@ -334,6 +432,9 @@ function deserializeTable(value: unknown): PokerTableState {
     finalizedHandId: raw.finalizedHandId === undefined || raw.finalizedHandId === null
       ? null
       : requireString(raw.finalizedHandId, 'Finalized hand id'),
+    finalizedHand: raw.finalizedHand === undefined || raw.finalizedHand === null
+      ? null
+      : deserializeFinalizedHand(raw.finalizedHand),
     smallBlind: requireSafeInteger(raw.smallBlind, 'Table small blind', 1),
     bigBlind: requireSafeInteger(raw.bigBlind, 'Table big blind', 1)
   })

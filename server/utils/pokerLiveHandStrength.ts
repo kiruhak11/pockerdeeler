@@ -1,4 +1,4 @@
-import { evaluateHand, HAND_CATEGORY_RANK, type HandCategory } from './pokerHandEvaluator'
+import { evaluateHand, HAND_CATEGORY_RANK, type HandCategory, type HandEvaluation } from './pokerHandEvaluator'
 import { RANKS, type Card, type Rank } from './pokerDeck'
 import type { InternalHandState } from './pokerHandState'
 
@@ -51,7 +51,7 @@ function preferredRankCards(rank: number, required: number, board: readonly Card
   return [...board, ...holeCards].filter(card => rankValue(card.rank) === rank).slice(0, required)
 }
 
-function structuralCards(
+export function structuralCards(
   category: HandCategory,
   bestFive: readonly Card[],
   tieBreak: readonly number[],
@@ -81,6 +81,15 @@ function structuralCards(
     case 'straight-flush':
       return bestFive
   }
+}
+
+/** Returns the server-selected structural cards without exposing evaluator internals. */
+export function contributingCardIdsForEvaluation(
+  evaluation: HandEvaluation,
+  board: readonly Card[],
+  holeCards: readonly Card[]
+): readonly string[] {
+  return Object.freeze(structuralCards(evaluation.category, evaluation.bestFive, evaluation.tieBreak, board, holeCards).map(pokerCardId))
 }
 
 /** Evaluates the viewer's current hand without exposing evaluator internals. */

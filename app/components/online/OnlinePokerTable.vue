@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { OnlineAction, OnlineConnectionStatus, OnlineHandPlayer, OnlineRoomState, OnlineTablePlayer } from '~/types/online'
+import type { OnlineAction, OnlineCard, OnlineConnectionStatus, OnlineHandPlayer, OnlineRoomState, OnlineTablePlayer, OnlineFinalizedShowdownPlayer } from '~/types/online'
 import { cardIsRed, cardLabel, displayHand, formatTurnSeconds, isPostHandWaitingState, isViewerActor, ownHoleCards, playerForViewer, remainingTurnSeconds, seatPosition, tablePlayerForViewer, toCall } from '~/utils/onlineRoomUi'
 
 const props = defineProps<{
@@ -28,6 +28,9 @@ let countdownTimer: ReturnType<typeof setInterval> | undefined
 
 const hand = computed(() => props.state.pokerTable.currentHand)
 const visibleHand = computed(() => displayHand(hand.value))
+const finalizedHand = computed(() => props.state.pokerTable.finalizedHand ?? null)
+const displayBoard = computed(() => visibleHand.value?.board ?? finalizedHand.value?.board ?? [])
+const displayPot = computed(() => visibleHand.value?.pot ?? finalizedHand.value?.pots.reduce((sum, pot) => sum + pot.amount, 0) ?? 0)
 const tableViewer = computed(() => tablePlayerForViewer(props.state.pokerTable, props.viewerId))
 const viewer = computed(() => playerForViewer(hand.value, props.viewerId))
 const viewerIsActor = computed(() => isViewerActor(hand.value, props.viewerId))
@@ -49,6 +52,7 @@ const displayPlayers = computed(() => {
 const callAmount = computed(() => Math.min(viewerToCall.value, viewer.value?.stack ?? 0))
 const maxTargetAmount = computed(() => (viewer.value?.streetContribution ?? 0) + (viewer.value?.stack ?? 0))
 const isWaiting = computed(() => isPostHandWaitingState(props.state))
+const finalizedWinners = computed(() => finalizedHand.value?.players.filter(player => player.winner) ?? [])
 
 watch(() => [props.state.pokerTable.stateVersion, hand.value?.currentActor, hand.value?.street], () => {
   amount.value = null
@@ -72,6 +76,18 @@ function handPlayer(playerId: string): OnlineHandPlayer | null {
   return visibleHand.value?.players.find(item => item.playerId === playerId) ?? null
 }
 
+function statusPlayer(playerId: string): OnlineHandPlayer | null {
+  return hand.value?.players.find(item => item.playerId === playerId) ?? null
+}
+
+function finalizedPlayer(playerId: string): OnlineFinalizedShowdownPlayer | null {
+  return finalizedHand.value?.players.find(item => item.playerId === playerId) ?? null
+}
+
+function playerCards(playerId: string): readonly OnlineCard[] {
+  return handPlayer(playerId)?.holeCards ?? finalizedPlayer(playerId)?.holeCards ?? []
+}
+
 function displayName(player: OnlineTablePlayer): string {
   return player.nickname?.trim() || `Игрок ${player.seat}`
 }
@@ -80,8 +96,13 @@ function cardId(card: { rank: string; suit: string }): string {
   return `${card.rank}:${card.suit}`
 }
 
-function isContributingCard(card: { rank: string; suit: string }): boolean {
-  return Boolean(handStrength.value?.contributingCardIds.includes(cardId(card)))
+function isContributingCard(card: { rank: string; suit: string }, playerId?: string): boolean {
+  const id = cardId(card)
+  if (finalizedHand.value) {
+    const players = playerId ? [finalizedPlayer(playerId)].filter(Boolean) as OnlineFinalizedShowdownPlayer[] : finalizedWinners.value
+    return players.some(player => player.contributingCardIds.includes(id))
+  }
+  return Boolean(handStrength.value?.contributingCardIds.includes(id))
 }
 
 function statusLabel(player: OnlineTablePlayer, hand: OnlineHandPlayer | null): string {
@@ -106,6 +127,10 @@ function connectionLabel(status: OnlineConnectionStatus): string {
 function cardBacks(playerId: string): boolean {
   return Boolean(visibleHand.value && visibleHand.value.street !== 'SHOWDOWN' && playerId !== props.viewerId && visibleHand.value.players.find(player => player.playerId === playerId)?.status === 'ACTIVE')
 }
+
+function finalizedDisplayName(player: OnlineFinalizedShowdownPlayer): string {
+  return player.nickname?.trim() || displayName(props.state.pokerTable.players.find(item => item.playerId === player.playerId) ?? { playerId: player.playerId, seat: player.seat, stack: 0, connected: true, ready: false, sittingOut: false })
+}
 </script>
 
 <template>
@@ -128,14 +153,15 @@ function cardBacks(playerId: string): boolean {
       <div class="felt">
         <div class="table-meta">
           <span v-if="visibleHand">{{ visibleHand.street }}</span>
+          <span v-else-if="finalizedHand">FINISHED</span>
           <span v-else>Ожидание игроков</span>
-          <strong v-if="visibleHand">Банк {{ visibleHand.pot }}</strong>
+          <strong v-if="visibleHand || finalizedHand">Банк {{ visibleHand?.pot ?? displayPot }}</strong>
         </div>
         <div class="board" aria-label="Общие карты">
-          <span v-for="(card, index) in visibleHand?.board || []" :key="`${card.rank}-${card.suit}-${index}`" class="card" :class="{ 'card--red': cardIsRed(card), 'card--gold': isContributingCard(card) }">{{ cardLabel(card) }}</span>
-          <span v-if="!visibleHand?.board.length" class="board-empty">Общие карты появятся здесь</span>
+          <span v-for="(card, index) in displayBoard" :key="`${card.rank}-${card.suit}-${index}`" class="card" :class="{ 'card--red': cardIsRed(card), 'card--gold': isContributingCard(card) }">{{ cardLabel(card) }}</span>
+          <span v-if="!displayBoard.length" class="board-empty">Общие карты появятся здесь</span>
         </div>
-        <div v-if="visibleHand" class="pot-pill">POT {{ visibleHand.pot }}</div>
+        <div v-if="visibleHand || finalizedHand" class="pot-pill">POT {{ displayPot }}</div>
         <div class="players" aria-label="Игроки">
           <article
             v-for="(player, index) in displayPlayers"
@@ -145,8 +171,8 @@ function cardBacks(playerId: string): boolean {
               'player-seat--self': player.playerId === viewerId,
               'player-seat--actor': visibleHand?.currentActor === player.seat,
               'player-seat--offline': !player.connected,
-              'player-seat--folded': handPlayer(player.playerId)?.status === 'FOLDED',
-              'player-seat--all-in': handPlayer(player.playerId)?.status === 'ALL_IN',
+              'player-seat--folded': statusPlayer(player.playerId)?.status === 'FOLDED',
+              'player-seat--all-in': statusPlayer(player.playerId)?.status === 'ALL_IN',
               'player-seat--sitting-out': player.sittingOut
             }"
             :style="seatPosition(index, displayPlayers.length)"
@@ -154,18 +180,21 @@ function cardBacks(playerId: string): boolean {
             <div class="avatar" aria-hidden="true">{{ displayName(player).slice(0, 1).toUpperCase() }}</div>
             <div class="player-info">
               <strong :title="displayName(player)">{{ displayName(player) }}</strong>
-              <span>Стек: {{ handPlayer(player.playerId)?.stack ?? player.stack }}</span>
+              <span>Стек: {{ visibleHand ? handPlayer(player.playerId)?.stack ?? player.stack : player.stack }}</span>
               <small v-if="visibleHand" class="player-bet">Ставка: {{ handPlayer(player.playerId)?.streetContribution ?? 0 }}</small>
-              <small v-if="handPlayer(player.playerId)?.lastAction" class="player-action">{{ actionLabel(handPlayer(player.playerId)?.lastAction ?? null) }}</small>
-              <small class="player-status">{{ statusLabel(player, handPlayer(player.playerId)) }}</small>
+              <small v-if="statusPlayer(player.playerId)?.lastAction" class="player-action">{{ actionLabel(statusPlayer(player.playerId)?.lastAction ?? null) }}</small>
+              <small v-if="finalizedPlayer(player.playerId)?.label" class="player-combination">{{ finalizedPlayer(player.playerId)?.label }}</small>
+              <small v-if="finalizedPlayer(player.playerId)?.payout" class="player-payout">+{{ finalizedPlayer(player.playerId)?.payout }}</small>
+              <small v-if="finalizedPlayer(player.playerId)?.returnedExcess" class="player-returned">Возврат: {{ finalizedPlayer(player.playerId)?.returnedExcess }}</small>
+              <small class="player-status">{{ statusLabel(player, statusPlayer(player.playerId)) }}</small>
             </div>
             <div class="seat-markers" aria-label="Роли за столом">
-              <span v-if="visibleHand?.dealerSeat === player.seat" class="seat-marker" title="Кнопка дилера">D</span>
-              <span v-if="visibleHand?.smallBlindSeat === player.seat" class="seat-marker seat-marker--blind" title="Малый блайнд">SB</span>
-              <span v-if="visibleHand?.bigBlindSeat === player.seat" class="seat-marker seat-marker--blind" title="Большой блайнд">BB</span>
+              <span v-if="(visibleHand ?? hand)?.dealerSeat === player.seat" class="seat-marker" title="Кнопка дилера">D</span>
+              <span v-if="(visibleHand ?? hand)?.smallBlindSeat === player.seat" class="seat-marker seat-marker--blind" title="Малый блайнд">SB</span>
+              <span v-if="(visibleHand ?? hand)?.bigBlindSeat === player.seat" class="seat-marker seat-marker--blind" title="Большой блайнд">BB</span>
             </div>
-            <div v-if="handPlayer(player.playerId)?.holeCards.length" class="mini-cards">
-              <span v-for="card in handPlayer(player.playerId)?.holeCards || []" :key="`${card.rank}-${card.suit}`" class="mini-card" :class="{ 'card--red': cardIsRed(card), 'card--gold': isContributingCard(card) }">{{ cardLabel(card) }}</span>
+            <div v-if="playerCards(player.playerId).length" class="mini-cards">
+              <span v-for="card in playerCards(player.playerId)" :key="`${card.rank}-${card.suit}`" class="mini-card" :class="{ 'card--red': cardIsRed(card), 'card--gold': isContributingCard(card, player.playerId) }">{{ cardLabel(card) }}</span>
             </div>
             <div v-else-if="cardBacks(player.playerId)" class="mini-cards mini-cards--back" aria-label="Закрытые карты"><span class="mini-card">★</span><span class="mini-card">★</span></div>
           </article>
@@ -176,6 +205,19 @@ function cardBacks(playerId: string): boolean {
     <section v-if="ownCards.length" class="own-cards panel" aria-label="Ваши карты">
       <span class="section-kicker">ВАШИ КАРТЫ</span>
       <div class="own-cards__list"><span v-for="card in ownCards" :key="`${card.rank}-${card.suit}`" class="card card--large" :class="{ 'card--red': cardIsRed(card), 'card--gold': isContributingCard(card) }">{{ cardLabel(card) }}</span></div>
+    </section>
+
+    <section v-if="finalizedHand" class="showdown-summary panel" aria-live="polite" aria-label="Результат раздачи">
+      <span class="section-kicker">РЕЗУЛЬТАТ РАЗДАЧИ</span>
+      <strong>{{ finalizedHand.type === 'UNCONTESTED' ? 'Победитель' : finalizedWinners.length > 1 ? 'Победители' : 'Победитель' }}</strong>
+      <div class="showdown-winners">
+        <div v-for="winner in finalizedWinners" :key="winner.playerId" class="showdown-winner">
+          <span>{{ finalizedDisplayName(winner) }}</span>
+          <span v-if="winner.label">{{ winner.label }}</span>
+          <strong>+{{ winner.payout }}</strong>
+        </div>
+      </div>
+      <small v-if="finalizedHand.type === 'UNCONTESTED'">Карты не вскрывались: игроки сбросили карты.</small>
     </section>
 
     <section class="controls panel">
@@ -259,6 +301,9 @@ function cardBacks(playerId: string): boolean {
 .player-info small { color: var(--text-muted); }
 .player-info .player-bet { color: var(--accent-strong); font-weight: 700; }
 .player-info .player-action { color: #f5d88c; font-weight: 700; }
+.player-info .player-combination { color: #f2b451; font-weight: 700; }
+.player-info .player-payout { color: #9fe3a8; font-weight: 700; }
+.player-info .player-returned { color: #b8d8ca; }
 .player-status { font-size: .62rem; }
 .seat-markers { position: absolute; top: -.45rem; right: -.35rem; display: flex; gap: .18rem; }
 .seat-marker { display: grid; place-items: center; min-width: 20px; height: 20px; padding: 0 .18rem; border-radius: 50%; color: #1d271d; background: #f2e7bb; font-size: .58rem; font-weight: 700; }
@@ -272,6 +317,12 @@ function cardBacks(playerId: string): boolean {
 .own-cards__list { display: flex; gap: .4rem; }
 .hand-strength { display: grid; gap: .16rem; justify-items: center; padding: .5rem .7rem; border: 1px solid rgba(242,180,81,.36); border-radius: .7rem; background: rgba(242,180,81,.08); text-align: center; }
 .hand-strength strong { color: var(--accent-strong); font-size: 1.05rem; }
+.showdown-summary { display: grid; gap: .45rem; border: 1px solid rgba(242,180,81,.42); background: rgba(242,180,81,.09); }
+.showdown-summary > strong { color: var(--accent-strong); font-size: 1.05rem; }
+.showdown-winners { display: grid; gap: .3rem; }
+.showdown-winner { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: .55rem; align-items: center; }
+.showdown-winner strong { color: #9fe3a8; }
+.showdown-summary small { color: var(--text-muted); }
 .controls { display: grid; gap: .7rem; }
 .control-row { display: flex; justify-content: space-between; gap: .6rem; align-items: center; }
 .control-row strong, .control-row small { display: block; }
