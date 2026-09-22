@@ -6,7 +6,8 @@ export const ONLINE_ROOM_TURN_TIMEOUT_MS = 30_000
 export const ONLINE_ROOM_TURN_TIMER_KEY_PREFIX = 'pocker:online-turn-timer:v1:'
 export const ONLINE_ROOM_TURN_TIMER_POLL_MS = 250
 const ONLINE_ROOM_TURN_TIMER_JOB_TTL_SECONDS = 7 * 24 * 60 * 60
-const ONLINE_ROOM_TURN_TIMER_CLAIM_TTL_SECONDS = 60
+export const ONLINE_ROOM_TURN_TIMER_CLAIM_LEASE_SECONDS = 5
+const ONLINE_ROOM_TURN_TIMER_CLAIM_KEY_TTL_SECONDS = 7 * 24 * 60 * 60
 
 export type OnlineRoomTurnTimerJob = Readonly<{
   jobId: string
@@ -19,6 +20,8 @@ export type OnlineRoomTurnTimerJob = Readonly<{
   deadlineAt: number
   /** Runtime CAS revision used to prevent an older completion from replacing a newer job. */
   runtimeRevision?: number
+  /** Internal Redis claim fencing token; never part of a scheduled payload or client DTO. */
+  claimToken?: string
 }>
 
 export type OnlineRoomTurnTimerProcessResult = 'COMPLETED' | 'STALE' | 'RETRY'
@@ -49,6 +52,7 @@ const SCHEDULE_SCRIPT = `
 local indexKey = KEYS[1]
 local currentKey = KEYS[2]
 local jobKey = KEYS[3]
+local claimIndexKey = KEYS[4]
 local claimPrefix = ARGV[1]
 local jobId = ARGV[2]
 local deadline = tonumber(ARGV[3])
@@ -61,23 +65,27 @@ if old and old ~= jobId then
   local newRevision = tonumber(ARGV[6]) or 0
   if oldRevision and newRevision > 0 and oldRevision > newRevision then return 0 end
   redis.call('ZREM', indexKey, old)
+  redis.call('ZREM', claimIndexKey, old)
   redis.call('DEL', claimPrefix .. old)
   redis.call('DEL', string.sub(jobKey, 1, string.len(jobKey) - string.len(jobId)) .. old)
 end
 redis.call('ZADD', indexKey, deadline, jobId)
 redis.call('SET', jobKey, payload, 'EX', jobTtl)
 redis.call('SET', currentKey, jobId, 'EX', jobTtl)
+redis.call('EXPIRE', claimIndexKey, jobTtl)
 return 1
 `
 
 const CLEAR_SCRIPT = `
 local indexKey = KEYS[1]
 local currentKey = KEYS[2]
+local claimIndexKey = KEYS[3]
 local jobPrefix = ARGV[1]
 local claimPrefix = ARGV[2]
 local old = redis.call('GET', currentKey)
 if old then
   redis.call('ZREM', indexKey, old)
+  redis.call('ZREM', claimIndexKey, old)
   redis.call('DEL', jobPrefix .. old)
   redis.call('DEL', claimPrefix .. old)
   redis.call('DEL', currentKey)
@@ -87,30 +95,62 @@ return 1
 
 const CLAIM_DUE_SCRIPT = `
 local indexKey = KEYS[1]
+local claimIndexKey = KEYS[2]
 local jobPrefix = ARGV[1]
 local claimPrefix = ARGV[2]
 local now = tonumber(ARGV[3])
 local limit = tonumber(ARGV[4])
+local leaseSeconds = tonumber(ARGV[5])
+local claimKeyTtl = tonumber(ARGV[6])
+local claimToken = ARGV[7]
+
+local expiredClaims = redis.call('ZRANGEBYSCORE', claimIndexKey, '-inf', now, 'LIMIT', 0, limit)
+for _, id in ipairs(expiredClaims) do
+  if redis.call('ZREM', claimIndexKey, id) == 1 then
+    local claim = redis.call('GET', claimPrefix .. id)
+    local job = redis.call('GET', jobPrefix .. id)
+    if job then
+      local payload = job
+      if claim then
+        local separator = string.find(claim, '\\n', 1, true)
+        payload = separator and string.sub(claim, separator + 1) or claim
+      end
+      local deadline = tonumber(string.match(payload, '"deadlineAt":([0-9]+)'))
+      if deadline then redis.call('ZADD', indexKey, deadline, id) end
+    end
+    redis.call('DEL', claimPrefix .. id)
+  end
+end
+
 local ids = redis.call('ZRANGEBYSCORE', indexKey, '-inf', now, 'LIMIT', 0, limit)
 local payloads = {}
 for _, id in ipairs(ids) do
   if redis.call('ZREM', indexKey, id) == 1 then
     local payload = redis.call('GET', jobPrefix .. id)
     if payload then
-      redis.call('SET', claimPrefix .. id, payload, 'EX', ${ONLINE_ROOM_TURN_TIMER_CLAIM_TTL_SECONDS})
-      table.insert(payloads, payload)
+      redis.call('SET', claimPrefix .. id, claimToken .. '\\n' .. payload, 'EX', claimKeyTtl)
+      redis.call('ZADD', claimIndexKey, now + leaseSeconds, id)
+      table.insert(payloads, claimToken .. '\\n' .. payload)
     end
   end
 end
+redis.call('EXPIRE', claimIndexKey, claimKeyTtl)
 return payloads
 `
 
 const COMPLETE_SCRIPT = `
 local currentKey = KEYS[1]
-local jobKey = KEYS[2]
-local claimKey = KEYS[3]
+local indexKey = KEYS[2]
+local claimIndexKey = KEYS[3]
+local jobKey = KEYS[4]
+local claimKey = KEYS[5]
 local jobId = ARGV[1]
+local claimToken = ARGV[2]
+local claim = redis.call('GET', claimKey)
+if not claim or string.sub(claim, 1, string.len(claimToken) + 1) ~= claimToken .. '\\n' then return 0 end
 if redis.call('GET', currentKey) == jobId then redis.call('DEL', currentKey) end
+redis.call('ZREM', indexKey, jobId)
+redis.call('ZREM', claimIndexKey, jobId)
 redis.call('DEL', jobKey)
 redis.call('DEL', claimKey)
 return 1
@@ -118,12 +158,15 @@ return 1
 
 const RELEASE_SCRIPT = `
 local indexKey = KEYS[1]
-local jobKey = KEYS[2]
+local claimIndexKey = KEYS[2]
 local claimKey = KEYS[3]
 local jobId = ARGV[1]
 local deadline = tonumber(ARGV[2])
-if redis.call('EXISTS', claimKey) == 1 then
+local claimToken = ARGV[3]
+local claim = redis.call('GET', claimKey)
+if claim and string.sub(claim, 1, string.len(claimToken) + 1) == claimToken .. '\\n' then
   redis.call('ZADD', indexKey, deadline, jobId)
+  redis.call('ZREM', claimIndexKey, jobId)
   redis.call('DEL', claimKey)
   return 1
 end
@@ -182,6 +225,15 @@ function parseJob(payload: string): OnlineRoomTurnTimerJob {
   })
 }
 
+function parseClaimedJob(payload: string): OnlineRoomTurnTimerJob {
+  const separator = payload.indexOf('\n')
+  if (separator <= 0) throw new OnlineRoomTurnTimerError('CORRUPTED_JOB', 'Turn timer claim is missing its fencing token.')
+  const claimToken = payload.slice(0, separator)
+  if (claimToken.length < 1 || claimToken.length > 128) throw new OnlineRoomTurnTimerError('CORRUPTED_JOB', 'Turn timer claim token is invalid.')
+  const job = parseJob(payload.slice(separator + 1))
+  return Object.freeze({ ...job, claimToken })
+}
+
 function validPollInterval(value: number | undefined): number {
   const interval = value ?? ONLINE_ROOM_TURN_TIMER_POLL_MS
   if (!Number.isSafeInteger(interval) || interval < 50 || interval > 60_000) {
@@ -234,6 +286,10 @@ export class OnlineRoomTurnTimerService {
     return `${this.keyPrefix}claim:`
   }
 
+  private claimIndexKey(): string {
+    return `${this.keyPrefix}claims`
+  }
+
   private jobKey(jobId: string): string {
     assertId(jobId, 'Job id')
     return `${this.jobPrefix()}${jobId}`
@@ -271,16 +327,18 @@ export class OnlineRoomTurnTimerService {
 
   async schedule(job: Omit<OnlineRoomTurnTimerJob, 'jobId'>): Promise<OnlineRoomTurnTimerJob | null> {
     this.validateJob(job)
-    const complete = Object.freeze({ ...job, jobId: randomUUID() })
+    const { claimToken: _claimToken, ...scheduledJob } = job
+    const complete = Object.freeze({ ...scheduledJob, jobId: randomUUID() })
     const payload = JSON.stringify(complete)
     try {
       await this.connect()
       const result = await this.redis.eval(
         SCHEDULE_SCRIPT,
-        3,
+        4,
         this.indexKey(),
         this.roomKey(job.roomId),
         this.jobKey(complete.jobId),
+        this.claimIndexKey(),
         this.claimPrefix(),
         complete.jobId,
         complete.deadlineAt,
@@ -299,7 +357,7 @@ export class OnlineRoomTurnTimerService {
     assertId(roomId, 'Room id')
     try {
       await this.connect()
-      await this.redis.eval(CLEAR_SCRIPT, 2, this.indexKey(), this.roomKey(roomId), this.jobPrefix(), this.claimPrefix())
+      await this.redis.eval(CLEAR_SCRIPT, 3, this.indexKey(), this.roomKey(roomId), this.claimIndexKey(), this.jobPrefix(), this.claimPrefix())
     } catch (error) {
       if (error instanceof OnlineRoomTurnTimerError) throw error
       throw new OnlineRoomTurnTimerError('REDIS_UNAVAILABLE', error instanceof Error ? error.message : 'Turn timer cleanup failed.')
@@ -312,9 +370,22 @@ export class OnlineRoomTurnTimerService {
       throw new OnlineRoomTurnTimerError('INVALID_ARGUMENT', 'Timer processing arguments are invalid.')
     }
     let payloads: unknown
+    const claimToken = randomUUID()
     try {
       await this.connect()
-      payloads = await this.redis.eval(CLAIM_DUE_SCRIPT, 1, this.indexKey(), this.jobPrefix(), this.claimPrefix(), now, limit)
+      payloads = await this.redis.eval(
+        CLAIM_DUE_SCRIPT,
+        2,
+        this.indexKey(),
+        this.claimIndexKey(),
+        this.jobPrefix(),
+        this.claimPrefix(),
+        now,
+        limit,
+        ONLINE_ROOM_TURN_TIMER_CLAIM_LEASE_SECONDS,
+        ONLINE_ROOM_TURN_TIMER_CLAIM_KEY_TTL_SECONDS,
+        claimToken
+      )
     } catch (error) {
       if (error instanceof OnlineRoomTurnTimerError) throw error
       throw new OnlineRoomTurnTimerError('REDIS_UNAVAILABLE', error instanceof Error ? error.message : 'Turn timer polling failed.')
@@ -324,7 +395,7 @@ export class OnlineRoomTurnTimerService {
     for (const raw of payloads) {
       let job: OnlineRoomTurnTimerJob
       try {
-        job = parseJob(String(raw))
+        job = parseClaimedJob(String(raw))
       } catch {
         continue
       }
@@ -370,13 +441,34 @@ export class OnlineRoomTurnTimerService {
   }
 
   private async complete(job: OnlineRoomTurnTimerJob): Promise<void> {
+    if (!job.claimToken) return
     await this.connect()
-    await this.redis.eval(COMPLETE_SCRIPT, 3, this.roomKey(job.roomId), this.jobKey(job.jobId), this.claimKey(job.jobId), job.jobId)
+    await this.redis.eval(
+      COMPLETE_SCRIPT,
+      5,
+      this.roomKey(job.roomId),
+      this.indexKey(),
+      this.claimIndexKey(),
+      this.jobKey(job.jobId),
+      this.claimKey(job.jobId),
+      job.jobId,
+      job.claimToken
+    )
   }
 
   private async release(job: OnlineRoomTurnTimerJob): Promise<void> {
+    if (!job.claimToken) return
     await this.connect()
-    await this.redis.eval(RELEASE_SCRIPT, 3, this.indexKey(), this.jobKey(job.jobId), this.claimKey(job.jobId), job.jobId, job.deadlineAt)
+    await this.redis.eval(
+      RELEASE_SCRIPT,
+      3,
+      this.indexKey(),
+      this.claimIndexKey(),
+      this.claimKey(job.jobId),
+      job.jobId,
+      job.deadlineAt,
+      job.claimToken
+    )
   }
 }
 
