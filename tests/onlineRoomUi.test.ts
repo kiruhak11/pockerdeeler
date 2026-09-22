@@ -73,6 +73,21 @@ test('Table route source exists without changing the HOME rooms page', () => {
   assert.equal(readFileSync(resolve(process.cwd(), 'app/pages/rooms.vue'), 'utf8').includes('OnlinePokerTable'), false)
 })
 
+test('HOME lobby fetch is SSR-compatible for the first hydrated render', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/components/room/LobbyDirectory.vue'), 'utf8')
+  assert.match(source, /await useFetch\('\/api\/rooms'\)/)
+  assert.doesNotMatch(source, /server:\s*false/)
+  assert.doesNotMatch(source, /lazy:\s*true/)
+  assert.doesNotMatch(source, /<ClientOnly>/)
+})
+
+test('HOME lobby loading and refresh states stay tied to fetch status', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/components/room/LobbyDirectory.vue'), 'utf8')
+  assert.match(source, /:disabled="status === 'pending'"/)
+  assert.match(source, /!rooms && status === 'pending'/)
+  assert.match(source, /@click="refresh\(\)"/)
+})
+
 test('loading state has the product copy', () => {
   assert.match(readFileSync(resolve(process.cwd(), 'app/pages/online/[code].vue'), 'utf8'), /Подключаемся к столу/)
 })

@@ -3,7 +3,7 @@ import { getHttpErrorMessage } from '~/utils/httpError'
 import AppIcon from '~/components/ui/AppIcon.vue'
 
 const tab = ref<'public' | 'private'>('public')
-const { data: rooms, status, error, refresh } = await useFetch('/api/rooms', { server: false, lazy: true })
+const { data: rooms, status, error, refresh } = await useFetch('/api/rooms')
 const visible = computed(() => (rooms.value || []).filter(r => r.hasPassword === (tab.value === 'private')))
 const policy = { mixed: 'Аккаунты и гости', accounts: 'С аккаунтами', guests: 'Гостевой стол' }
 let timer: ReturnType<typeof setInterval> | undefined
