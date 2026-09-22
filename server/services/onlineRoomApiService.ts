@@ -16,7 +16,7 @@ import {
   type OnlineRoomState
 } from '../utils/pokerOnlineRoom'
 import { PokerTableError, advanceTableStreet, canStartNextHand, finalizeTableHand } from '../utils/pokerTableState'
-import { getToCall } from '../utils/pokerBetting'
+import { getLegalBettingActions, getMinimumRaiseTo, getToCall } from '../utils/pokerBetting'
 import {
   getOnlineRoomTurnTimerService,
   ONLINE_ROOM_TURN_TIMEOUT_MS,
@@ -32,7 +32,8 @@ import {
 import {
   OnlineRoomRuntimeStore,
   OnlineRoomRuntimeStoreError,
-  type OnlineRoomRuntimeRecord
+  type OnlineRoomRuntimeRecord,
+  type OnlineRoomMutationFence
 } from './onlineRoomRuntimeStore'
 import { publishOnlineRoomChanged } from './onlineRoomRealtimeService'
 import { OnlineRoomPresenceError } from './onlineRoomPresenceService'
@@ -47,9 +48,11 @@ import {
   pendingOnlineBuyIns,
   prepareOnlineCashOut,
   reserveOnlineBuyIn,
+  reserveInitialOnlineRoomBuyIn,
   type OnlineBuyInReservation
 } from './onlineRoomAccountingService'
 import { assertOnlinePokerBotMayJoin, OnlinePokerBotJoinError } from './botIdentityService'
+import { recordFinalizedOnlinePokerHand } from './onlinePokerRatingService'
 
 const DEFAULT_OWNER_STACK = 1_000
 const DEFAULT_SMALL_BLIND = 5
@@ -89,6 +92,8 @@ function fail(code: OnlineRoomApiErrorCode, message: string, statusCode: number)
 export type OnlineRoomApiDependencies = Readonly<{
   runtime?: OnlineRoomRuntimeStore
   timer?: OnlineRoomTurnTimerService
+  /** Internal-only fencing data for autonomous bot mutations. Never accepted from HTTP/WS. */
+  botFence?: OnlineRoomMutationFence
 }>
 
 export type CreateAuthenticatedOnlineRoomInput = Readonly<{
@@ -116,6 +121,17 @@ export type OnlineRoomLobbyEntry = Readonly<{
   maxPlayers: 6
   status: 'WAITING' | 'IN_HAND'
   createdAt: string
+  startingStack: number
+  smallBlind: number
+  bigBlind: number
+}>
+
+export type OnlinePokerBotDecisionSnapshot = Readonly<{
+  room: ApiOnlineRoomResult['room']
+  legalActions: ReturnType<typeof getLegalBettingActions>
+  toCall: number
+  minRaiseTo: number
+  raiseReopened: boolean
 }>
 
 export type ReadyAuthenticatedOnlineRoomInput = OnlineRoomConcurrencyInput & Readonly<{
@@ -535,7 +551,7 @@ export async function resolveOnlineRoomCode(code: string): Promise<Readonly<{ ty
 export async function listPublicOnlineRooms(): Promise<readonly OnlineRoomLobbyEntry[]> {
   const rows = await prisma.onlineRoom.findMany({
     where: { visibility: 'PUBLIC', status: 'WAITING' },
-    select: { id: true, roomCode: true, createdAt: true },
+    select: { id: true, roomCode: true, createdAt: true, startingStack: true },
     orderBy: { createdAt: 'desc' },
     take: 100
   })
@@ -550,13 +566,96 @@ export async function listPublicOnlineRooms(): Promise<readonly OnlineRoomLobbyE
         playerCount: record.state.pokerTable.players.length,
         maxPlayers: 6,
         status: record.state.pokerTable.status === 'IN_HAND' ? 'IN_HAND' : 'WAITING',
-        createdAt: row.createdAt.toISOString()
+        createdAt: row.createdAt.toISOString(),
+        startingStack: Number(row.startingStack),
+        smallBlind: record.state.pokerTable.smallBlind,
+        bigBlind: record.state.pokerTable.bigBlind
       }))
     }
     return Object.freeze(entries)
   } finally {
     await runtime.disconnect().catch(() => undefined)
   }
+}
+
+/** Internal orchestration count; it returns no bot-owner markers to public clients. */
+export async function countPublicOnlineRoomsOwnedByBots(botIds: readonly string[]): Promise<number> {
+  if (botIds.length === 0) return 0
+  return prisma.onlineRoom.count({ where: { visibility: 'PUBLIC', status: 'WAITING', ownerId: { in: [...botIds] } } })
+}
+
+/**
+ * Closes stale empty bot-created public rooms. DB row locking prevents a buy-in
+ * reservation from racing with closure; runtime state is removed only after
+ * the authoritative snapshot confirms there are no seats or active hands.
+ */
+export async function closeEmptyPublicOnlineRoomsCreatedByBots(
+  botIds: readonly string[],
+  olderThan: Date,
+  dependencies?: OnlineRoomApiDependencies
+): Promise<number> {
+  if (botIds.length === 0) return 0
+  const candidates = await prisma.onlineRoom.findMany({
+    where: { ownerId: { in: [...botIds] }, visibility: 'PUBLIC', status: { in: ['WAITING', 'CLOSED'] }, createdAt: { lt: olderThan } },
+    select: { id: true, roomCode: true }
+  })
+  let closedCount = 0
+  for (const candidate of candidates) {
+    let current: OnlineRoomRuntimeRecord | null
+    try { current = await runtimeStore(dependencies).get(candidate.id) } catch { continue }
+    if (current && (current.state.visibility !== 'PUBLIC' || current.state.pokerTable.players.length > 0 ||
+        (current.state.pokerTable.currentHand !== null && current.state.pokerTable.currentHand.street !== 'FINISHED'))) continue
+    const closed = await prisma.$transaction(async tx => {
+      const locked = await tx.$queryRaw<Array<{ id: string; status: string }>>`SELECT id, status FROM "online_rooms" WHERE id=${candidate.id}::uuid FOR UPDATE`
+      if (!locked.length || !['WAITING', 'CLOSED'].includes(locked[0]!.status)) return false
+      const activeSeats = await tx.onlineRoomPlayer.count({ where: { roomId: candidate.id, status: { in: ['RESERVING', 'ACTIVE', 'CASH_OUT_PENDING'] } } })
+      if (activeSeats > 0) return false
+      if (locked[0]!.status === 'CLOSED') return true
+      const result = await tx.onlineRoom.updateMany({ where: { id: candidate.id, visibility: 'PUBLIC', status: 'WAITING' }, data: { status: 'CLOSED' } })
+      return result.count === 1
+    })
+    if (!closed) continue
+    if (current) {
+      try { await runtimeStore(dependencies).remove(candidate.id, current.runtimeRevision) }
+      catch (error) {
+        if (!(error instanceof OnlineRoomRuntimeStoreError) || error.code !== 'ROOM_NOT_FOUND') continue
+      }
+    }
+    closedCount += 1
+  }
+  return closedCount
+}
+
+/** Finds a bot's durable active public seat after process restart. */
+export async function findActivePublicOnlineRoomForPlayer(userId: string): Promise<string | null> {
+  const row = await prisma.onlineRoomPlayer.findFirst({
+    where: { userId, status: { in: ['ACTIVE', 'RESERVING', 'CASH_OUT_PENDING'] }, room: { visibility: 'PUBLIC', status: { not: 'CLOSED' } } },
+    orderBy: { updatedAt: 'desc' },
+    select: { room: { select: { roomCode: true } } }
+  })
+  return row?.room.roomCode ?? null
+}
+
+/** Projects only bot-owned cards and legal public data for the server strategy engine. */
+export async function getOnlinePokerBotDecisionSnapshot(userId: string, code: string, dependencies?: OnlineRoomApiDependencies): Promise<OnlinePokerBotDecisionSnapshot> {
+  requireUserId(userId)
+  try { await assertOnlinePokerBotMayJoin(userId, 'PUBLIC') } catch (error) { throw mapRuntimeError(error) }
+  const metadata = await loadPersistentRoom(code)
+  if (metadata.visibility !== 'PUBLIC') fail('FORBIDDEN', 'Bots cannot access private online rooms.', 403)
+  const record = await requireRuntime(metadata, dependencies)
+  const hand = record.state.pokerTable.currentHand
+  if (!hand) fail('HAND_NOT_ACTIVE', 'There is no active hand.', 409)
+  const player = hand.players.find(candidate => candidate.playerId === userId)
+  if (!player) fail('NOT_FOUND', 'The bot is not seated in this room.', 404)
+  const result = await safeOnlineRoomResult(record.state, userId, record.runtimeRevision)
+  const playerLevel = hand.lastActedAtBet.find(level => level.playerId === userId)
+  return Object.freeze({
+    room: result.room,
+    legalActions: getLegalBettingActions(hand, userId),
+    toCall: getToCall(hand, userId),
+    minRaiseTo: getMinimumRaiseTo(hand),
+    raiseReopened: !playerLevel || hand.currentBet - playerLevel.bet >= hand.lastFullRaiseSize
+  })
 }
 
 export async function createAuthenticatedOnlineRoom(userId: string, input: CreateAuthenticatedOnlineRoomInput = {}, dependencies?: OnlineRoomApiDependencies): Promise<ApiOnlineRoomResult> {
@@ -610,8 +709,8 @@ export async function createAuthenticatedOnlineRoom(userId: string, input: Creat
   })
   let ownerReservation: OnlineBuyInReservation | null = null
   try {
-    ownerReservation = await reserveOnlineBuyIn({ roomId: metadata.id, userId, seat: ownerSeat, amount: startingStack })
-    const record = await runtimeStore(dependencies).create(state)
+    ownerReservation = await reserveInitialOnlineRoomBuyIn({ roomId: metadata.id, userId, seat: ownerSeat, amount: startingStack })
+    const record = await runtimeStore(dependencies).create(state, dependencies?.botFence)
     await activateOnlineBuyIn({ roomId: metadata.id, userId, sequence: ownerReservation.sequence, seat: ownerSeat })
     try {
       await prisma.onlineRoom.update({ where: { id: metadata.id }, data: { status: 'WAITING' } })
@@ -654,6 +753,7 @@ export async function getAuthenticatedOnlineRoom(userId: string, code: string, d
   } catch (error) {
     throw mapRuntimeError(error)
   }
+  if (record.state.pokerTable.finalizedHand) await recordFinalizedOnlinePokerHand(record.state)
   if (metadata.visibility === 'PRIVATE' && !record.state.pokerTable.players.some(player => player.playerId === userId)) {
     fail('FORBIDDEN', 'Join the private room before viewing its state.', 403)
   }
@@ -732,8 +832,11 @@ async function updateRoomInternal(
   if (revision !== current.runtimeRevision) fail('CONFLICT', 'The room changed. Refresh and retry the action.', 409)
   try {
     const updated = action
-      ? await runtimeStore(dependencies).updateWithAction(metadata.id, revision, action.playerId, action.actionId, action.fingerprint, state => updater(state))
-      : Object.freeze({ record: await runtimeStore(dependencies).update(metadata.id, revision, state => updater(state)), duplicate: false })
+      ? await runtimeStore(dependencies).updateWithAction(metadata.id, revision, action.playerId, action.actionId, action.fingerprint, state => updater(state), dependencies?.botFence)
+      : Object.freeze({ record: await runtimeStore(dependencies).update(metadata.id, revision, state => updater(state), dependencies?.botFence), duplicate: false })
+    // Rating writes are idempotent by (user, hand). Retrying a finalized action
+    // must also retry the durable result projection if the prior DB write failed.
+    if (updated.record.state.pokerTable.finalizedHand) await recordFinalizedOnlinePokerHand(updated.record.state)
     if (!updated.duplicate) {
       await syncMetadataAfterMutation(metadata, updated.record.state).catch(() => undefined)
       void publishOnlineRoomChanged({

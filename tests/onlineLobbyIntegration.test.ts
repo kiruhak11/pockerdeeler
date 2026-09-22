@@ -123,12 +123,12 @@ test('public ONLINE room appears in the lobby and private room does not', { skip
   assert.equal(JSON.stringify(rooms).includes('runtimeRevision'), false)
 })
 
-test('lobby DTO contains only public code, count, capacity, status and createdAt', { skip: !isolated }, async () => {
+test('lobby DTO contains only public room settings and display-safe fields', { skip: !isolated }, async () => {
   const room = await createAuthenticatedOnlineRoom(`lobby-shape-${randomUUID()}`, {}, { runtime: runtime() })
   roomIds.push(room.room.roomId)
   const entry = (await listPublicOnlineRooms()).find(item => item.code === room.room.roomCode)
   assert.ok(entry)
-  assert.deepEqual(Object.keys(entry!).sort(), ['code', 'createdAt', 'maxPlayers', 'playerCount', 'status'])
+  assert.deepEqual(Object.keys(entry!).sort(), ['bigBlind', 'code', 'createdAt', 'maxPlayers', 'playerCount', 'smallBlind', 'startingStack', 'status'])
 })
 
 test('private first join can use a server-selected revision without a client token', { skip: !isolated }, async () => {

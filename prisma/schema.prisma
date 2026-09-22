@@ -149,6 +149,7 @@ model User {
   roomMemberAccounts           RoomMemberAccount[]
   predictionRatingEvents       PredictionRatingEvent[]
   tableRatingEvents            TableRatingEvent[]
+  onlinePokerRatingEvents      OnlinePokerRatingEvent[]
   achievements                 UserAchievement[]
   seasonalStats                SeasonalUserStats[]
   seasonalLeaderboards         SeasonLeaderboard[]
@@ -1316,6 +1317,21 @@ model TableRatingEvent {
   @@unique([userId, handId])
   @@index([userId, createdAt])
   @@map("table_rating_events")
+}
+
+model OnlinePokerRatingEvent {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  handId    String   @map("hand_id") @db.VarChar(64)
+  delta     Int
+  reason    String   @db.VarChar(128)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, handId])
+  @@index([userId, createdAt])
+  @@map("online_poker_rating_events")
 }
 
 model Achievement {

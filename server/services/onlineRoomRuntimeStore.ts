@@ -35,6 +35,9 @@ export type OnlineRoomActionMutationResult = Readonly<{
   duplicate: boolean
 }>
 
+/** Server-only worker lease fence. It is never serialized in a room snapshot. */
+export type OnlineRoomMutationFence = Readonly<{ key: string; token: string }>
+
 export type OnlineRoomRuntimeStoreOptions = Readonly<{
   redisUrl?: string
   redis?: Redis
@@ -630,16 +633,28 @@ export class OnlineRoomRuntimeStore {
     return this.key(roomId)
   }
 
-  async create(state: OnlineRoomState): Promise<OnlineRoomRuntimeRecord> {
+  async create(state: OnlineRoomState, fence?: OnlineRoomMutationFence): Promise<OnlineRoomRuntimeRecord> {
     const runtimeRevision = 1
     const key = this.key(state.roomId)
     const payload = encodeEnvelope(state, runtimeRevision)
     try {
       await this.connect()
       const expiry = expiryArgs(state, this.ttlSeconds)
-      const result = expiry.length === 0
-        ? await this.redis.set(key, payload, 'NX')
-        : await this.redis.set(key, payload, expiry[0], expiry[1], 'NX')
+      let result: string | null
+      if (fence) {
+        const fencedResult = Number(await this.redis.eval(`
+            if redis.call('GET', KEYS[1]) ~= ARGV[1] then return -1 end
+            if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
+            ${expiry.length === 0 ? "redis.call('SET', KEYS[2], ARGV[2])" : "redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])"}
+            return 1
+          `, 2, fence.key, key, fence.token, payload, ...(expiry.length === 0 ? [] : [expiry[1]])))
+        if (fencedResult === -1) fail('STALE_STATE', 'The bot worker lease is no longer valid.')
+        result = fencedResult === 1 ? 'OK' : null
+      } else {
+        result = expiry.length === 0
+          ? await this.redis.set(key, payload, 'NX')
+          : await this.redis.set(key, payload, expiry[0], expiry[1], 'NX')
+      }
       if (result !== 'OK') fail('ROOM_EXISTS', `Runtime state for room ${state.roomId} already exists.`)
       return Object.freeze({ state, runtimeRevision })
     } catch (error) {
@@ -663,7 +678,7 @@ export class OnlineRoomRuntimeStore {
     }
   }
 
-  async update(roomId: string, expectedRevision: number, updater: (state: OnlineRoomState) => OnlineRoomState): Promise<OnlineRoomRuntimeRecord> {
+  async update(roomId: string, expectedRevision: number, updater: (state: OnlineRoomState) => OnlineRoomState, fence?: OnlineRoomMutationFence): Promise<OnlineRoomRuntimeRecord> {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) fail('INVALID_ARGUMENT', 'Expected runtime revision must be a positive integer.')
     if (typeof updater !== 'function') fail('INVALID_ARGUMENT', 'A controlled runtime updater is required.')
     const key = this.key(roomId)
@@ -672,11 +687,12 @@ export class OnlineRoomRuntimeStore {
     let updaterFailure: unknown
     try {
       await connectRedis(transactionRedis)
-      await transactionRedis.watch(key)
+      await transactionRedis.watch(...(fence ? [key, fence.key] : [key]))
       try {
         const payload = await transactionRedis.get(key)
         if (payload === null) fail('ROOM_NOT_FOUND', `Runtime state for room ${roomId} was not found.`)
         const current = decodeEnvelope(payload, roomId)
+        if (fence && await transactionRedis.get(fence.key) !== fence.token) fail('STALE_STATE', 'The bot worker lease is no longer valid.')
         if (current.runtimeRevision !== expectedRevision) fail('STALE_STATE', `Expected runtime revision ${expectedRevision} does not match ${current.runtimeRevision}.`)
         let nextState: OnlineRoomState
         try {
@@ -716,7 +732,8 @@ export class OnlineRoomRuntimeStore {
     playerId: string,
     actionId: string,
     fingerprint: string,
-    updater: (state: OnlineRoomState) => OnlineRoomState
+    updater: (state: OnlineRoomState) => OnlineRoomState,
+    fence?: OnlineRoomMutationFence
   ): Promise<OnlineRoomActionMutationResult> {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) fail('INVALID_ARGUMENT', 'Expected runtime revision must be a positive integer.')
     if (typeof updater !== 'function') fail('INVALID_ARGUMENT', 'A controlled runtime updater is required.')
@@ -730,11 +747,12 @@ export class OnlineRoomRuntimeStore {
       let updaterFailure: unknown
       try {
         await connectRedis(transactionRedis)
-        await transactionRedis.watch(key, actionKey)
+        await transactionRedis.watch(...(fence ? [key, actionKey, fence.key] : [key, actionKey]))
         try {
           const payload = await transactionRedis.get(key)
           if (payload === null) fail('ROOM_NOT_FOUND', `Runtime state for room ${roomId} was not found.`)
           const current = decodeEnvelope(payload, roomId)
+          if (fence && await transactionRedis.get(fence.key) !== fence.token) fail('STALE_STATE', 'The bot worker lease is no longer valid.')
           const existingPayload = await transactionRedis.get(actionKey)
           if (existingPayload !== null) {
             const existing = decodeActionRecord(existingPayload)

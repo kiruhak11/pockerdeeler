@@ -33,8 +33,9 @@ function metadata(roomId: string, userId: string, sequence: number, amount: numb
   return { onlineRoomId: roomId, playerId: userId, buyInSequence: sequence, amount }
 }
 
-async function lockRoom(tx: Prisma.TransactionClient, roomId: string): Promise<void> {
-  await tx.$queryRaw`SELECT id FROM "online_rooms" WHERE id = CAST(${roomId} AS uuid) FOR UPDATE`
+async function lockRoom(tx: Prisma.TransactionClient, roomId: string, allowClosed = false): Promise<void> {
+  const rows = await tx.$queryRaw<Array<{ id: string; status: string }>>`SELECT id, status FROM "online_rooms" WHERE id = CAST(${roomId} AS uuid) FOR UPDATE`
+  if (rows[0]?.status === 'CLOSED' && !allowClosed) throw Object.assign(new Error('The online room is closed.'), { code: 'ROOM_CLOSED' })
 }
 
 async function lockPlayer(tx: Prisma.TransactionClient, roomId: string, userId: string) {
@@ -42,13 +43,13 @@ async function lockPlayer(tx: Prisma.TransactionClient, roomId: string, userId: 
 }
 
 /** Reserves the authoritative room buy-in exactly once for a room/user cycle. */
-export async function reserveOnlineBuyIn(input: Readonly<{ roomId: string; userId: string; seat: number; amount: number }>): Promise<OnlineBuyInReservation> {
+async function reserveOnlineBuyInInternal(input: Readonly<{ roomId: string; userId: string; seat: number; amount: number }>, allowClosed = false): Promise<OnlineBuyInReservation> {
   safeAmount(input.amount, 'Online buy-in')
   safeAmount(input.seat, 'Online seat')
   if (!isAccountUserId(input.userId)) return Object.freeze({ accounted: false, status: 'ACTIVE', sequence: 0, amount: input.amount, seat: input.seat })
 
   return prisma.$transaction(async tx => {
-    await lockRoom(tx, input.roomId)
+    await lockRoom(tx, input.roomId, allowClosed)
     const existing = await lockPlayer(tx, input.roomId, input.userId)
     if (existing && (existing.status === 'ACTIVE' || existing.status === 'RESERVING')) {
       if (Number(existing.buyIn) !== input.amount) throw new Error('The online room buy-in does not match the existing reservation.')
@@ -77,6 +78,16 @@ export async function reserveOnlineBuyIn(input: Readonly<{ roomId: string; userI
   })
 }
 
+/** Used only by the creator path after it has inserted CLOSED metadata and before runtime publication. */
+export function reserveInitialOnlineRoomBuyIn(input: Readonly<{ roomId: string; userId: string; seat: number; amount: number }>): Promise<OnlineBuyInReservation> {
+  return reserveOnlineBuyInInternal(input, true)
+}
+
+/** Reserves the authoritative room buy-in exactly once for a room/user cycle. */
+export function reserveOnlineBuyIn(input: Readonly<{ roomId: string; userId: string; seat: number; amount: number }>): Promise<OnlineBuyInReservation> {
+  return reserveOnlineBuyInInternal(input)
+}
+
 export async function activateOnlineBuyIn(input: Readonly<{ roomId: string; userId: string; sequence: number; seat: number }>): Promise<void> {
   if (!isAccountUserId(input.userId)) return
   await prisma.onlineRoomPlayer.updateMany({
@@ -89,7 +100,7 @@ export async function activateOnlineBuyIn(input: Readonly<{ roomId: string; user
 export async function cancelOnlineBuyIn(input: Readonly<{ roomId: string; userId: string; sequence: number }>): Promise<void> {
   if (!isAccountUserId(input.userId)) return
   await prisma.$transaction(async tx => {
-    await lockRoom(tx, input.roomId)
+    await lockRoom(tx, input.roomId, true)
     const row = await lockPlayer(tx, input.roomId, input.userId)
     if (!row || row.buyInSequence !== input.sequence || row.status === 'CASHED_OUT') return
     await adjustUserWallet(tx, {
@@ -108,7 +119,7 @@ export async function prepareOnlineCashOut(input: Readonly<{ roomId: string; use
   safeAmount(input.amount, 'Online cash-out', true)
   if (!isAccountUserId(input.userId)) return false
   return prisma.$transaction(async tx => {
-    await lockRoom(tx, input.roomId)
+    await lockRoom(tx, input.roomId, true)
     const row = await lockPlayer(tx, input.roomId, input.userId)
     if (!row || row.status === 'CASHED_OUT') return false
     if (row.status === 'CASH_OUT_PENDING') return true
@@ -128,7 +139,7 @@ export async function clearOnlineCashOut(input: Readonly<{ roomId: string; userI
 export async function completeOnlineCashOut(input: Readonly<{ roomId: string; userId: string }>): Promise<boolean> {
   if (!isAccountUserId(input.userId)) return false
   return prisma.$transaction(async tx => {
-    await lockRoom(tx, input.roomId)
+    await lockRoom(tx, input.roomId, true)
     const row = await lockPlayer(tx, input.roomId, input.userId)
     if (!row || row.status === 'CASHED_OUT') return false
     if (row.status !== 'CASH_OUT_PENDING' || row.cashOutPending === null) return false

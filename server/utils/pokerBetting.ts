@@ -131,6 +131,24 @@ export function getMinimumRaiseTo(state: InternalHandState): number {
   return state.currentBet + state.lastFullRaiseSize
 }
 
+/** Server-only legal action projection used by trusted bot policy code. */
+export function getLegalBettingActions(state: InternalHandState, playerId: string): readonly BettingActionType[] {
+  const player = playerForId(state, playerId)
+  if (state.bettingRoundComplete || state.currentActor !== player.seat || player.status !== 'ACTIVE' || player.stack <= 0) return Object.freeze([])
+  const toCall = getToCall(state, playerId)
+  const available = maxStreetContribution(player)
+  const actions: BettingActionType[] = ['fold']
+  if (toCall === 0) actions.push('check')
+  else if (toCall <= player.stack) actions.push('call')
+  const raiseRights = hasRaiseRights(state, playerId)
+  if (player.stack > 0 && (state.currentBet === 0 || available <= state.currentBet || raiseRights)) actions.push('all-in')
+  if (state.currentBet === 0 && available > 0) actions.push('bet')
+  if (state.currentBet > 0 && raiseRights && available >= getMinimumRaiseTo(state)) actions.push('raise')
+  // An all-in that would be a short raise is legal only as an unavoidable
+  // short stack wager; existing engine semantics reject short raises otherwise.
+  return Object.freeze(actions)
+}
+
 /** Applies one server-validated action and returns a new immutable hand state. */
 export function applyBettingAction(state: InternalHandState, action: BettingAction): InternalHandState {
   const player = playerForId(state, action.playerId)
