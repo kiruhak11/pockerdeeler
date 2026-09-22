@@ -7,6 +7,7 @@ import { createRoom } from '../server/services/roomService'
 import { createPersistentOnlineRoom } from '../server/services/roomCodeRegistryService'
 import {
   OnlineRoomApiError,
+  applyAuthenticatedOnlineRoomAction,
   createAuthenticatedOnlineRoom,
   getAuthenticatedOnlineRoom,
   joinAuthenticatedOnlineRoom,
@@ -14,6 +15,7 @@ import {
   resolveOnlineRoomCode,
   setAuthenticatedOnlineRoomReady,
   setAuthenticatedOnlineRoomSittingOut,
+  startAuthenticatedOnlineRoomHand,
   type ApiOnlineRoomResult
 } from '../server/services/onlineRoomApiService'
 import { OnlineRoomRuntimeStore, serializeOnlineRoomRuntimeState } from '../server/services/onlineRoomRuntimeStore'
@@ -335,4 +337,68 @@ test('roomVersion remains domain-controlled while API CAS uses an opaque token',
   const updated = await setAuthenticatedOnlineRoomReady(room.ownerId, room.result.room.roomCode, { concurrencyToken: room.result.concurrencyToken, ready: true }, { runtime: room.runtime })
   assert.equal(updated.room.roomVersion, before + 1)
   assert.notEqual(updated.concurrencyToken, previousToken)
+})
+
+test('authenticated start service uses owner session and the existing hand engine', { skip: !isolated }, async () => {
+  const room = await createRoomApi()
+  const player = await join(room, 'ws-start-player')
+  await readyBoth(room, room.ownerId, player.playerId)
+  const before = room.result.room.pokerTable.stateVersion
+  const started = await startAuthenticatedOnlineRoomHand(room.ownerId, room.result.room.roomCode, before, { runtime: room.runtime })
+  assert.equal(started.room.status, 'IN_HAND')
+  assert.equal(started.room.pokerTable.currentHand?.players.length, 2)
+})
+
+test('authenticated action service applies through PokerTableState', { skip: !isolated }, async () => {
+  const room = await createRoomApi()
+  const player = await join(room, 'ws-action-player')
+  await activeRoom(room, room.ownerId, player.playerId)
+  const expected = room.result.room.pokerTable.stateVersion
+  const first = await applyAuthenticatedOnlineRoomAction(room.ownerId, room.result.room.roomCode, {
+    actionId: 'ws-action-123',
+    expectedTableStateVersion: expected,
+    action: { type: 'call' }
+  }, { runtime: room.runtime })
+  assert.equal(first.duplicate, false)
+  assert.equal(first.room.pokerTable.stateVersion, expected + 1)
+})
+
+test('exact authenticated action retry does not apply twice', { skip: !isolated }, async () => {
+  const room = await createRoomApi()
+  const player = await join(room, 'ws-retry-player')
+  await activeRoom(room, room.ownerId, player.playerId)
+  const expected = room.result.room.pokerTable.stateVersion
+  const input = { actionId: 'ws-retry-123', expectedTableStateVersion: expected, action: { type: 'call' as const } }
+  const first = await applyAuthenticatedOnlineRoomAction(room.ownerId, room.result.room.roomCode, input, { runtime: room.runtime })
+  const retry = await applyAuthenticatedOnlineRoomAction(room.ownerId, room.result.room.roomCode, input, { runtime: room.runtime })
+  assert.equal(retry.duplicate, true)
+  assert.equal(retry.room.pokerTable.stateVersion, first.room.pokerTable.stateVersion)
+  assert.equal((await room.runtime.get(room.result.room.roomId))!.state.pokerTable.stateVersion, first.room.pokerTable.stateVersion)
+})
+
+test('same authenticated action id with another payload is a conflict', { skip: !isolated }, async () => {
+  const room = await createRoomApi()
+  const player = await join(room, 'ws-conflict-player')
+  await activeRoom(room, room.ownerId, player.playerId)
+  const expected = room.result.room.pokerTable.stateVersion
+  const input = { actionId: 'ws-conflict-123', expectedTableStateVersion: expected, action: { type: 'call' as const } }
+  await applyAuthenticatedOnlineRoomAction(room.ownerId, room.result.room.roomCode, input, { runtime: room.runtime })
+  await assert.rejects(applyAuthenticatedOnlineRoomAction(room.ownerId, room.result.room.roomCode, {
+    actionId: input.actionId,
+    expectedTableStateVersion: expected,
+    action: { type: 'fold' }
+  }, { runtime: room.runtime }), (error: unknown) => error instanceof OnlineRoomApiError && error.code === 'ACTION_CONFLICT' && error.statusCode === 409)
+})
+
+test('stale table action is rejected before poker mutation', { skip: !isolated }, async () => {
+  const room = await createRoomApi()
+  const player = await join(room, 'ws-stale-player')
+  await activeRoom(room, room.ownerId, player.playerId)
+  const expected = room.result.room.pokerTable.stateVersion
+  await applyAuthenticatedOnlineRoomAction(room.ownerId, room.result.room.roomCode, {
+    actionId: 'ws-stale-first', expectedTableStateVersion: expected, action: { type: 'call' }
+  }, { runtime: room.runtime })
+  await assert.rejects(applyAuthenticatedOnlineRoomAction(room.ownerId, room.result.room.roomCode, {
+    actionId: 'ws-stale-second', expectedTableStateVersion: expected, action: { type: 'call' }
+  }, { runtime: room.runtime }), (error: unknown) => error instanceof OnlineRoomApiError && error.code === 'STALE_STATE' && error.statusCode === 409)
 })

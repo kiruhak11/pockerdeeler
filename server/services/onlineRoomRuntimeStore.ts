@@ -1,4 +1,5 @@
 import Redis from 'ioredis'
+import { createHash } from 'node:crypto'
 import {
   HAND_PLAYER_STATUSES,
   HAND_STREETS,
@@ -19,10 +20,16 @@ import { RANKS, SUITS, restoreDeck, snapshotDeck, type Card, type DeckSnapshot }
 export const ONLINE_ROOM_RUNTIME_SCHEMA_VERSION = 1 as const
 export const ONLINE_ROOM_RUNTIME_DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60
 export const ONLINE_ROOM_RUNTIME_KEY_PREFIX = 'pocker:online-room-runtime:v1:'
+export const ONLINE_ROOM_ACTION_DEFAULT_TTL_SECONDS = 24 * 60 * 60
 
 export type OnlineRoomRuntimeRecord = Readonly<{
   state: OnlineRoomState
   runtimeRevision: number
+}>
+
+export type OnlineRoomActionMutationResult = Readonly<{
+  record: OnlineRoomRuntimeRecord
+  duplicate: boolean
 }>
 
 export type OnlineRoomRuntimeStoreOptions = Readonly<{
@@ -30,6 +37,7 @@ export type OnlineRoomRuntimeStoreOptions = Readonly<{
   redis?: Redis
   keyPrefix?: string
   ttlSeconds?: number
+  actionTtlSeconds?: number
 }>
 
 export type RuntimeStoreErrorCode =
@@ -40,6 +48,7 @@ export type RuntimeStoreErrorCode =
   | 'CORRUPTED_STATE'
   | 'INVALID_STATE'
   | 'INVALID_ARGUMENT'
+  | 'ACTION_CONFLICT'
 
 export class OnlineRoomRuntimeStoreError extends Error {
   readonly code: RuntimeStoreErrorCode
@@ -56,6 +65,11 @@ type SerializedRuntimeEnvelope = Readonly<{
   schemaVersion: typeof ONLINE_ROOM_RUNTIME_SCHEMA_VERSION
   runtimeRevision: number
   state: JsonRecord
+}>
+
+type SerializedActionRecord = Readonly<{
+  fingerprint: string
+  runtimeRevision: number
 }>
 
 function fail(code: RuntimeStoreErrorCode, message: string): never {
@@ -406,6 +420,29 @@ function validTtl(value: number | undefined): number {
   return ttl
 }
 
+function actionKeyPart(value: string, label: string): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 256) {
+    throw new OnlineRoomRuntimeStoreError('INVALID_ARGUMENT', `${label} must be a non-empty bounded string.`)
+  }
+  return createHash('sha256').update(value).digest('hex')
+}
+
+function encodeActionRecord(record: SerializedActionRecord): string {
+  return JSON.stringify(record)
+}
+
+function decodeActionRecord(payload: string): SerializedActionRecord {
+  try {
+    const value = JSON.parse(payload) as Partial<SerializedActionRecord>
+    const runtimeRevision = value.runtimeRevision
+    if (typeof value.fingerprint !== 'string' || value.fingerprint.length === 0 || value.fingerprint.length > 512 ||
+        !Number.isSafeInteger(runtimeRevision) || (runtimeRevision as number) < 1) throw new Error('Invalid action record.')
+    return { fingerprint: value.fingerprint, runtimeRevision: runtimeRevision as number }
+  } catch {
+    fail('CORRUPTED_STATE', 'Redis action record is invalid.')
+  }
+}
+
 function hasActiveHand(state: OnlineRoomState): boolean {
   return state.pokerTable.currentHand !== null && state.pokerTable.currentHand.street !== 'FINISHED'
 }
@@ -425,11 +462,13 @@ export class OnlineRoomRuntimeStore {
   private readonly ownsRedis: boolean
   private readonly keyPrefix: string
   private readonly ttlSeconds: number
+  private readonly actionTtlSeconds: number
   private connecting: Promise<void> | undefined
 
   constructor(options: OnlineRoomRuntimeStoreOptions = {}) {
     this.keyPrefix = options.keyPrefix ?? ONLINE_ROOM_RUNTIME_KEY_PREFIX
     this.ttlSeconds = validTtl(options.ttlSeconds)
+    this.actionTtlSeconds = validTtl(options.actionTtlSeconds ?? ONLINE_ROOM_ACTION_DEFAULT_TTL_SECONDS)
     if (options.redis) {
       this.redis = options.redis
       this.ownsRedis = false
@@ -463,6 +502,10 @@ export class OnlineRoomRuntimeStore {
 
   private key(roomId: string): string {
     return onlineRoomRuntimeKey(roomId, this.keyPrefix)
+  }
+
+  private actionKey(roomId: string, playerId: string, actionId: string): string {
+    return `${this.key(roomId)}:action:${actionKeyPart(playerId, 'Player id')}:${actionKeyPart(actionId, 'Action id')}`
   }
 
   /** Server-side diagnostic helper for tests and operational cleanup only. */
@@ -544,6 +587,79 @@ export class OnlineRoomRuntimeStore {
     } finally {
       transactionRedis.disconnect()
     }
+  }
+
+  /**
+   * Applies a mutation and records its client action id in the same Redis CAS.
+   * This keeps duplicate commands idempotent across application instances.
+   */
+  async updateWithAction(
+    roomId: string,
+    expectedRevision: number,
+    playerId: string,
+    actionId: string,
+    fingerprint: string,
+    updater: (state: OnlineRoomState) => OnlineRoomState
+  ): Promise<OnlineRoomActionMutationResult> {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) fail('INVALID_ARGUMENT', 'Expected runtime revision must be a positive integer.')
+    if (typeof updater !== 'function') fail('INVALID_ARGUMENT', 'A controlled runtime updater is required.')
+    if (typeof fingerprint !== 'string' || fingerprint.length === 0 || fingerprint.length > 512) fail('INVALID_ARGUMENT', 'Action fingerprint is invalid.')
+    const key = this.key(roomId)
+    const actionKey = this.actionKey(roomId, playerId, actionId)
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const transactionRedis = this.redis.duplicate()
+      transactionRedis.on('error', () => {})
+      let updaterFailure: unknown
+      try {
+        await connectRedis(transactionRedis)
+        await transactionRedis.watch(key, actionKey)
+        try {
+          const payload = await transactionRedis.get(key)
+          if (payload === null) fail('ROOM_NOT_FOUND', `Runtime state for room ${roomId} was not found.`)
+          const current = decodeEnvelope(payload, roomId)
+          const existingPayload = await transactionRedis.get(actionKey)
+          if (existingPayload !== null) {
+            const existing = decodeActionRecord(existingPayload)
+            if (existing.fingerprint !== fingerprint) fail('ACTION_CONFLICT', 'The action id was already used with a different payload.')
+            return Object.freeze({ record: current, duplicate: true })
+          }
+          if (current.runtimeRevision !== expectedRevision) fail('STALE_STATE', `Expected runtime revision ${expectedRevision} does not match ${current.runtimeRevision}.`)
+          let nextState: OnlineRoomState
+          try {
+            nextState = updater(current.state)
+          } catch (error) {
+            updaterFailure = error
+            throw error
+          }
+          if (!nextState || nextState.roomId !== roomId) fail('INVALID_STATE', 'Runtime updater returned an invalid room state.')
+          const next = Object.freeze({ state: nextState, runtimeRevision: current.runtimeRevision + 1 })
+          const expiry = expiryArgs(nextState, this.ttlSeconds)
+          const command = expiry.length === 0
+            ? transactionRedis.multi()
+                .set(key, encodeEnvelope(nextState, next.runtimeRevision))
+                .set(actionKey, encodeActionRecord({ fingerprint, runtimeRevision: next.runtimeRevision }), 'EX', this.actionTtlSeconds)
+            : transactionRedis.multi()
+                .set(key, encodeEnvelope(nextState, next.runtimeRevision), expiry[0], expiry[1])
+                .set(actionKey, encodeActionRecord({ fingerprint, runtimeRevision: next.runtimeRevision }), 'EX', this.actionTtlSeconds)
+          const result = await command.exec()
+          if (result === null) {
+            if (attempt === 0) continue
+            fail('STALE_STATE', 'Runtime state changed while the action was being written.')
+          }
+          return Object.freeze({ record: next, duplicate: false })
+        } finally {
+          await transactionRedis.unwatch().catch(() => undefined)
+        }
+      } catch (error) {
+        if (updaterFailure !== undefined) throw updaterFailure
+        if (error instanceof OnlineRoomRuntimeStoreError) throw error
+        throw new OnlineRoomRuntimeStoreError('REDIS_UNAVAILABLE', error instanceof Error ? error.message : 'Redis action update failed.')
+      } finally {
+        transactionRedis.disconnect()
+      }
+    }
+    fail('STALE_STATE', 'Runtime state changed while the action was being written.')
   }
 
   async remove(roomId: string, expectedRevision: number): Promise<void> {

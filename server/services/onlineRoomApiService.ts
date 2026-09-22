@@ -1,14 +1,19 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { prisma } from '../db/client'
 import {
+  applyOnlineRoomAction,
   createOnlineRoom,
   joinOnlineRoom,
   leaveOnlineRoom,
   setOnlineRoomReady,
   setOnlineRoomSittingOut,
+  startOnlineRoomHand,
   toPlayerSafeOnlineRoomState,
+  type ApplyOnlineRoomActionOptions,
+  OnlineRoomError,
   type OnlineRoomState
 } from '../utils/pokerOnlineRoom'
+import { PokerTableError, canStartNextHand } from '../utils/pokerTableState'
 import { hashSecret, verifySecret } from './authService'
 import {
   createPersistentOnlineRoom,
@@ -20,6 +25,7 @@ import {
   OnlineRoomRuntimeStoreError,
   type OnlineRoomRuntimeRecord
 } from './onlineRoomRuntimeStore'
+import { publishOnlineRoomChanged } from './onlineRoomRealtimeService'
 
 const DEFAULT_OWNER_STACK = 1_000
 const DEFAULT_SMALL_BLIND = 5
@@ -34,6 +40,11 @@ export type OnlineRoomApiErrorCode =
   | 'CLOSED'
   | 'CONFLICT'
   | 'UNAVAILABLE'
+  | 'STALE_STATE'
+  | 'NOT_YOUR_TURN'
+  | 'INVALID_ACTION'
+  | 'HAND_NOT_ACTIVE'
+  | 'ACTION_CONFLICT'
 
 export class OnlineRoomApiError extends Error {
   readonly code: OnlineRoomApiErrorCode
@@ -81,6 +92,16 @@ export type ReadyAuthenticatedOnlineRoomInput = OnlineRoomConcurrencyInput & Rea
 
 export type SittingOutAuthenticatedOnlineRoomInput = OnlineRoomConcurrencyInput & Readonly<{
   sittingOut: boolean
+}>
+
+export type AuthenticatedOnlineRoomActionInput = Readonly<{
+  actionId: string
+  expectedTableStateVersion: number
+  action: Pick<ApplyOnlineRoomActionOptions['action'], 'type' | 'amount'>
+}>
+
+export type AuthenticatedOnlineRoomActionResult = Readonly<ApiOnlineRoomResult & {
+  duplicate: boolean
 }>
 
 export type ApiOnlineRoomResult = Readonly<{
@@ -149,8 +170,25 @@ function mapRuntimeError(error: unknown): OnlineRoomApiError {
   if (error instanceof OnlineRoomApiError) return error
   if (error instanceof OnlineRoomRuntimeStoreError) {
     if (error.code === 'STALE_STATE') return new OnlineRoomApiError('CONFLICT', 'The room changed. Refresh and retry the action.', 409)
+    if (error.code === 'ACTION_CONFLICT') return new OnlineRoomApiError('ACTION_CONFLICT', 'This action id was already used with a different payload.', 409)
     if (error.code === 'ROOM_NOT_FOUND') return new OnlineRoomApiError('UNAVAILABLE', 'Online room runtime is unavailable.', 503)
     return new OnlineRoomApiError('UNAVAILABLE', 'Online room runtime is temporarily unavailable.', 503)
+  }
+  if (error instanceof PokerTableError) {
+    if (error.code === 'STALE_STATE_VERSION') return new OnlineRoomApiError('STALE_STATE', 'The table changed. Refresh and retry the action.', 409)
+    if (error.code === 'NO_ACTIVE_HAND') return new OnlineRoomApiError('HAND_NOT_ACTIVE', 'There is no active hand.', 409)
+    if (error.code === 'PLAYER_NOT_SEATED') return new OnlineRoomApiError('NOT_FOUND', 'The authenticated user is not seated at this table.', 404)
+    if (error.code === 'TABLE_FULL' || error.code === 'SEAT_OCCUPIED' || error.code === 'HAND_IN_PROGRESS') return new OnlineRoomApiError('CONFLICT', 'The requested room operation conflicts with its current state.', 409)
+    return new OnlineRoomApiError('INVALID_ACTION', error.message, 400)
+  }
+  if (error instanceof OnlineRoomError) {
+    if (error.code === 'STALE_ROOM_VERSION') return new OnlineRoomApiError('CONFLICT', 'The room changed. Refresh and retry the action.', 409)
+    if (error.code === 'ROOM_CLOSED') return new OnlineRoomApiError('CLOSED', 'This online room is closed.', 410)
+    if (error.code === 'PLAYER_NOT_IN_ROOM') return new OnlineRoomApiError('NOT_FOUND', 'The authenticated user is not in this online room.', 404)
+    if (error.code === 'PLAYER_ALREADY_IN_ROOM' || error.code === 'TABLE_FULL') {
+      return new OnlineRoomApiError('CONFLICT', 'The requested room operation conflicts with its current state.', 409)
+    }
+    return new OnlineRoomApiError('INVALID_ACTION', error.message, 400)
   }
   const code = (error as { code?: string } | null)?.code
   if (code === 'PRIVATE_ROOM_AUTH_REQUIRED') return new OnlineRoomApiError('FORBIDDEN', 'A valid private room credential is required.', 403)
@@ -159,7 +197,12 @@ function mapRuntimeError(error: unknown): OnlineRoomApiError {
   if (code === 'STALE_ROOM_VERSION' || code === 'INVALID_ROOM_VERSION' || code === 'PLAYER_ALREADY_IN_ROOM' || code === 'TABLE_FULL' || code === 'SEAT_OCCUPIED' || code === 'HAND_IN_PROGRESS') {
     return new OnlineRoomApiError('CONFLICT', 'The requested room operation conflicts with its current state.', 409)
   }
-  if (error instanceof OnlineRoomApiError) return error
+  if (error instanceof Error) {
+    if (/not this player['’]s turn/i.test(error.message)) return new OnlineRoomApiError('NOT_YOUR_TURN', error.message, 409)
+    if (/round is complete|cannot act|cannot check|cannot call|no longer in the hand|unknown betting action|amount must be|bet is only|raise is only|raise is not reopened|must be at least|must increase|amount exceeds/i.test(error.message)) {
+      return new OnlineRoomApiError('INVALID_ACTION', error.message, 400)
+    }
+  }
   return new OnlineRoomApiError('UNAVAILABLE', 'Online room service is temporarily unavailable.', 503)
 }
 
@@ -305,10 +348,18 @@ export async function createAuthenticatedOnlineRoom(userId: string, input: Creat
       await runtimeStore(dependencies).remove(metadata.id, record.runtimeRevision).catch(() => undefined)
       throw error
     }
-    return Object.freeze({
+    const result = Object.freeze({
       room: toPlayerSafeOnlineRoomState(record.state, userId),
       concurrencyToken: issueConcurrencyToken(record.state.roomId, record.runtimeRevision)
     })
+    void publishOnlineRoomChanged({
+      type: 'ROOM_CHANGED',
+      roomId: record.state.roomId,
+      roomCode: record.state.roomCode,
+      roomVersion: record.state.roomVersion,
+      tableStateVersion: record.state.pokerTable.stateVersion
+    }).catch(() => undefined)
+    return result
   } catch (error) {
     // The registry claim is deliberately retained, while the metadata is made closed.
     // This prevents an active persistent room without runtime state and prevents code reuse.
@@ -321,11 +372,69 @@ export async function getAuthenticatedOnlineRoom(userId: string, code: string, d
   requireUserId(userId)
   const metadata = await loadPersistentRoom(code)
   ensureOpen(metadata)
-  const record = await requireRuntime(metadata, dependencies)
+  let record: OnlineRoomRuntimeRecord
+  try {
+    record = await requireRuntime(metadata, dependencies)
+  } catch (error) {
+    throw mapRuntimeError(error)
+  }
   if (metadata.visibility === 'PRIVATE' && !record.state.pokerTable.players.some(player => player.playerId === userId)) {
     fail('FORBIDDEN', 'Join the private room before viewing its state.', 403)
   }
   return Object.freeze({ room: toPlayerSafeOnlineRoomState(record.state, userId), concurrencyToken: issueConcurrencyToken(record.state.roomId, record.runtimeRevision) })
+}
+
+type RuntimeActionInput = Readonly<{
+  playerId: string
+  actionId: string
+  fingerprint: string
+}>
+
+type InternalRoomUpdateResult = Readonly<{
+  result: ApiOnlineRoomResult
+  duplicate: boolean
+}>
+
+async function updateRoomInternal(
+  userId: string,
+  code: string,
+  input: OnlineRoomConcurrencyInput,
+  updater: (state: OnlineRoomState) => OnlineRoomState,
+  dependencies?: OnlineRoomApiDependencies,
+  action?: RuntimeActionInput
+): Promise<InternalRoomUpdateResult> {
+  requireUserId(userId)
+  const metadata = await loadPersistentRoom(code)
+  ensureOpen(metadata)
+  let current: OnlineRoomRuntimeRecord
+  try {
+    current = await requireRuntime(metadata, dependencies)
+  } catch (error) {
+    throw mapRuntimeError(error)
+  }
+  const revision = expectedRevision(metadata.id, input?.concurrencyToken)
+  if (revision !== current.runtimeRevision) fail('CONFLICT', 'The room changed. Refresh and retry the action.', 409)
+  try {
+    const updated = action
+      ? await runtimeStore(dependencies).updateWithAction(metadata.id, revision, action.playerId, action.actionId, action.fingerprint, state => updater(state))
+      : Object.freeze({ record: await runtimeStore(dependencies).update(metadata.id, revision, state => updater(state)), duplicate: false })
+    if (!updated.duplicate) {
+      await syncMetadataAfterMutation(metadata, updated.record.state).catch(() => undefined)
+      void publishOnlineRoomChanged({
+        type: 'ROOM_CHANGED',
+        roomId: updated.record.state.roomId,
+        roomCode: updated.record.state.roomCode,
+        roomVersion: updated.record.state.roomVersion,
+        tableStateVersion: updated.record.state.pokerTable.stateVersion
+      }).catch(() => undefined)
+    }
+    return Object.freeze({
+      result: Object.freeze({ room: toPlayerSafeOnlineRoomState(updated.record.state, userId), concurrencyToken: issueConcurrencyToken(updated.record.state.roomId, updated.record.runtimeRevision) }),
+      duplicate: updated.duplicate
+    })
+  } catch (error) {
+    throw mapRuntimeError(error)
+  }
 }
 
 async function updateRoom(
@@ -335,19 +444,7 @@ async function updateRoom(
   updater: (state: OnlineRoomState) => OnlineRoomState,
   dependencies?: OnlineRoomApiDependencies
 ): Promise<ApiOnlineRoomResult> {
-  requireUserId(userId)
-  const metadata = await loadPersistentRoom(code)
-  ensureOpen(metadata)
-  const current = await requireRuntime(metadata, dependencies)
-  const revision = expectedRevision(metadata.id, input?.concurrencyToken)
-  if (revision !== current.runtimeRevision) fail('CONFLICT', 'The room changed. Refresh and retry the action.', 409)
-  try {
-    const next = await runtimeStore(dependencies).update(metadata.id, revision, state => updater(state))
-    await syncMetadataAfterMutation(metadata, next.state).catch(() => undefined)
-    return Object.freeze({ room: toPlayerSafeOnlineRoomState(next.state, userId), concurrencyToken: issueConcurrencyToken(next.state.roomId, next.runtimeRevision) })
-  } catch (error) {
-    throw mapRuntimeError(error)
-  }
+  return (await updateRoomInternal(userId, code, input, updater, dependencies)).result
 }
 
 export async function joinAuthenticatedOnlineRoom(userId: string, code: string, input: JoinAuthenticatedOnlineRoomInput, dependencies?: OnlineRoomApiDependencies): Promise<ApiOnlineRoomResult> {
@@ -379,4 +476,72 @@ export async function setAuthenticatedOnlineRoomReady(userId: string, code: stri
 export async function setAuthenticatedOnlineRoomSittingOut(userId: string, code: string, input: SittingOutAuthenticatedOnlineRoomInput, dependencies?: OnlineRoomApiDependencies): Promise<ApiOnlineRoomResult> {
   if (typeof input.sittingOut !== 'boolean') fail('BAD_REQUEST', 'Sitting-out must be boolean.', 400)
   return updateRoom(userId, code, input, state => setOnlineRoomSittingOut(state, userId, input.sittingOut, { expectedRoomVersion: input.expectedRoomVersion }), dependencies)
+}
+
+function actionFingerprint(input: AuthenticatedOnlineRoomActionInput): string {
+  return JSON.stringify({
+    expectedTableStateVersion: input.expectedTableStateVersion,
+    action: { type: input.action.type, ...(input.action.amount === undefined ? {} : { amount: input.action.amount }) }
+  })
+}
+
+function validateSocketActionInput(input: AuthenticatedOnlineRoomActionInput): void {
+  if (!input || typeof input.actionId !== 'string' || input.actionId.length < 8 || input.actionId.length > 128) {
+    fail('BAD_REQUEST', 'Action id must be a bounded non-empty string.', 400)
+  }
+  if (!Number.isSafeInteger(input.expectedTableStateVersion) || input.expectedTableStateVersion < 0) {
+    fail('BAD_REQUEST', 'Expected table state version must be a non-negative integer.', 400)
+  }
+  if (!input.action || typeof input.action.type !== 'string') fail('BAD_REQUEST', 'A poker action is required.', 400)
+  const amount = input.action.amount
+  if (['bet', 'raise'].includes(input.action.type) && (!Number.isSafeInteger(amount) || (amount as number) <= 0)) {
+    fail('BAD_REQUEST', 'Bet and raise actions require a positive integer amount.', 400)
+  }
+  if (!['bet', 'raise'].includes(input.action.type) && input.action.amount !== undefined) {
+    fail('BAD_REQUEST', 'This poker action must not include an amount.', 400)
+  }
+}
+
+/** Applies a player action using the authenticated session as the actor. */
+export async function applyAuthenticatedOnlineRoomAction(
+  userId: string,
+  code: string,
+  input: AuthenticatedOnlineRoomActionInput,
+  dependencies?: OnlineRoomApiDependencies
+): Promise<AuthenticatedOnlineRoomActionResult> {
+  requireUserId(userId)
+  validateSocketActionInput(input)
+  const current = await getAuthenticatedOnlineRoom(userId, code, dependencies)
+  const updated = await updateRoomInternal(
+    userId,
+    code,
+    { concurrencyToken: current.concurrencyToken },
+    state => applyOnlineRoomAction(state, {
+      action: { ...input.action, playerId: userId },
+      expectedStateVersion: input.expectedTableStateVersion
+    }),
+    dependencies,
+    { playerId: userId, actionId: input.actionId, fingerprint: actionFingerprint(input) }
+  )
+  return Object.freeze({ ...updated.result, duplicate: updated.duplicate })
+}
+
+/** Starts a hand using the existing table/hand engine; cards and blinds stay server controlled. */
+export async function startAuthenticatedOnlineRoomHand(
+  userId: string,
+  code: string,
+  expectedTableStateVersion: number,
+  dependencies?: OnlineRoomApiDependencies
+): Promise<ApiOnlineRoomResult> {
+  requireUserId(userId)
+  if (!Number.isSafeInteger(expectedTableStateVersion) || expectedTableStateVersion < 0) {
+    fail('BAD_REQUEST', 'Expected table state version must be a non-negative integer.', 400)
+  }
+  const current = await getAuthenticatedOnlineRoom(userId, code, dependencies)
+  if (current.room.ownerId !== userId) fail('FORBIDDEN', 'Only the room owner can start a hand.', 403)
+  return updateRoom(userId, code, { concurrencyToken: current.concurrencyToken }, state => {
+    if (state.ownerId !== userId) fail('FORBIDDEN', 'Only the room owner can start a hand.', 403)
+    if (!canStartNextHand(state.pokerTable)) fail('INVALID_ACTION', 'At least two eligible players are required to start a hand.', 409)
+    return startOnlineRoomHand(state, { expectedStateVersion: expectedTableStateVersion })
+  }, dependencies)
 }
