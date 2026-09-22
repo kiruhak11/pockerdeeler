@@ -106,6 +106,11 @@ model User {
   phone                   String?          @unique @db.VarChar(16)
   phoneVerifiedAt         DateTime?        @map("phone_verified_at") @db.Timestamptz(6)
   role                    String           @default("USER") @db.VarChar(16)
+  isBot                   Boolean          @default(false) @map("is_bot")
+  botKey                  String?          @unique @map("bot_key") @db.VarChar(64)
+  botSkillTier            String?          @map("bot_skill_tier") @db.VarChar(16)
+  botPlayStyle            String?          @map("bot_play_style") @db.VarChar(32)
+  botEnabled              Boolean          @default(true) @map("bot_enabled")
   blockedAt               DateTime?        @map("blocked_at") @db.Timestamptz(6)
   deletedAt               DateTime?        @map("deleted_at") @db.Timestamptz(6)
   mustChangePassword      Boolean          @default(false) @map("must_change_password")
@@ -172,6 +177,7 @@ model User {
   premiumSettings              PremiumUserSettings?
 
   @@index([username])
+  @@index([isBot, botEnabled])
   @@map("users")
 }
 

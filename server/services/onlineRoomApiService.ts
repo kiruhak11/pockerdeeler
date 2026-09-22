@@ -49,6 +49,7 @@ import {
   reserveOnlineBuyIn,
   type OnlineBuyInReservation
 } from './onlineRoomAccountingService'
+import { assertOnlinePokerBotMayJoin, OnlinePokerBotJoinError } from './botIdentityService'
 
 const DEFAULT_OWNER_STACK = 1_000
 const DEFAULT_SMALL_BLIND = 5
@@ -358,6 +359,10 @@ function mapRuntimeError(error: unknown): OnlineRoomApiError {
     if (error.code === 'CONNECTION_NOT_FOUND') return new OnlineRoomApiError('CONFLICT', error.message, 409)
     return new OnlineRoomApiError('UNAVAILABLE', error.message, 503)
   }
+  if (error instanceof OnlinePokerBotJoinError) {
+    if (error.code === 'PRIVATE_ROOM_BOT_FORBIDDEN') return new OnlineRoomApiError('FORBIDDEN', 'Bots cannot join private online rooms.', 403)
+    return new OnlineRoomApiError('CONFLICT', 'This poker bot is disabled.', 409)
+  }
   if (error instanceof PokerTableError) {
     if (error.code === 'STALE_STATE_VERSION') return new OnlineRoomApiError('STALE_STATE', 'The table changed. Refresh and retry the action.', 409)
     if (error.code === 'NO_ACTIVE_HAND') return new OnlineRoomApiError('HAND_NOT_ACTIVE', 'There is no active hand.', 409)
@@ -558,6 +563,11 @@ export async function createAuthenticatedOnlineRoom(userId: string, input: Creat
   requireUserId(userId)
   const visibility = input.visibility ?? 'PUBLIC'
   if (visibility !== 'PUBLIC' && visibility !== 'PRIVATE') fail('BAD_REQUEST', 'Room visibility must be PUBLIC or PRIVATE.', 400)
+  try {
+    await assertOnlinePokerBotMayJoin(userId, visibility)
+  } catch (error) {
+    throw mapRuntimeError(error)
+  }
   const startingStack = requireInteger(input.startingStack ?? DEFAULT_OWNER_STACK, 'Starting stack', 1, 1_000_000_000)
   const smallBlind = requireInteger(input.smallBlind ?? DEFAULT_SMALL_BLIND, 'Small blind', 1, 1_000_000_000)
   const bigBlind = requireInteger(input.bigBlind ?? DEFAULT_BIG_BLIND, 'Big blind', smallBlind, 1_000_000_000)
@@ -758,6 +768,11 @@ export async function joinAuthenticatedOnlineRoom(userId: string, code: string, 
   requireUserId(userId)
   const metadata = await loadPersistentRoom(code)
   ensureOpen(metadata)
+  try {
+    await assertOnlinePokerBotMayJoin(userId, metadata.visibility)
+  } catch (error) {
+    throw mapRuntimeError(error)
+  }
   const seat = input.seat === undefined ? undefined : requireInteger(input.seat, 'Seat', 1, 6)
   if (metadata.visibility === 'PRIVATE') {
     if (!metadata.privateJoinSecretHash || typeof input.joinSecret !== 'string' || !verifySecret(input.joinSecret, metadata.privateJoinSecretHash)) {

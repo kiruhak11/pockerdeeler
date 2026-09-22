@@ -6,7 +6,7 @@ import { toChipNumber } from '../utils/chips'
 import type { Prisma } from '@prisma/client'
 import { resolveRoomSecretPepper } from '../utils/roomSecretPepper'
 
-const DEFAULT_BALANCE = 5000
+export const DEFAULT_BALANCE = 5000
 const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30
 
 function normalizeUsername(username: string): string {
@@ -37,16 +37,20 @@ export function verifyPassword(password: string, storedHash: string): boolean {
 
 export function sessionHash(token: string): string { return createHash('sha256').update(token).digest('hex') }
 
-export async function issueUserAuthToken(userId: string, client: Pick<Prisma.TransactionClient, 'accountSession'> = prisma): Promise<string> {
+type AuthClient = Pick<Prisma.TransactionClient, 'accountSession' | 'user'>
+
+export async function issueUserAuthToken(userId: string, client: AuthClient = prisma): Promise<string> {
+  const user = await client.user.findUnique({ where: { id: userId }, select: { isBot: true } })
+  if (!user || user.isBot) throw createError({ statusCode: 401, statusMessage: 'Неверный логин или пароль' })
   const token = randomBytes(32).toString('base64url')
   await client.accountSession.create({ data: { userId, tokenHash: sessionHash(token), expiresAt: new Date(Date.now() + TOKEN_TTL_MS) } })
   return token
 }
 
-export async function verifyUserAuthToken(token: string, client: Pick<Prisma.TransactionClient, 'accountSession'> = prisma): Promise<{ userId: string } | null> {
+export async function verifyUserAuthToken(token: string, client: AuthClient = prisma): Promise<{ userId: string } | null> {
   if (!token || token.length < 32) return null
   const session = await client.accountSession.findUnique({ where: { tokenHash: sessionHash(token) }, include: { user: true } })
-  if (!session || session.revokedAt || session.expiresAt.getTime() <= Date.now() || session.user.blockedAt || session.user.deletedAt) return null
+  if (!session || session.revokedAt || session.expiresAt.getTime() <= Date.now() || session.user.blockedAt || session.user.deletedAt || session.user.isBot) return null
   return { userId: session.userId }
 }
 
@@ -123,7 +127,7 @@ export async function loginUser(input: { username: string; password: string }) {
   const normalized = phone.length === 11 && ['7', '8'].includes(phone[0]!) ? '+7' + phone.slice(1) : input.username
   const user = await prisma.user.findFirst({ where: { ...(normalized.startsWith('+7') ? { phone: normalized, phoneVerifiedAt: { not: null } } : { username }), deletedAt: null }, include: { wallet: true } })
   if (process.env.NODE_ENV === 'production' && !normalized.startsWith('+7')) throw createError({ statusCode: 401, message: 'Войдите по подтверждённому телефону' })
-  if (!user || user.deletedAt || user.blockedAt || !verifyPassword(input.password, user.passwordHash)) {
+  if (!user || user.deletedAt || user.blockedAt || user.isBot || !verifyPassword(input.password, user.passwordHash)) {
     throw createError({ statusCode: 401, statusMessage: 'Неверный логин или пароль' })
   }
 
