@@ -38,6 +38,7 @@ const deadlineSeconds = computed(() => remainingTurnSeconds(visibleHand.value?.t
 const actor = computed(() => visibleHand.value?.players.find(player => player.seat === visibleHand.value?.currentActor) ?? null)
 const actorTablePlayer = computed(() => actor.value ? props.state.pokerTable.players.find(player => player.playerId === actor.value?.playerId) ?? null : null)
 const ownCards = computed(() => ownHoleCards(visibleHand.value, props.viewerId))
+const handStrength = computed(() => visibleHand.value?.handStrength ?? null)
 const displayPlayers = computed(() => {
   const players = [...props.state.pokerTable.players]
   const viewerIndex = props.viewerId ? players.findIndex(player => player.playerId === props.viewerId) : -1
@@ -73,6 +74,14 @@ function handPlayer(playerId: string): OnlineHandPlayer | null {
 
 function displayName(player: OnlineTablePlayer): string {
   return player.nickname?.trim() || `Игрок ${player.seat}`
+}
+
+function cardId(card: { rank: string; suit: string }): string {
+  return `${card.rank}:${card.suit}`
+}
+
+function isContributingCard(card: { rank: string; suit: string }): boolean {
+  return Boolean(handStrength.value?.contributingCardIds.includes(cardId(card)))
 }
 
 function statusLabel(player: OnlineTablePlayer, hand: OnlineHandPlayer | null): string {
@@ -123,7 +132,7 @@ function cardBacks(playerId: string): boolean {
           <strong v-if="visibleHand">Банк {{ visibleHand.pot }}</strong>
         </div>
         <div class="board" aria-label="Общие карты">
-          <span v-for="(card, index) in visibleHand?.board || []" :key="`${card.rank}-${card.suit}-${index}`" class="card" :class="{ 'card--red': cardIsRed(card) }">{{ cardLabel(card) }}</span>
+          <span v-for="(card, index) in visibleHand?.board || []" :key="`${card.rank}-${card.suit}-${index}`" class="card" :class="{ 'card--red': cardIsRed(card), 'card--gold': isContributingCard(card) }">{{ cardLabel(card) }}</span>
           <span v-if="!visibleHand?.board.length" class="board-empty">Общие карты появятся здесь</span>
         </div>
         <div v-if="visibleHand" class="pot-pill">POT {{ visibleHand.pot }}</div>
@@ -156,7 +165,7 @@ function cardBacks(playerId: string): boolean {
               <span v-if="visibleHand?.bigBlindSeat === player.seat" class="seat-marker seat-marker--blind" title="Большой блайнд">BB</span>
             </div>
             <div v-if="handPlayer(player.playerId)?.holeCards.length" class="mini-cards">
-              <span v-for="card in handPlayer(player.playerId)?.holeCards || []" :key="`${card.rank}-${card.suit}`" class="mini-card" :class="{ 'card--red': cardIsRed(card) }">{{ cardLabel(card) }}</span>
+              <span v-for="card in handPlayer(player.playerId)?.holeCards || []" :key="`${card.rank}-${card.suit}`" class="mini-card" :class="{ 'card--red': cardIsRed(card), 'card--gold': isContributingCard(card) }">{{ cardLabel(card) }}</span>
             </div>
             <div v-else-if="cardBacks(player.playerId)" class="mini-cards mini-cards--back" aria-label="Закрытые карты"><span class="mini-card">★</span><span class="mini-card">★</span></div>
           </article>
@@ -166,7 +175,7 @@ function cardBacks(playerId: string): boolean {
 
     <section v-if="ownCards.length" class="own-cards panel" aria-label="Ваши карты">
       <span class="section-kicker">ВАШИ КАРТЫ</span>
-      <div class="own-cards__list"><span v-for="card in ownCards" :key="`${card.rank}-${card.suit}`" class="card card--large" :class="{ 'card--red': cardIsRed(card) }">{{ cardLabel(card) }}</span></div>
+      <div class="own-cards__list"><span v-for="card in ownCards" :key="`${card.rank}-${card.suit}`" class="card card--large" :class="{ 'card--red': cardIsRed(card), 'card--gold': isContributingCard(card) }">{{ cardLabel(card) }}</span></div>
     </section>
 
     <section class="controls panel">
@@ -179,6 +188,11 @@ function cardBacks(playerId: string): boolean {
           <small v-if="deadlineSeconds !== null">Таймер {{ formatTurnSeconds(deadlineSeconds) }}</small>
         </div>
         <div class="blind-info">SB {{ state.pokerTable.smallBlind }} · BB {{ state.pokerTable.bigBlind }}</div>
+      </div>
+
+      <div v-if="handStrength" class="hand-strength" aria-live="polite">
+        <span class="section-kicker">ВАША КОМБИНАЦИЯ</span>
+        <strong>{{ handStrength.label }}</strong>
       </div>
 
       <div v-if="isWaiting && tableViewer" class="waiting-controls">
@@ -229,6 +243,7 @@ function cardBacks(playerId: string): boolean {
 .card { width: 38px; height: 52px; font-size: .85rem; }
 .card--large { width: 58px; height: 80px; font-size: 1.2rem; }
 .card--red { color: #bd3d38; }
+.card--gold { border-color: #f2b451; box-shadow: 0 0 0 2px rgba(242,180,81,.82), 0 0 15px rgba(242,180,81,.52); }
 .board-empty { color: rgba(255,255,255,.54); font-size: .72rem; white-space: nowrap; align-self: center; }
 .pot-pill { position: absolute; z-index: 1; top: 57%; left: 50%; transform: translateX(-50%); color: var(--accent-strong); font-weight: 700; font-size: .9rem; }
 .players { position: absolute; z-index: 4; inset: 0; pointer-events: none; }
@@ -255,6 +270,8 @@ function cardBacks(playerId: string): boolean {
 .own-cards { display: grid; gap: .4rem; justify-items: center; }
 .section-kicker { display: block; color: var(--text-muted); font-size: .65rem; letter-spacing: .12em; }
 .own-cards__list { display: flex; gap: .4rem; }
+.hand-strength { display: grid; gap: .16rem; justify-items: center; padding: .5rem .7rem; border: 1px solid rgba(242,180,81,.36); border-radius: .7rem; background: rgba(242,180,81,.08); text-align: center; }
+.hand-strength strong { color: var(--accent-strong); font-size: 1.05rem; }
 .controls { display: grid; gap: .7rem; }
 .control-row { display: flex; justify-content: space-between; gap: .6rem; align-items: center; }
 .control-row strong, .control-row small { display: block; }

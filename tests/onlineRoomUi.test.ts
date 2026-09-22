@@ -386,6 +386,22 @@ test('player seats are layered above the felt without a client-side poker evalua
   assert.doesNotMatch(source, /evaluateHand|pokerHandEvaluator/)
 })
 
+test('live hand strength and gold card highlighting come from the safe ROOM_STATE', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
+  assert.match(source, /handStrength\.label/)
+  assert.match(source, /contributingCardIds/)
+  assert.match(source, /card--gold/)
+  assert.match(source, /ВАША КОМБИНАЦИЯ/)
+  assert.doesNotMatch(source, /evaluateLiveHand|evaluateHand|pokerHandEvaluator/)
+})
+
+test('live combination block is laid out inside controls without overlay positioning', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
+  assert.match(source, /class="hand-strength"/)
+  assert.match(source, /\.hand-strength \{ display: grid/)
+  assert.doesNotMatch(source, /\.hand-strength[^}]*position:\s*absolute/)
+})
+
 test('no bots or client evaluator were added to the ONLINE page', () => {
   const source = readFileSync(resolve(process.cwd(), 'app/pages/online/[code].vue'), 'utf8')
   assert.equal(source.includes('evaluateHand'), false)

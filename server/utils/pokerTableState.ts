@@ -2,6 +2,7 @@ import { applyBettingAction, type BettingAction } from './pokerBetting'
 import { type Card, type Deck } from './pokerDeck'
 import { finishHand } from './pokerHandFinalizer'
 import { prepareNextHand, type NextHandPlayer } from './pokerNextHand'
+import { getViewerLiveHandStrength, type LiveHandStrength } from './pokerLiveHandStrength'
 import {
   advanceStreet,
   type HandPlayerState,
@@ -353,6 +354,7 @@ export type PublicTableHandState = Readonly<{
   bettingRoundComplete: boolean
   currentActor: number | null
   turnDeadlineAt: number | null
+  handStrength?: LiveHandStrength
   players: readonly PublicTableHandPlayer[]
 }>
 
@@ -373,6 +375,7 @@ function safeHand(hand: InternalHandState, viewerPlayerId: string | undefined, t
     lastAction: player.lastAction ?? null,
     holeCards: Object.freeze(player.playerId === viewerPlayerId ? [...player.holeCards] : [])
   })))
+  const handStrength = getViewerLiveHandStrength(hand, viewerPlayerId)
   return Object.freeze({
     handId: hand.handId,
     dealerSeat: hand.dealerSeat,
@@ -387,6 +390,7 @@ function safeHand(hand: InternalHandState, viewerPlayerId: string | undefined, t
     bettingRoundComplete: hand.bettingRoundComplete,
     currentActor: hand.currentActor,
     turnDeadlineAt,
+    ...(handStrength ? { handStrength } : {}),
     players
   })
 }

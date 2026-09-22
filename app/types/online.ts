@@ -31,6 +31,13 @@ export type OnlineHandPlayer = Readonly<{
   lastAction?: OnlinePlayerAction | null
 }>
 
+export type OnlineHandStrength = Readonly<{
+  category: 'high-card' | 'one-pair' | 'two-pair' | 'three-of-a-kind' | 'straight' | 'flush' | 'full-house' | 'four-of-a-kind' | 'straight-flush'
+  categoryRank: number
+  label: string
+  contributingCardIds: readonly string[]
+}>
+
 export type OnlineHand = Readonly<{
   handId: string
   dealerSeat: number
@@ -45,6 +52,7 @@ export type OnlineHand = Readonly<{
   bettingRoundComplete: boolean
   currentActor: number | null
   turnDeadlineAt: number | null
+  handStrength?: OnlineHandStrength
   players: readonly OnlineHandPlayer[]
 }>
 
