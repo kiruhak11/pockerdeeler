@@ -6,6 +6,8 @@ export type HandStreet = typeof HAND_STREETS[number]
 
 export const HAND_PLAYER_STATUSES = ['ACTIVE', 'ALL_IN', 'FOLDED', 'OUT'] as const
 export type HandPlayerStatus = typeof HAND_PLAYER_STATUSES[number]
+export const HAND_ACTION_TYPES = ['check', 'call', 'bet', 'raise', 'fold', 'all-in'] as const
+export type HandActionType = typeof HAND_ACTION_TYPES[number]
 
 export type HandStartPlayer = Readonly<{
   playerId: string
@@ -21,6 +23,8 @@ export type HandPlayerState = Readonly<{
   contribution: number
   streetContribution: number
   status: HandPlayerStatus
+  /** Last server-accepted action in the current street. */
+  lastAction?: HandActionType | null
 }>
 
 export type HandState = Readonly<{
@@ -177,7 +181,8 @@ function resetStreetState(
 ): InternalHandState {
   const players = Object.freeze(state.players.map(player => Object.freeze({
     ...player,
-    streetContribution: 0
+    streetContribution: 0,
+    lastAction: null
   })))
   const canBet = eligiblePlayers(players).length >= 2
   return Object.freeze({

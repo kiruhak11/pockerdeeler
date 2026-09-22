@@ -2,6 +2,7 @@ import Redis from 'ioredis'
 import { createHash } from 'node:crypto'
 import {
   HAND_PLAYER_STATUSES,
+  HAND_ACTION_TYPES,
   HAND_STREETS,
   type HandPlayerState,
   type InternalHandState,
@@ -177,7 +178,8 @@ function serializeHand(hand: InternalHandState): JsonRecord {
       holeCards: serializeCards(player.holeCards),
       contribution: player.contribution,
       streetContribution: player.streetContribution,
-      status: player.status
+      status: player.status,
+      lastAction: player.lastAction ?? null
     })),
     dealerSeat: hand.dealerSeat,
     smallBlindSeat: hand.smallBlindSeat,
@@ -205,6 +207,11 @@ function deserializeHand(value: unknown): InternalHandState {
     const holeCards = deserializeCards(player.holeCards, 'Hole cards')
     if (holeCards.length !== 2) fail('CORRUPTED_STATE', 'Each hand player must have exactly two hole cards.')
     if (!HAND_PLAYER_STATUSES.includes(player.status as InternalHandState['players'][number]['status'])) fail('CORRUPTED_STATE', 'Hand player status is invalid.')
+    const lastAction = player.lastAction === undefined || player.lastAction === null
+      ? undefined
+      : HAND_ACTION_TYPES.includes(player.lastAction as typeof HAND_ACTION_TYPES[number])
+        ? player.lastAction as typeof HAND_ACTION_TYPES[number]
+        : fail('CORRUPTED_STATE', 'Hand player last action is invalid.')
     return Object.freeze({
       playerId: requireString(player.playerId, 'Hand player id'),
       seat: requireSafeInteger(player.seat, 'Hand player seat', 1),
@@ -212,7 +219,8 @@ function deserializeHand(value: unknown): InternalHandState {
       holeCards: Object.freeze(holeCards) as readonly [Card, Card],
       contribution: requireSafeInteger(player.contribution, 'Hand contribution'),
       streetContribution: requireSafeInteger(player.streetContribution, 'Hand street contribution'),
-      status: player.status as HandPlayerState['status']
+      status: player.status as HandPlayerState['status'],
+      ...(lastAction === undefined ? {} : { lastAction })
     })
   })
   const board = deserializeCards(raw.board, 'Board')

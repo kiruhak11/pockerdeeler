@@ -60,6 +60,7 @@ test('check is accepted when toCall is zero', () => {
   const next = action(state, 'player-1', 'check')
   assert.equal(next.currentActor, 2)
   assert.deepEqual(next.actedThisRound, ['player-1'])
+  assert.equal(next.players.find(player => player.playerId === 'player-1')?.lastAction, 'check')
 })
 
 test('check is rejected when toCall is positive', () => {
@@ -76,6 +77,20 @@ test('call pays the full amount to the current bet', () => {
   assert.equal(player.contribution, 10)
   assert.equal(next.pot, 25)
   assert.equal(next.currentActor, 2)
+  assert.equal(player.lastAction, 'call')
+})
+
+test('bet, raise, fold and all-in expose only the last server action', () => {
+  const bet = action(postflopLike(), 'player-1', 'bet', 20)
+  assert.equal(bet.players.find(player => player.playerId === 'player-1')?.lastAction, 'bet')
+  let raised = action(start(), 'player-1', 'raise', 20)
+  assert.equal(raised.players.find(player => player.playerId === 'player-1')?.lastAction, 'raise')
+  const folded = action(start(2), 'player-1', 'fold')
+  assert.equal(folded.players.find(player => player.playerId === 'player-1')?.lastAction, 'fold')
+  const allIn = action(postflopLike(), 'player-1', 'all-in')
+  assert.equal(allIn.players.find(player => player.playerId === 'player-1')?.lastAction, 'all-in')
+  raised = action(raised, 'player-2', 'call')
+  assert.equal(raised.players.find(player => player.playerId === 'player-1')?.lastAction, 'raise')
 })
 
 test('call with nothing to call is rejected', () => {

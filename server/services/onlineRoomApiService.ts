@@ -140,6 +140,61 @@ export type ApiOnlineRoomResult = Readonly<{
   concurrencyToken: string
 }>
 
+type SafeOnlineRoomState = ReturnType<typeof toPlayerSafeOnlineRoomState>
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+function fallbackPlayerNickname(seat: number): string {
+  return `Игрок ${seat}`
+}
+
+/** Adds only public profile names to an already player-safe room snapshot. */
+async function addPublicPlayerNicknames(room: SafeOnlineRoomState): Promise<SafeOnlineRoomState> {
+  const ids = new Set<string>(room.pokerTable.players.map(player => player.playerId))
+  for (const player of room.pokerTable.currentHand?.players ?? []) ids.add(player.playerId)
+  const userIds = [...ids].filter(id => UUID_PATTERN.test(id))
+  const names = new Map<string, string>()
+  if (userIds.length > 0) {
+    try {
+      const users = await prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, username: true } })
+      for (const user of users) {
+        if (typeof user.username === 'string' && user.username.trim()) names.set(user.id, user.username)
+      }
+    } catch {
+      // A profile read is presentation metadata; the safe seat fallback remains valid.
+    }
+  }
+  const players = Object.freeze(room.pokerTable.players.map(player => Object.freeze({
+    ...player,
+    nickname: names.get(player.playerId) ?? fallbackPlayerNickname(player.seat)
+  })))
+  const currentHand = room.pokerTable.currentHand
+  const handPlayers = currentHand
+    ? Object.freeze(currentHand.players.map(player => Object.freeze({
+      ...player,
+      nickname: names.get(player.playerId) ?? fallbackPlayerNickname(player.seat)
+    })))
+    : null
+  return Object.freeze({
+    ...room,
+    pokerTable: Object.freeze({
+      ...room.pokerTable,
+      players,
+      ...(currentHand ? { currentHand: Object.freeze({ ...currentHand, players: handPlayers! }) } : {})
+    })
+  })
+}
+
+async function safeOnlineRoomState(state: OnlineRoomState, viewerId: string | undefined): Promise<SafeOnlineRoomState> {
+  return addPublicPlayerNicknames(toPlayerSafeOnlineRoomState(state, viewerId))
+}
+
+async function safeOnlineRoomResult(state: OnlineRoomState, viewerId: string | undefined, runtimeRevision: number): Promise<ApiOnlineRoomResult> {
+  return Object.freeze({
+    room: await safeOnlineRoomState(state, viewerId),
+    concurrencyToken: issueConcurrencyToken(state.roomId, runtimeRevision)
+  })
+}
+
 type PersistentRoom = Readonly<{
   id: string
   roomCode: string
@@ -546,10 +601,7 @@ export async function createAuthenticatedOnlineRoom(userId: string, input: Creat
       if (ownerReservation) await cancelOnlineBuyIn({ roomId: metadata.id, userId, sequence: ownerReservation.sequence }).catch(() => undefined)
       throw error
     }
-    const result = Object.freeze({
-      room: toPlayerSafeOnlineRoomState(record.state, userId),
-      concurrencyToken: issueConcurrencyToken(record.state.roomId, record.runtimeRevision)
-    })
+    const result = await safeOnlineRoomResult(record.state, userId, record.runtimeRevision)
     void publishOnlineRoomChanged({
       type: 'ROOM_CHANGED',
       roomId: record.state.roomId,
@@ -586,7 +638,7 @@ export async function getAuthenticatedOnlineRoom(userId: string, code: string, d
   if (metadata.visibility === 'PRIVATE' && !record.state.pokerTable.players.some(player => player.playerId === userId)) {
     fail('FORBIDDEN', 'Join the private room before viewing its state.', 403)
   }
-  const result = Object.freeze({ room: toPlayerSafeOnlineRoomState(record.state, userId), concurrencyToken: issueConcurrencyToken(record.state.roomId, record.runtimeRevision) })
+  const result = await safeOnlineRoomResult(record.state, userId, record.runtimeRevision)
   if (result.room.pokerTable.currentHand?.turnDeadlineAt !== null && result.room.pokerTable.currentHand?.turnDeadlineAt !== undefined) {
     try {
       const timer = timerStore(dependencies)
@@ -674,7 +726,7 @@ async function updateRoomInternal(
       }).catch(() => undefined)
     }
     return Object.freeze({
-      result: Object.freeze({ room: toPlayerSafeOnlineRoomState(updated.record.state, userId), concurrencyToken: issueConcurrencyToken(updated.record.state.roomId, updated.record.runtimeRevision) }),
+      result: await safeOnlineRoomResult(updated.record.state, userId, updated.record.runtimeRevision),
       duplicate: updated.duplicate,
       runtimeRevision: updated.record.runtimeRevision
     })
@@ -944,7 +996,7 @@ export async function processAuthenticatedOnlineRoomTimeout(
         expectedStateVersion: job.expectedTableStateVersion
       })))
     })
-    const safe = Object.freeze({ room: toPlayerSafeOnlineRoomState(updated.state), concurrencyToken: issueConcurrencyToken(updated.state.roomId, updated.runtimeRevision) })
+    const safe = await safeOnlineRoomResult(updated.state, undefined, updated.runtimeRevision)
     void publishOnlineRoomChanged({
       type: 'ROOM_CHANGED',
       roomId: updated.state.roomId,

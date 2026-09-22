@@ -91,12 +91,17 @@ export function formatTurnSeconds(seconds: number | null): string {
 }
 
 export function seatPosition(index: number, count: number): Readonly<{ left: string; top: string }> {
-  const safeCount = Math.max(1, count)
-  const angle = (index / safeCount) * Math.PI * 2
-  return {
-    left: `${50 + Math.sin(angle) * 43}%`,
-    top: `${50 - Math.cos(angle) * 42}%`
+  const layouts: Record<number, readonly Readonly<{ left: string; top: string }>[]> = {
+    1: [{ left: '50%', top: '86%' }],
+    2: [{ left: '50%', top: '86%' }, { left: '50%', top: '14%' }],
+    3: [{ left: '50%', top: '86%' }, { left: '16%', top: '26%' }, { left: '84%', top: '26%' }],
+    4: [{ left: '50%', top: '86%' }, { left: '13%', top: '52%' }, { left: '50%', top: '14%' }, { left: '87%', top: '52%' }],
+    5: [{ left: '50%', top: '86%' }, { left: '12%', top: '62%' }, { left: '20%', top: '20%' }, { left: '80%', top: '20%' }, { left: '88%', top: '62%' }],
+    6: [{ left: '50%', top: '87%' }, { left: '11%', top: '66%' }, { left: '15%', top: '28%' }, { left: '50%', top: '13%' }, { left: '85%', top: '28%' }, { left: '89%', top: '66%' }]
   }
+  const safeCount = Math.max(1, Math.min(6, Math.floor(count)))
+  const layout = layouts[safeCount] ?? layouts[6]!
+  return layout[Math.max(0, Math.min(index, layout.length - 1))]!
 }
 
 export function publicStateHasPrivateFields(value: unknown): boolean {

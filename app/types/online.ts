@@ -6,6 +6,7 @@ export type OnlineCard = Readonly<{
 }>
 
 export type OnlineHandPlayerStatus = 'ACTIVE' | 'ALL_IN' | 'FOLDED' | 'OUT'
+export type OnlinePlayerAction = 'check' | 'call' | 'bet' | 'raise' | 'fold' | 'all-in'
 export type OnlineHandStreet = 'PREFLOP' | 'FLOP' | 'TURN' | 'RIVER' | 'SHOWDOWN' | 'FINISHED'
 
 export type OnlineTablePlayer = Readonly<{
@@ -15,6 +16,7 @@ export type OnlineTablePlayer = Readonly<{
   connected: boolean
   ready: boolean
   sittingOut: boolean
+  nickname?: string
 }>
 
 export type OnlineHandPlayer = Readonly<{
@@ -25,6 +27,8 @@ export type OnlineHandPlayer = Readonly<{
   streetContribution: number
   status: OnlineHandPlayerStatus
   holeCards: readonly OnlineCard[]
+  nickname?: string
+  lastAction?: OnlinePlayerAction | null
 }>
 
 export type OnlineHand = Readonly<{

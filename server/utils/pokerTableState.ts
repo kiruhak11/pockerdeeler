@@ -330,8 +330,13 @@ export function applyTableAction(table: PokerTableState, action: TableAction, ex
   })
 }
 
-export type PublicTableHandPlayer = Readonly<Pick<HandPlayerState, 'playerId' | 'seat' | 'stack' | 'contribution' | 'streetContribution' | 'status'> & {
+export type PublicTableHandPlayer = Readonly<Pick<HandPlayerState, 'playerId' | 'seat' | 'stack' | 'contribution' | 'streetContribution' | 'status' | 'lastAction'> & {
   holeCards: readonly Card[]
+  nickname?: string
+}>
+
+export type PublicTablePlayer = Readonly<PokerTablePlayer & {
+  nickname?: string
 }>
 
 export type PublicTableHandState = Readonly<{
@@ -353,7 +358,7 @@ export type PublicTableHandState = Readonly<{
 
 export type PlayerSafeTableState = Readonly<Omit<PokerTableState, 'currentHand' | 'seats' | 'players'> & {
   seats: readonly PokerTableSeat[]
-  players: readonly PokerTablePlayer[]
+  players: readonly PublicTablePlayer[]
   currentHand: PublicTableHandState | null
 }>
 
@@ -365,6 +370,7 @@ function safeHand(hand: InternalHandState, viewerPlayerId: string | undefined, t
     contribution: player.contribution,
     streetContribution: player.streetContribution,
     status: player.status,
+    lastAction: player.lastAction ?? null,
     holeCards: Object.freeze(player.playerId === viewerPlayerId ? [...player.holeCards] : [])
   })))
   return Object.freeze({

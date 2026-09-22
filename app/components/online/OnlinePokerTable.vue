@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { OnlineAction, OnlineConnectionStatus, OnlineRoomState } from '~/types/online'
+import type { OnlineAction, OnlineConnectionStatus, OnlineHandPlayer, OnlineRoomState, OnlineTablePlayer } from '~/types/online'
 import { cardIsRed, cardLabel, displayHand, formatTurnSeconds, isPostHandWaitingState, isViewerActor, ownHoleCards, playerForViewer, remainingTurnSeconds, seatPosition, tablePlayerForViewer, toCall } from '~/utils/onlineRoomUi'
 
 const props = defineProps<{
@@ -36,7 +36,15 @@ const viewerToCall = computed(() => toCall(hand.value, props.viewerId))
 const isPending = computed(() => Boolean(props.pendingActionId))
 const deadlineSeconds = computed(() => remainingTurnSeconds(visibleHand.value?.turnDeadlineAt ?? null, now.value))
 const actor = computed(() => visibleHand.value?.players.find(player => player.seat === visibleHand.value?.currentActor) ?? null)
+const actorTablePlayer = computed(() => actor.value ? props.state.pokerTable.players.find(player => player.playerId === actor.value?.playerId) ?? null : null)
 const ownCards = computed(() => ownHoleCards(visibleHand.value, props.viewerId))
+const displayPlayers = computed(() => {
+  const players = [...props.state.pokerTable.players]
+  const viewerIndex = props.viewerId ? players.findIndex(player => player.playerId === props.viewerId) : -1
+  if (viewerIndex <= 0) return players
+  const [viewer] = players.splice(viewerIndex, 1)
+  return viewer ? [viewer, ...players] : players
+})
 const callAmount = computed(() => Math.min(viewerToCall.value, viewer.value?.stack ?? 0))
 const maxTargetAmount = computed(() => (viewer.value?.streetContribution ?? 0) + (viewer.value?.stack ?? 0))
 const isWaiting = computed(() => isPostHandWaitingState(props.state))
@@ -59,8 +67,24 @@ function send(type: OnlineAction['type']) {
   emit('action', { type })
 }
 
-function statusLabel(status: string): string {
-  return status === 'FOLDED' ? 'Сбросил карты' : status === 'ALL_IN' ? 'Ва-банк' : status === 'OUT' ? 'Выбыл' : ''
+function handPlayer(playerId: string): OnlineHandPlayer | null {
+  return visibleHand.value?.players.find(item => item.playerId === playerId) ?? null
+}
+
+function displayName(player: OnlineTablePlayer): string {
+  return player.nickname?.trim() || `Игрок ${player.seat}`
+}
+
+function statusLabel(player: OnlineTablePlayer, hand: OnlineHandPlayer | null): string {
+  if (hand?.status === 'FOLDED') return 'Сбросил карты'
+  if (hand?.status === 'ALL_IN') return 'Ва-банк'
+  if (hand?.status === 'OUT' || player.sittingOut) return 'Вне игры'
+  if (!player.connected) return 'Отключён'
+  return 'В игре'
+}
+
+function actionLabel(action: OnlineHandPlayer['lastAction']): string {
+  return action === 'check' ? 'Чек' : action === 'call' ? 'Колл' : action === 'bet' ? 'Ставка' : action === 'raise' ? 'Рейз' : action === 'fold' ? 'Фолд' : action === 'all-in' ? 'Олл-ин' : ''
 }
 
 function connectionLabel(status: OnlineConnectionStatus): string {
@@ -105,27 +129,34 @@ function cardBacks(playerId: string): boolean {
         <div v-if="visibleHand" class="pot-pill">POT {{ visibleHand.pot }}</div>
         <div class="players" aria-label="Игроки">
           <article
-            v-for="(player, index) in state.pokerTable.players"
+            v-for="(player, index) in displayPlayers"
             :key="player.playerId"
             class="player-seat"
             :class="{
               'player-seat--self': player.playerId === viewerId,
               'player-seat--actor': visibleHand?.currentActor === player.seat,
               'player-seat--offline': !player.connected,
-              'player-seat--folded': visibleHand?.players.find(item => item.playerId === player.playerId)?.status === 'FOLDED'
+              'player-seat--folded': handPlayer(player.playerId)?.status === 'FOLDED',
+              'player-seat--all-in': handPlayer(player.playerId)?.status === 'ALL_IN',
+              'player-seat--sitting-out': player.sittingOut
             }"
-            :style="seatPosition(index, state.pokerTable.players.length)"
+            :style="seatPosition(index, displayPlayers.length)"
           >
-            <div class="avatar" aria-hidden="true">{{ player.seat }}</div>
+            <div class="avatar" aria-hidden="true">{{ displayName(player).slice(0, 1).toUpperCase() }}</div>
             <div class="player-info">
-              <strong>{{ player.playerId === viewerId ? 'Вы' : `Игрок ${player.seat}` }}</strong>
-              <span>{{ visibleHand?.players.find(item => item.playerId === player.playerId)?.stack ?? player.stack }} фишек</span>
-              <small v-if="!player.connected">Отключён</small>
-              <small v-else-if="visibleHand?.players.find(item => item.playerId === player.playerId)" class="player-status">{{ statusLabel(visibleHand?.players.find(item => item.playerId === player.playerId)?.status || '') }}</small>
+              <strong :title="displayName(player)">{{ displayName(player) }}</strong>
+              <span>Стек: {{ handPlayer(player.playerId)?.stack ?? player.stack }}</span>
+              <small v-if="visibleHand" class="player-bet">Ставка: {{ handPlayer(player.playerId)?.streetContribution ?? 0 }}</small>
+              <small v-if="handPlayer(player.playerId)?.lastAction" class="player-action">{{ actionLabel(handPlayer(player.playerId)?.lastAction ?? null) }}</small>
+              <small class="player-status">{{ statusLabel(player, handPlayer(player.playerId)) }}</small>
             </div>
-            <span v-if="visibleHand?.dealerSeat === player.seat" class="dealer-marker" title="Кнопка дилера">D</span>
-            <div v-if="visibleHand?.players.find(item => item.playerId === player.playerId)?.holeCards.length" class="mini-cards">
-              <span v-for="card in visibleHand?.players.find(item => item.playerId === player.playerId)?.holeCards || []" :key="`${card.rank}-${card.suit}`" class="mini-card" :class="{ 'card--red': cardIsRed(card) }">{{ cardLabel(card) }}</span>
+            <div class="seat-markers" aria-label="Роли за столом">
+              <span v-if="visibleHand?.dealerSeat === player.seat" class="seat-marker" title="Кнопка дилера">D</span>
+              <span v-if="visibleHand?.smallBlindSeat === player.seat" class="seat-marker seat-marker--blind" title="Малый блайнд">SB</span>
+              <span v-if="visibleHand?.bigBlindSeat === player.seat" class="seat-marker seat-marker--blind" title="Большой блайнд">BB</span>
+            </div>
+            <div v-if="handPlayer(player.playerId)?.holeCards.length" class="mini-cards">
+              <span v-for="card in handPlayer(player.playerId)?.holeCards || []" :key="`${card.rank}-${card.suit}`" class="mini-card" :class="{ 'card--red': cardIsRed(card) }">{{ cardLabel(card) }}</span>
             </div>
             <div v-else-if="cardBacks(player.playerId)" class="mini-cards mini-cards--back" aria-label="Закрытые карты"><span class="mini-card">★</span><span class="mini-card">★</span></div>
           </article>
@@ -142,7 +173,7 @@ function cardBacks(playerId: string): boolean {
       <div class="control-row">
         <div>
           <span class="section-kicker">СТОЛ</span>
-          <strong v-if="visibleHand?.currentActor !== null && visibleHand?.currentActor !== undefined">Ход: {{ actor?.playerId === viewerId ? 'ваш' : `игрока ${actor?.seat}` }}</strong>
+          <strong v-if="visibleHand?.currentActor !== null && visibleHand?.currentActor !== undefined">Ход: {{ actor?.playerId === viewerId ? 'ваш' : actorTablePlayer ? displayName(actorTablePlayer) : 'игрока' }}</strong>
           <strong v-else-if="visibleHand">Раунд завершён</strong>
           <strong v-else>Готовы начать</strong>
           <small v-if="deadlineSeconds !== null">Таймер {{ formatTurnSeconds(deadlineSeconds) }}</small>
@@ -190,27 +221,33 @@ function cardBacks(playerId: string): boolean {
 .icon-button { border: 1px solid rgba(255,255,255,.16); border-radius: .65rem; padding: .38rem .55rem; color: var(--text-muted); background: transparent; cursor: pointer; font-size: .75rem; }
 .notice { margin: 0; padding: .55rem .7rem; border-radius: .7rem; color: var(--accent-strong); background: rgba(242,180,81,.12); font-size: .85rem; }
 .table-wrap { min-height: 360px; }
-.felt { position: relative; min-height: 390px; overflow: hidden; border: 9px solid #70461e; border-radius: 48%; background: radial-gradient(ellipse at center, #1a744b 0%, #0c442d 60%, #092b20 100%); box-shadow: inset 0 0 0 3px rgba(255,255,255,.08), 0 18px 35px rgba(0,0,0,.28); }
-.table-meta { position: absolute; top: 18%; left: 50%; transform: translateX(-50%); display: flex; gap: .55rem; align-items: center; color: rgba(255,255,255,.75); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; }
+.felt { position: relative; isolation: isolate; min-height: 390px; overflow: hidden; border: 9px solid #70461e; border-radius: 48%; background: radial-gradient(ellipse at center, #1a744b 0%, #0c442d 60%, #092b20 100%); box-shadow: inset 0 0 0 3px rgba(255,255,255,.08), 0 18px 35px rgba(0,0,0,.28); }
+.table-meta { position: absolute; z-index: 1; top: 18%; left: 50%; transform: translateX(-50%); display: flex; gap: .55rem; align-items: center; color: rgba(255,255,255,.75); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; }
 .table-meta strong { color: var(--accent-strong); letter-spacing: 0; text-transform: none; font-size: .9rem; }
-.board { position: absolute; top: 38%; left: 50%; display: flex; justify-content: center; gap: .3rem; min-height: 52px; transform: translate(-50%, -50%); }
+.board { position: absolute; z-index: 1; top: 38%; left: 50%; display: flex; justify-content: center; gap: .3rem; min-height: 52px; transform: translate(-50%, -50%); }
 .card, .mini-card { display: grid; place-items: center; color: #15221b; background: #f7f4ea; border-radius: .38rem; font-weight: 700; box-shadow: 0 3px 8px rgba(0,0,0,.25); }
 .card { width: 38px; height: 52px; font-size: .85rem; }
 .card--large { width: 58px; height: 80px; font-size: 1.2rem; }
 .card--red { color: #bd3d38; }
 .board-empty { color: rgba(255,255,255,.54); font-size: .72rem; white-space: nowrap; align-self: center; }
-.pot-pill { position: absolute; top: 57%; left: 50%; transform: translateX(-50%); color: var(--accent-strong); font-weight: 700; font-size: .9rem; }
-.players { position: absolute; inset: 0; }
-.player-seat { position: absolute; width: 112px; padding: .35rem; border: 1px solid rgba(255,255,255,.18); border-radius: .65rem; transform: translate(-50%, -50%); background: rgba(9,27,20,.88); font-size: .68rem; transition: border-color .15s, box-shadow .15s; }
+.pot-pill { position: absolute; z-index: 1; top: 57%; left: 50%; transform: translateX(-50%); color: var(--accent-strong); font-weight: 700; font-size: .9rem; }
+.players { position: absolute; z-index: 4; inset: 0; pointer-events: none; }
+.player-seat { position: absolute; z-index: 5; width: 112px; min-width: 0; padding: .35rem; border: 1px solid rgba(255,255,255,.18); border-radius: .65rem; transform: translate(-50%, -50%); background: rgba(9,27,20,.94); font-size: .68rem; transition: border-color .15s, box-shadow .15s; pointer-events: auto; }
 .player-seat--self { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(242,180,81,.22); }
 .player-seat--actor { border-color: var(--accent-strong); box-shadow: 0 0 0 2px rgba(242,180,81,.3); }
-.player-seat--offline, .player-seat--folded { opacity: .55; }
+.player-seat--offline, .player-seat--folded, .player-seat--sitting-out { opacity: .55; }
+.player-seat--all-in { border-color: #d97f54; }
 .avatar { float: left; display: grid; place-items: center; width: 25px; height: 25px; margin-right: .28rem; border-radius: 50%; color: #172116; background: var(--accent); font-weight: 700; }
 .player-info { min-width: 0; display: grid; gap: .05rem; }
 .player-info strong, .player-info span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .player-info span { color: var(--text-muted); }
-.player-info small { color: var(--danger); }
-.dealer-marker { position: absolute; top: -.4rem; right: -.35rem; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; color: #1d271d; background: #f2e7bb; font-size: .65rem; font-weight: 700; }
+.player-info small { color: var(--text-muted); }
+.player-info .player-bet { color: var(--accent-strong); font-weight: 700; }
+.player-info .player-action { color: #f5d88c; font-weight: 700; }
+.player-status { font-size: .62rem; }
+.seat-markers { position: absolute; top: -.45rem; right: -.35rem; display: flex; gap: .18rem; }
+.seat-marker { display: grid; place-items: center; min-width: 20px; height: 20px; padding: 0 .18rem; border-radius: 50%; color: #1d271d; background: #f2e7bb; font-size: .58rem; font-weight: 700; }
+.seat-marker--blind { border-radius: .35rem; background: #c3dfd1; }
 .mini-cards { display: flex; gap: .2rem; margin-top: .25rem; }
 .mini-card { width: 22px; height: 28px; font-size: .55rem; }
 .mini-cards--back .mini-card { color: #f5d88c; background: repeating-linear-gradient(135deg, #293e70, #293e70 3px, #16274f 3px, #16274f 6px); }
@@ -231,5 +268,5 @@ function cardBacks(playerId: string): boolean {
 .waiting { margin: 0; color: var(--text-muted); font-size: .85rem; }
 .reconnect-button { justify-self: center; }
 @media (min-width: 700px) { .online-table-page { padding: 1.2rem 1rem 2rem; } .felt { min-height: 520px; } .player-seat { width: 145px; padding: .5rem; font-size: .78rem; } .card { width: 48px; height: 68px; font-size: 1rem; } .card--large { width: 70px; height: 96px; } .action-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } .amount-control { grid-column: span 2; } }
-@media (max-width: 400px) { .felt { min-height: 345px; border-width: 6px; } .player-seat { width: 93px; font-size: .6rem; } .avatar { width: 21px; height: 21px; } .card { width: 31px; height: 44px; font-size: .72rem; } .board { gap: .18rem; } }
+@media (max-width: 400px) { .felt { min-height: 345px; border-width: 6px; } .player-seat { width: 94px; font-size: .6rem; } .avatar { width: 21px; height: 21px; } .card { width: 31px; height: 44px; font-size: .72rem; } .board { gap: .18rem; } .seat-marker { min-width: 18px; font-size: .5rem; } }
 </style>

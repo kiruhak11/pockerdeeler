@@ -109,6 +109,7 @@ test('each new betting street resets contributions and action tracking', () => {
   assert.deepEqual(flop.lastActedAtBet, [])
   assert.equal(flop.bettingRoundComplete, false)
   assert.ok(flop.players.every(player => player.streetContribution === 0))
+  assert.ok(flop.players.every(player => player.lastAction === null))
   assert.equal(flop.pot, preflop.pot)
   assert.ok(flop.players.every((player, index) => player.contribution === preflop.players[index]!.contribution))
 })

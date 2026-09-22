@@ -177,7 +177,7 @@ test('finished presentation hides stale hand stack and active pot', () => {
   const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
   assert.match(source, /displayHand\(hand\.value\)/)
   assert.match(source, /visibleHand(?:\?\.|\.)pot/)
-  assert.match(source, /visibleHand\?\.players\.find\(item => item\.playerId === player\.playerId\)\?\.stack \?\? player\.stack/)
+  assert.match(source, /handPlayer\(player\.playerId\)\?\.stack \?\? player\.stack/)
   assert.equal(displayHand(finishedRoomState().pokerTable.currentHand), null)
 })
 
@@ -349,6 +349,41 @@ test('toCall is derived from public contributions', () => {
 test('HOME page remains free of ONLINE table wiring', () => {
   const source = readFileSync(resolve(process.cwd(), 'app/pages/index.vue'), 'utf8')
   assert.equal(source.includes('OnlinePokerTable'), false)
+})
+
+test('player presentation uses public nickname, table stack, street contribution and last action', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
+  assert.match(source, /displayName\(player\)/)
+  assert.match(source, /Стек:/)
+  assert.match(source, /Ставка:/)
+  assert.match(source, /actionLabel\(/)
+  assert.match(source, /:title="displayName\(player\)"/)
+})
+
+test('player presentation includes dealer and blind markers and public statuses', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
+  assert.match(source, /Кнопка дилера/)
+  assert.match(source, /Малый блайнд/)
+  assert.match(source, /Большой блайнд/)
+  assert.match(source, /player-seat--actor/)
+  assert.match(source, /player-seat--all-in/)
+  assert.match(source, /player-seat--sitting-out/)
+  assert.match(source, /player-seat--offline/)
+})
+
+test('seat layouts keep the viewer at the lower anchor for two through six players', () => {
+  for (let count = 2; count <= 6; count += 1) {
+    const positions = Array.from({ length: count }, (_, index) => seatPosition(index, count))
+    assert.equal(new Set(positions.map(position => JSON.stringify(position))).size, count)
+    assert.equal(positions[0]?.top, count === 2 ? '86%' : count === 6 ? '87%' : '86%')
+  }
+})
+
+test('player seats are layered above the felt without a client-side poker evaluator', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
+  assert.match(source, /\.players \{ position: absolute; z-index: 4/)
+  assert.match(source, /\.player-seat \{ position: absolute; z-index: 5/)
+  assert.doesNotMatch(source, /evaluateHand|pokerHandEvaluator/)
 })
 
 test('no bots or client evaluator were added to the ONLINE page', () => {
