@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import Redis from 'ioredis'
 import { PrismaClient } from '@prisma/client'
 import { createRoom } from '../server/services/roomService'
-import { createPersistentOnlineRoom } from '../server/services/roomCodeRegistryService'
+import { claimRoomCode, createPersistentOnlineRoom } from '../server/services/roomCodeRegistryService'
 import {
   OnlineRoomApiError,
   applyAuthenticatedOnlineRoomAction,
@@ -32,6 +32,7 @@ const db = new PrismaClient()
 const redis = isolated ? new Redis(redisUrl!, { lazyConnect: true }) : undefined
 const roomIds: string[] = []
 const homeIds: string[] = []
+const homeCodes: string[] = []
 const prefixes: string[] = []
 
 function runtime(): OnlineRoomRuntimeStore {
@@ -96,6 +97,7 @@ test.after(async () => {
   if (dbUrl) {
     if (roomIds.length > 0) await db.roomCodeRegistry.deleteMany({ where: { roomType: 'ONLINE', targetId: { in: roomIds } } })
     if (roomIds.length > 0) await db.onlineRoom.deleteMany({ where: { id: { in: roomIds } } })
+    if (homeCodes.length > 0) await db.roomCodeRegistry.deleteMany({ where: { code: { in: homeCodes } } })
     if (homeIds.length > 0) await db.room.deleteMany({ where: { id: { in: homeIds } } })
   }
   await db.$disconnect()
@@ -309,10 +311,37 @@ test('HOME flow remains separate from ONLINE runtime state', { skip: !isolated }
 })
 
 test('global HOME/ONLINE collision remains protected by persistent registry', { skip: !isolated }, async () => {
-  const home = await createRoom({ name: `Collision ${randomUUID()}`, startingStack: 100, maxPlayers: 6, allowLateJoin: true, requireDealerActionApproval: false, allowSpectators: true }, 'http://test')
-  const row = await db.room.findUniqueOrThrow({ where: { code: home.roomCode } })
-  homeIds.push(row.id)
-  await assert.rejects(createPersistentOnlineRoom({ ownerId: `collision-${randomUUID()}`, visibility: 'PUBLIC', codeGenerator: () => home.roomCode, maxAttempts: 1 }), /Unable to claim a unique online room code/)
+  const homeCode = 'AB2345'
+  const retryCode = 'CD2345'
+  const home = await db.$transaction(async tx => {
+    const row = await tx.room.create({
+      data: {
+        id: randomUUID(),
+        code: homeCode,
+        name: 'Deterministic collision fixture',
+        status: 'lobby',
+        dealerSecretHash: 'fixture-dealer-secret-hash',
+        settings: {}
+      }
+    })
+    await claimRoomCode(tx, { code: homeCode, roomType: 'HOME', targetId: row.id })
+    return row
+  })
+  homeIds.push(home.id)
+  homeCodes.push(home.code)
+
+  const candidates = [homeCode, retryCode]
+  const online = await createPersistentOnlineRoom({
+    ownerId: `collision-${randomUUID()}`,
+    visibility: 'PUBLIC',
+    codeGenerator: () => candidates.shift() ?? retryCode
+  })
+  roomIds.push(online.id)
+  assert.equal(online.roomCode, retryCode)
+  assert.equal((await db.room.findUniqueOrThrow({ where: { id: home.id } })).code, homeCode)
+  assert.equal(await db.onlineRoom.count({ where: { roomCode: homeCode } }), 0)
+  assert.deepEqual(await resolveOnlineRoomCode(homeCode), { type: 'HOME', code: homeCode, targetId: home.id })
+  assert.deepEqual(await resolveOnlineRoomCode(retryCode), { type: 'ONLINE', code: retryCode, targetId: online.id })
 })
 
 test('safe result never contains runtime envelope or private hash', { skip: !isolated }, async () => {
