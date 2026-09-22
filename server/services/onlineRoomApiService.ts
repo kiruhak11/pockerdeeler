@@ -36,6 +36,7 @@ import {
 } from './onlineRoomRuntimeStore'
 import { publishOnlineRoomChanged } from './onlineRoomRealtimeService'
 import { OnlineRoomPresenceError } from './onlineRoomPresenceService'
+import { isDatabaseUnavailableError } from '../utils/databaseErrors'
 
 const DEFAULT_OWNER_STACK = 1_000
 const DEFAULT_SMALL_BLIND = 5
@@ -297,6 +298,9 @@ function mapRuntimeError(error: unknown): OnlineRoomApiError {
     }
     return new OnlineRoomApiError('INVALID_ACTION', error.message, 400)
   }
+  if (isDatabaseUnavailableError(error)) {
+    return new OnlineRoomApiError('UNAVAILABLE', 'Online room service is temporarily unavailable.', 503)
+  }
   const code = (error as { code?: string } | null)?.code
   if (code === 'PRIVATE_ROOM_AUTH_REQUIRED') return new OnlineRoomApiError('FORBIDDEN', 'A valid private room credential is required.', 403)
   if (code === 'ROOM_CLOSED') return new OnlineRoomApiError('CLOSED', 'This online room is closed.', 410)
@@ -310,7 +314,7 @@ function mapRuntimeError(error: unknown): OnlineRoomApiError {
       return new OnlineRoomApiError('INVALID_ACTION', error.message, 400)
     }
   }
-  return new OnlineRoomApiError('UNAVAILABLE', 'Online room service is temporarily unavailable.', 503)
+  throw error
 }
 
 function normalizeMetadata(row: {
