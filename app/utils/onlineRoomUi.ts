@@ -1,4 +1,4 @@
-import type { OnlineAction, OnlineCard, OnlineHandPlayer, OnlineRoomState } from '~/types/online'
+import type { OnlineAction, OnlineCard, OnlineHand, OnlineHandPlayer, OnlineRoomState, OnlineTablePlayer } from '~/types/online'
 
 export type OnlineSocketLocation = Readonly<{
   protocol: string
@@ -37,6 +37,24 @@ export function pingMessage(): Readonly<Record<string, unknown>> {
 export function playerForViewer(hand: OnlineRoomState['pokerTable']['currentHand'], viewerId: string | null | undefined): OnlineHandPlayer | null {
   if (!hand || !viewerId) return null
   return hand.players.find(player => player.playerId === viewerId) ?? null
+}
+
+export function tablePlayerForViewer(table: OnlineRoomState['pokerTable'], viewerId: string | null | undefined): OnlineTablePlayer | null {
+  if (!viewerId) return null
+  return table.players.find(player => player.playerId === viewerId) ?? null
+}
+
+export function isFinishedHand(hand: OnlineHand | null | undefined): boolean {
+  return hand?.street === 'FINISHED'
+}
+
+export function isPostHandWaitingState(state: OnlineRoomState): boolean {
+  const hand = state.pokerTable.currentHand
+  return state.pokerTable.status === 'WAITING' && (!hand || isFinishedHand(hand))
+}
+
+export function displayHand(hand: OnlineRoomState['pokerTable']['currentHand']): OnlineHand | null {
+  return hand && !isFinishedHand(hand) ? hand : null
 }
 
 export function ownHoleCards(hand: OnlineRoomState['pokerTable']['currentHand'], viewerId: string | null | undefined): readonly OnlineCard[] {

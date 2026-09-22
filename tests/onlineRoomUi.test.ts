@@ -7,8 +7,10 @@ import {
   cardIsRed,
   cardLabel,
   createOnlineActionId,
+  displayHand,
   formatTurnSeconds,
   isSafeRoomState,
+  isPostHandWaitingState,
   isViewerActor,
   onlineSocketUrl,
   ownHoleCards,
@@ -18,6 +20,7 @@ import {
   remainingTurnSeconds,
   seatPosition,
   startHandMessage,
+  tablePlayerForViewer,
   toCall
 } from '../app/utils/onlineRoomUi'
 import type { OnlineRoomState } from '../app/types/online'
@@ -38,6 +41,31 @@ function roomState(playerCount = 2): OnlineRoomState {
   }
 }
 
+function waitingRoomState(): OnlineRoomState {
+  const state = roomState()
+  return {
+    ...state,
+    status: 'WAITING',
+    pokerTable: { ...state.pokerTable, status: 'WAITING', currentHand: null }
+  }
+}
+
+function finishedRoomState(): OnlineRoomState {
+  const state = roomState()
+  const tablePlayers = state.pokerTable.players.map((player, index) => ({ ...player, stack: index === 0 ? 995 : 1005, ready: false }))
+  const hand = state.pokerTable.currentHand!
+  return {
+    ...state,
+    status: 'WAITING',
+    pokerTable: {
+      ...state.pokerTable,
+      status: 'WAITING',
+      players: tablePlayers,
+      currentHand: { ...hand, street: 'FINISHED', pot: 15, players: hand.players.map(player => ({ ...player, stack: player.playerId === 'p1' ? 995 : 990 })) }
+    }
+  }
+}
+
 test('Table route source exists without changing the HOME rooms page', () => {
   const route = resolve(process.cwd(), 'app/pages/online/[code].vue')
   const source = readFileSync(route, 'utf8')
@@ -53,6 +81,26 @@ test('ROOM_STATE safe snapshot contains players', () => {
   const state = roomState()
   assert.equal(state.pokerTable.players.length, 2)
   assert.equal(isSafeRoomState(state), true)
+})
+
+test('waiting membership comes from table players before the first hand', () => {
+  const state = waitingRoomState()
+  assert.equal(state.pokerTable.currentHand, null)
+  assert.equal(tablePlayerForViewer(state.pokerTable, 'p1')?.playerId, 'p1')
+  assert.equal(isPostHandWaitingState(state), true)
+})
+
+test('both seated players remain eligible for ready controls before the first hand', () => {
+  const state = waitingRoomState()
+  assert.equal(tablePlayerForViewer(state.pokerTable, 'p1')?.ready, true)
+  assert.equal(tablePlayerForViewer(state.pokerTable, 'p2')?.ready, true)
+})
+
+test('first-hand start eligibility is represented by the waiting table state', () => {
+  const state = waitingRoomState()
+  assert.equal(state.ownerId, 'p1')
+  assert.equal(state.pokerTable.players.filter(player => player.ready && player.connected && !player.sittingOut && player.stack > 0).length, 2)
+  assert.match(readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8'), /v-if="canStart"[^>]*>Начать раздачу/)
 })
 
 test('two-player seat positions are distinct', () => {
@@ -90,6 +138,64 @@ test('current actor is identified by seat', () => {
 
 test('stack is preserved as public player data', () => {
   assert.equal(playerForViewer(roomState().pokerTable.currentHand, 'p1')?.stack, 900)
+})
+
+test('active hand still uses current-hand player data', () => {
+  const state = roomState()
+  assert.equal(playerForViewer(state.pokerTable.currentHand, 'p1')?.stack, 900)
+  assert.equal(displayHand(state.pokerTable.currentHand)?.street, 'FLOP')
+})
+
+test('finished hand is treated as post-hand waiting', () => {
+  const state = finishedRoomState()
+  assert.equal(isPostHandWaitingState(state), true)
+  assert.equal(displayHand(state.pokerTable.currentHand), null)
+})
+
+test('finished state uses authoritative table-level stacks', () => {
+  const state = finishedRoomState()
+  assert.equal(tablePlayerForViewer(state.pokerTable, 'p2')?.stack, 1005)
+  assert.equal(state.pokerTable.currentHand?.players.find(player => player.playerId === 'p2')?.stack, 990)
+})
+
+test('finished presentation hides stale hand stack and active pot', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
+  assert.match(source, /displayHand\(hand\.value\)/)
+  assert.match(source, /visibleHand(?:\?\.|\.)pot/)
+  assert.match(source, /visibleHand\?\.players\.find\(item => item\.playerId === player\.playerId\)\?\.stack \?\? player\.stack/)
+  assert.equal(displayHand(finishedRoomState().pokerTable.currentHand), null)
+})
+
+test('ready and next-hand controls remain available after settlement', () => {
+  const state = finishedRoomState()
+  assert.equal(tablePlayerForViewer(state.pokerTable, 'p1')?.ready, false)
+  assert.equal(state.ownerId, 'p1')
+  assert.equal(isPostHandWaitingState(state), true)
+})
+
+test('showdown remains active presentation rather than waiting', () => {
+  const state = roomState()
+  const showdown: OnlineRoomState = { ...state, pokerTable: { ...state.pokerTable, status: 'IN_HAND', currentHand: { ...state.pokerTable.currentHand!, street: 'SHOWDOWN' } } }
+  assert.equal(isPostHandWaitingState(showdown), false)
+  assert.equal(displayHand(showdown.pokerTable.currentHand)?.street, 'SHOWDOWN')
+})
+
+test('new ROOM_STATE replaces finished presentation with the next hand', () => {
+  const finished = finishedRoomState()
+  const next = roomState()
+  assert.equal(displayHand(finished.pokerTable.currentHand), null)
+  assert.equal(displayHand(next.pokerTable.currentHand)?.street, 'FLOP')
+})
+
+test('reconnect in waiting and finished states rebuilds membership from each snapshot', () => {
+  assert.equal(tablePlayerForViewer(waitingRoomState().pokerTable, 'p2')?.playerId, 'p2')
+  assert.equal(tablePlayerForViewer(finishedRoomState().pokerTable, 'p2')?.playerId, 'p2')
+})
+
+test('public and private rooms share the same lifecycle helpers', () => {
+  const privateWaiting: OnlineRoomState = { ...waitingRoomState(), visibility: 'PRIVATE' }
+  assert.equal(tablePlayerForViewer(privateWaiting.pokerTable, 'p1')?.playerId, 'p1')
+  assert.equal(isPostHandWaitingState(privateWaiting), true)
 })
 
 test('connected status is preserved in table player data', () => {

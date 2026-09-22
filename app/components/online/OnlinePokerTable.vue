@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { OnlineAction, OnlineConnectionStatus, OnlineRoomState } from '~/types/online'
-import { cardIsRed, cardLabel, formatTurnSeconds, isViewerActor, ownHoleCards, playerForViewer, remainingTurnSeconds, seatPosition, toCall } from '~/utils/onlineRoomUi'
+import { cardIsRed, cardLabel, displayHand, formatTurnSeconds, isPostHandWaitingState, isViewerActor, ownHoleCards, playerForViewer, remainingTurnSeconds, seatPosition, tablePlayerForViewer, toCall } from '~/utils/onlineRoomUi'
 
 const props = defineProps<{
   state: OnlineRoomState
@@ -27,17 +27,19 @@ const amount = ref<number | null>(null)
 let countdownTimer: ReturnType<typeof setInterval> | undefined
 
 const hand = computed(() => props.state.pokerTable.currentHand)
+const visibleHand = computed(() => displayHand(hand.value))
+const tableViewer = computed(() => tablePlayerForViewer(props.state.pokerTable, props.viewerId))
 const viewer = computed(() => playerForViewer(hand.value, props.viewerId))
 const viewerIsActor = computed(() => isViewerActor(hand.value, props.viewerId))
 const canAct = computed(() => viewerIsActor.value && props.connectionStatus === 'connected')
 const viewerToCall = computed(() => toCall(hand.value, props.viewerId))
 const isPending = computed(() => Boolean(props.pendingActionId))
-const deadlineSeconds = computed(() => remainingTurnSeconds(hand.value?.turnDeadlineAt ?? null, now.value))
-const actor = computed(() => hand.value?.players.find(player => player.seat === hand.value?.currentActor) ?? null)
-const ownCards = computed(() => ownHoleCards(hand.value, props.viewerId))
+const deadlineSeconds = computed(() => remainingTurnSeconds(visibleHand.value?.turnDeadlineAt ?? null, now.value))
+const actor = computed(() => visibleHand.value?.players.find(player => player.seat === visibleHand.value?.currentActor) ?? null)
+const ownCards = computed(() => ownHoleCards(visibleHand.value, props.viewerId))
 const callAmount = computed(() => Math.min(viewerToCall.value, viewer.value?.stack ?? 0))
 const maxTargetAmount = computed(() => (viewer.value?.streetContribution ?? 0) + (viewer.value?.stack ?? 0))
-const isWaiting = computed(() => props.state.pokerTable.status === 'WAITING' && !hand.value)
+const isWaiting = computed(() => isPostHandWaitingState(props.state))
 
 watch(() => [props.state.pokerTable.stateVersion, hand.value?.currentActor, hand.value?.street], () => {
   amount.value = null
@@ -69,7 +71,7 @@ function connectionLabel(status: OnlineConnectionStatus): string {
 }
 
 function cardBacks(playerId: string): boolean {
-  return Boolean(hand.value && hand.value.street !== 'SHOWDOWN' && hand.value.street !== 'FINISHED' && playerId !== props.viewerId && hand.value.players.find(player => player.playerId === playerId)?.status === 'ACTIVE')
+  return Boolean(visibleHand.value && visibleHand.value.street !== 'SHOWDOWN' && playerId !== props.viewerId && visibleHand.value.players.find(player => player.playerId === playerId)?.status === 'ACTIVE')
 }
 </script>
 
@@ -92,15 +94,15 @@ function cardBacks(playerId: string): boolean {
     <section class="table-wrap" aria-label="Покерный стол">
       <div class="felt">
         <div class="table-meta">
-          <span v-if="hand">{{ hand.street }}</span>
+          <span v-if="visibleHand">{{ visibleHand.street }}</span>
           <span v-else>Ожидание игроков</span>
-          <strong v-if="hand">Банк {{ hand.pot }}</strong>
+          <strong v-if="visibleHand">Банк {{ visibleHand.pot }}</strong>
         </div>
         <div class="board" aria-label="Общие карты">
-          <span v-for="(card, index) in hand?.board || []" :key="`${card.rank}-${card.suit}-${index}`" class="card" :class="{ 'card--red': cardIsRed(card) }">{{ cardLabel(card) }}</span>
-          <span v-if="!hand?.board.length" class="board-empty">Общие карты появятся здесь</span>
+          <span v-for="(card, index) in visibleHand?.board || []" :key="`${card.rank}-${card.suit}-${index}`" class="card" :class="{ 'card--red': cardIsRed(card) }">{{ cardLabel(card) }}</span>
+          <span v-if="!visibleHand?.board.length" class="board-empty">Общие карты появятся здесь</span>
         </div>
-        <div v-if="hand" class="pot-pill">POT {{ hand.pot }}</div>
+        <div v-if="visibleHand" class="pot-pill">POT {{ visibleHand.pot }}</div>
         <div class="players" aria-label="Игроки">
           <article
             v-for="(player, index) in state.pokerTable.players"
@@ -108,22 +110,22 @@ function cardBacks(playerId: string): boolean {
             class="player-seat"
             :class="{
               'player-seat--self': player.playerId === viewerId,
-              'player-seat--actor': hand?.currentActor === player.seat,
+              'player-seat--actor': visibleHand?.currentActor === player.seat,
               'player-seat--offline': !player.connected,
-              'player-seat--folded': hand?.players.find(item => item.playerId === player.playerId)?.status === 'FOLDED'
+              'player-seat--folded': visibleHand?.players.find(item => item.playerId === player.playerId)?.status === 'FOLDED'
             }"
             :style="seatPosition(index, state.pokerTable.players.length)"
           >
             <div class="avatar" aria-hidden="true">{{ player.seat }}</div>
             <div class="player-info">
               <strong>{{ player.playerId === viewerId ? 'Вы' : `Игрок ${player.seat}` }}</strong>
-              <span>{{ hand?.players.find(item => item.playerId === player.playerId)?.stack ?? player.stack }} фишек</span>
+              <span>{{ visibleHand?.players.find(item => item.playerId === player.playerId)?.stack ?? player.stack }} фишек</span>
               <small v-if="!player.connected">Отключён</small>
-              <small v-else-if="hand?.players.find(item => item.playerId === player.playerId)" class="player-status">{{ statusLabel(hand?.players.find(item => item.playerId === player.playerId)?.status || '') }}</small>
+              <small v-else-if="visibleHand?.players.find(item => item.playerId === player.playerId)" class="player-status">{{ statusLabel(visibleHand?.players.find(item => item.playerId === player.playerId)?.status || '') }}</small>
             </div>
-            <span v-if="hand?.dealerSeat === player.seat" class="dealer-marker" title="Кнопка дилера">D</span>
-            <div v-if="hand?.players.find(item => item.playerId === player.playerId)?.holeCards.length" class="mini-cards">
-              <span v-for="card in hand?.players.find(item => item.playerId === player.playerId)?.holeCards || []" :key="`${card.rank}-${card.suit}`" class="mini-card" :class="{ 'card--red': cardIsRed(card) }">{{ cardLabel(card) }}</span>
+            <span v-if="visibleHand?.dealerSeat === player.seat" class="dealer-marker" title="Кнопка дилера">D</span>
+            <div v-if="visibleHand?.players.find(item => item.playerId === player.playerId)?.holeCards.length" class="mini-cards">
+              <span v-for="card in visibleHand?.players.find(item => item.playerId === player.playerId)?.holeCards || []" :key="`${card.rank}-${card.suit}`" class="mini-card" :class="{ 'card--red': cardIsRed(card) }">{{ cardLabel(card) }}</span>
             </div>
             <div v-else-if="cardBacks(player.playerId)" class="mini-cards mini-cards--back" aria-label="Закрытые карты"><span class="mini-card">★</span><span class="mini-card">★</span></div>
           </article>
@@ -140,15 +142,15 @@ function cardBacks(playerId: string): boolean {
       <div class="control-row">
         <div>
           <span class="section-kicker">СТОЛ</span>
-          <strong v-if="hand?.currentActor !== null && hand?.currentActor !== undefined">Ход: {{ actor?.playerId === viewerId ? 'ваш' : `игрока ${actor?.seat}` }}</strong>
-          <strong v-else-if="hand">Раунд завершён</strong>
+          <strong v-if="visibleHand?.currentActor !== null && visibleHand?.currentActor !== undefined">Ход: {{ actor?.playerId === viewerId ? 'ваш' : `игрока ${actor?.seat}` }}</strong>
+          <strong v-else-if="visibleHand">Раунд завершён</strong>
           <strong v-else>Готовы начать</strong>
           <small v-if="deadlineSeconds !== null">Таймер {{ formatTurnSeconds(deadlineSeconds) }}</small>
         </div>
         <div class="blind-info">SB {{ state.pokerTable.smallBlind }} · BB {{ state.pokerTable.bigBlind }}</div>
       </div>
 
-      <div v-if="isWaiting && viewer" class="waiting-controls">
+      <div v-if="isWaiting && tableViewer" class="waiting-controls">
         <button v-if="canStart" class="btn" type="button" @click="emit('start')">Начать раздачу</button>
         <p v-else>Ожидаем готовых игроков и владельца стола.</p>
         <button class="btn btn--ghost" type="button" @click="emit('ready', !ready)">{{ ready ? 'Отменить готовность' : 'Я готов' }}</button>
@@ -158,16 +160,16 @@ function cardBacks(playerId: string): boolean {
       <div v-else-if="canAct" class="action-grid" aria-label="Действия игрока">
         <button v-if="viewerToCall === 0" class="btn" type="button" :disabled="isPending" @click="send('check')">Чек</button>
         <button v-else class="btn" type="button" :disabled="isPending" @click="send('call')">Колл · {{ callAmount }}</button>
-        <label v-if="hand?.currentBet === 0 || hand?.currentBet" class="amount-control">
+        <label v-if="visibleHand?.currentBet === 0 || visibleHand?.currentBet" class="amount-control">
           <span>Сумма</span>
         <input v-model.number="amount" class="input" type="number" min="1" :max="maxTargetAmount || 1" inputmode="numeric" placeholder="Итоговая ставка">
         </label>
-        <button class="btn" type="button" :disabled="isPending || amount === null" @click="send(hand?.currentBet ? 'raise' : 'bet')">{{ hand?.currentBet ? 'Рейз' : 'Бет' }}</button>
+        <button class="btn" type="button" :disabled="isPending || amount === null" @click="send(visibleHand?.currentBet ? 'raise' : 'bet')">{{ visibleHand?.currentBet ? 'Рейз' : 'Бет' }}</button>
         <button class="btn btn--danger" type="button" :disabled="isPending" @click="send('fold')">Фолд</button>
         <button class="btn btn--success" type="button" :disabled="isPending" @click="send('all-in')">Ва-банк · {{ viewer?.stack || 0 }}</button>
       </div>
       <p v-else-if="viewerIsActor && connectionStatus !== 'connected'" class="waiting">{{ connectionLabel(connectionStatus) }}</p>
-      <p v-else-if="hand" class="waiting">Ожидаем ход другого игрока.</p>
+      <p v-else-if="visibleHand" class="waiting">Ожидаем ход другого игрока.</p>
       <p v-else class="waiting">Подключите игрока к столу, чтобы начать.</p>
     </section>
 
