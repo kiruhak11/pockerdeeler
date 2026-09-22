@@ -4,8 +4,10 @@ import {
   applyAuthenticatedOnlineRoomAction,
   getAuthenticatedOnlineRoom,
   OnlineRoomApiError,
+  setAuthenticatedOnlineRoomPresence,
   startAuthenticatedOnlineRoomHand
 } from '../../../services/onlineRoomApiService'
+import { getOnlineRoomPresenceService, type OnlineRoomPresenceRegistration, type OnlineRoomPresenceService } from '../../../services/onlineRoomPresenceService'
 import { normalizeGlobalRoomCode } from '../../../services/roomCodeRegistryService'
 import {
   registerOnlineRoomPeer,
@@ -24,6 +26,8 @@ const ACCOUNT_COOKIE = 'poker_account'
 type AuthenticatedSocket = Readonly<{
   userId: string
   connection: OnlineRoomPeerConnection
+  presence?: OnlineRoomPresenceService
+  presenceRegistration?: OnlineRoomPresenceRegistration
 }>
 
 const sockets = new WeakMap<Peer, AuthenticatedSocket>()
@@ -93,6 +97,14 @@ async function sendFreshState(peer: Peer, socket: AuthenticatedSocket): Promise<
   }
 }
 
+function monitorPresenceLease(presence: OnlineRoomPresenceService, registration: OnlineRoomPresenceRegistration, roomCode: string): void {
+  presence.scheduleConnectionExpiry(registration, async () => {
+    presence.scheduleGraceExpiry(registration.roomId, registration.userId, async () => {
+      await setAuthenticatedOnlineRoomPresence(registration.userId, roomCode, false)
+    })
+  })
+}
+
 async function authenticate(peer: Peer): Promise<AuthenticatedSocket> {
   if (!originAllowed(peer)) {
     throw new OnlineRoomApiError('FORBIDDEN', 'Недопустимый Origin', 403)
@@ -108,11 +120,45 @@ async function authenticate(peer: Peer): Promise<AuthenticatedSocket> {
     throw new OnlineRoomApiError('NOT_FOUND', 'Комната не найдена', 404)
   }
   const result = await getAuthenticatedOnlineRoom(auth.userId, code)
-  const connection = await registerOnlineRoomPeer(code, result.room.roomId, auth.userId, peer)
-  const socket = { userId: auth.userId, connection } satisfies AuthenticatedSocket
-  sockets.set(peer, socket)
-  sendInitialOnlineRoomSnapshot(connection, result)
-  return socket
+  const seated = result.room.pokerTable.players.some(player => player.playerId === auth.userId)
+  const presence = seated ? getOnlineRoomPresenceService() : undefined
+  const registered = presence ? await presence.registerConnection(result.room.roomId, auth.userId) : undefined
+  try {
+    if (presence && registered) await setAuthenticatedOnlineRoomPresence(auth.userId, code, true)
+    const fresh = await getAuthenticatedOnlineRoom(auth.userId, code)
+    const connection = await registerOnlineRoomPeer(code, fresh.room.roomId, auth.userId, peer)
+    const socket = {
+      userId: auth.userId,
+      connection,
+      ...(presence && registered ? { presence, presenceRegistration: registered.registration } : {})
+    } satisfies AuthenticatedSocket
+    if (closed.has(peer)) {
+      unregisterOnlineRoomPeer(connection)
+      if (presence && registered) {
+        const released = await presence.unregisterConnection(registered.registration)
+        if (released.graceStarted) {
+          presence.scheduleGraceExpiry(connection.roomId, auth.userId, async () => {
+            await setAuthenticatedOnlineRoomPresence(auth.userId, code, false)
+          })
+        }
+      }
+      throw new Error('WebSocket closed during authentication.')
+    }
+    sockets.set(peer, socket)
+    if (presence && registered) monitorPresenceLease(presence, registered.registration, code)
+    sendInitialOnlineRoomSnapshot(connection, fresh)
+    return socket
+  } catch (error) {
+    if (presence && registered) {
+      const released = await presence.unregisterConnection(registered.registration).catch(() => undefined)
+      if (released?.graceStarted) {
+        presence.scheduleGraceExpiry(result.room.roomId, auth.userId, async () => {
+          await setAuthenticatedOnlineRoomPresence(auth.userId, code, false)
+        })
+      }
+    }
+    throw error
+  }
 }
 
 async function handleMessage(peer: Peer, message: Message, socket: AuthenticatedSocket): Promise<void> {
@@ -141,7 +187,13 @@ async function handleMessage(peer: Peer, message: Message, socket: Authenticated
     return
   }
   if (parsed.type === 'PING') {
-    peer.send(JSON.stringify({ version: ONLINE_ROOM_PROTOCOL_VERSION, type: 'PONG' }))
+    try {
+      if (socket.presence && socket.presenceRegistration) await socket.presence.refreshConnection(socket.presenceRegistration)
+      peer.send(JSON.stringify({ version: ONLINE_ROOM_PROTOCOL_VERSION, type: 'PONG' }))
+    } catch (error) {
+      sendOnlineRoomError(socket.connection, errorCode(error), errorMessage(error))
+      peer.close(1011, 'Состояние присутствия временно недоступно')
+    }
     return
   }
   if (parsed.type === 'REQUEST_STATE') {
@@ -207,7 +259,17 @@ export default defineWebSocketHandler({
     clearTimeout(timers.get(peer))
     closed.add(peer)
     const socket = sockets.get(peer)
-    if (socket) unregisterOnlineRoomPeer(socket.connection)
+    if (socket) {
+      unregisterOnlineRoomPeer(socket.connection)
+      if (socket.presence && socket.presenceRegistration) {
+        void socket.presence.unregisterConnection(socket.presenceRegistration).then(result => {
+          if (!result.graceStarted) return
+          socket.presence!.scheduleGraceExpiry(socket.connection.roomId, socket.userId, async () => {
+            await setAuthenticatedOnlineRoomPresence(socket.userId, socket.connection.roomCode, false)
+          })
+        }).catch(() => undefined)
+      }
+    }
     authenticating.delete(peer)
     sockets.delete(peer)
   }

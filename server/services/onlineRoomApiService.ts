@@ -7,6 +7,7 @@ import {
   leaveOnlineRoom,
   setOnlineRoomReady,
   setOnlineRoomSittingOut,
+  setOnlineRoomConnected,
   startOnlineRoomHand,
   toPlayerSafeOnlineRoomState,
   type ApplyOnlineRoomActionOptions,
@@ -26,6 +27,7 @@ import {
   type OnlineRoomRuntimeRecord
 } from './onlineRoomRuntimeStore'
 import { publishOnlineRoomChanged } from './onlineRoomRealtimeService'
+import { OnlineRoomPresenceError } from './onlineRoomPresenceService'
 
 const DEFAULT_OWNER_STACK = 1_000
 const DEFAULT_SMALL_BLIND = 5
@@ -173,6 +175,10 @@ function mapRuntimeError(error: unknown): OnlineRoomApiError {
     if (error.code === 'ACTION_CONFLICT') return new OnlineRoomApiError('ACTION_CONFLICT', 'This action id was already used with a different payload.', 409)
     if (error.code === 'ROOM_NOT_FOUND') return new OnlineRoomApiError('UNAVAILABLE', 'Online room runtime is unavailable.', 503)
     return new OnlineRoomApiError('UNAVAILABLE', 'Online room runtime is temporarily unavailable.', 503)
+  }
+  if (error instanceof OnlineRoomPresenceError) {
+    if (error.code === 'CONNECTION_NOT_FOUND') return new OnlineRoomApiError('CONFLICT', error.message, 409)
+    return new OnlineRoomApiError('UNAVAILABLE', error.message, 503)
   }
   if (error instanceof PokerTableError) {
     if (error.code === 'STALE_STATE_VERSION') return new OnlineRoomApiError('STALE_STATE', 'The table changed. Refresh and retry the action.', 409)
@@ -382,6 +388,34 @@ export async function getAuthenticatedOnlineRoom(userId: string, code: string, d
     fail('FORBIDDEN', 'Join the private room before viewing its state.', 403)
   }
   return Object.freeze({ room: toPlayerSafeOnlineRoomState(record.state, userId), concurrencyToken: issueConcurrencyToken(record.state.roomId, record.runtimeRevision) })
+}
+
+/**
+ * Reconciles transport presence with the authoritative seated-player metadata.
+ * The CAS update changes only the connected flag; a running hand is preserved.
+ */
+export async function setAuthenticatedOnlineRoomPresence(
+  userId: string,
+  code: string,
+  connected: boolean,
+  dependencies?: OnlineRoomApiDependencies
+): Promise<ApiOnlineRoomResult> {
+  requireUserId(userId)
+  if (typeof connected !== 'boolean') fail('BAD_REQUEST', 'Connected must be boolean.', 400)
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const current = await getAuthenticatedOnlineRoom(userId, code, dependencies)
+    const player = current.room.pokerTable.players.find(candidate => candidate.playerId === userId)
+    if (!player) fail('NOT_FOUND', 'The authenticated user is not seated in this room.', 404)
+    if (player.connected === connected) return current
+    try {
+      return await updateRoom(userId, code, { concurrencyToken: current.concurrencyToken }, state => setOnlineRoomConnected(state, userId, connected), dependencies)
+    } catch (error) {
+      const mapped = mapRuntimeError(error)
+      if (mapped.code === 'CONFLICT' && attempt < 2) continue
+      throw mapped
+    }
+  }
+  fail('CONFLICT', 'The room changed. Refresh and retry the presence update.', 409)
 }
 
 type RuntimeActionInput = Readonly<{
