@@ -10,6 +10,7 @@ import {
   displayHand,
   formatTurnSeconds,
   isSafeRoomState,
+  isShowdownWinningCard,
   isPostHandWaitingState,
   isViewerActor,
   onlineSocketUrl,
@@ -23,7 +24,7 @@ import {
   tablePlayerForViewer,
   toCall
 } from '../app/utils/onlineRoomUi'
-import type { OnlineRoomState } from '../app/types/online'
+import type { OnlineFinalizedHand, OnlineRoomState } from '../app/types/online'
 
 const card = (rank: 'A' | 'K', suit: 'spades' | 'hearts' = 'spades') => ({ rank, suit })
 function roomState(playerCount = 2): OnlineRoomState {
@@ -64,6 +65,15 @@ function finishedRoomState(): OnlineRoomState {
       currentHand: { ...hand, street: 'FINISHED', pot: 15, players: hand.players.map(player => ({ ...player, stack: player.playerId === 'p1' ? 995 : 990 })) }
     }
   }
+}
+
+function showdownFixture(type: OnlineFinalizedHand['type'] = 'CONTESTED'): OnlineFinalizedHand {
+  const players: OnlineFinalizedHand['players'] = [
+    { playerId: 'winner', seat: 1, status: 'ACTIVE', holeCards: [card('T', 'hearts'), card('T', 'spades')], category: 'three-of-a-kind', categoryRank: 3, label: 'Тройка', contributingCardIds: ['T:hearts', 'T:spades', 'T:diamonds'], payout: 150, returnedExcess: 0, winner: true },
+    { playerId: 'loser', seat: 2, status: 'ACTIVE', holeCards: [card('9', 'hearts'), card('9', 'spades')], category: 'one-pair', categoryRank: 1, label: 'Пара', contributingCardIds: ['9:hearts', '9:spades'], payout: 0, returnedExcess: 0, winner: false },
+    { playerId: 'side-winner', seat: 3, status: 'ALL_IN', holeCards: [card('A'), card('K')], category: 'one-pair', categoryRank: 1, label: 'Пара', contributingCardIds: ['A:spades', 'K:spades'], payout: 50, returnedExcess: 0, winner: true }
+  ]
+  return { handId: 'finished-hand', type, reason: type === 'UNCONTESTED' ? 'UNCONTESTED_FOLD' : 'SHOWDOWN', board: [card('T', 'diamonds')], players: type === 'UNCONTESTED' ? [{ ...players[0]!, holeCards: [], category: null, categoryRank: null, label: null, contributingCardIds: [] }] : players, pots: [], returnedExcess: [], totalPayout: 200, totalReturnedExcess: 0 }
 }
 
 test('Table route source exists without changing the HOME rooms page', () => {
@@ -412,9 +422,68 @@ test('finished ROOM_STATE renders server finalized showdown results', () => {
 
 test('finished presentation uses server contributing card ids for gold winners', () => {
   const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
-  assert.match(source, /contributingCardIds\.includes/)
+  assert.match(source, /isShowdownWinningCard\(finalizedHand\.value, id, playerId\)/)
   assert.match(source, /card--gold/)
   assert.doesNotMatch(source, /evaluateHand\(/)
+})
+
+test('showdown gold excludes a losing pair when the winner has trips', () => {
+  const result = showdownFixture()
+  assert.equal(isShowdownWinningCard(result, '9:hearts', 'loser'), false)
+  assert.equal(isShowdownWinningCard(result, 'T:hearts', 'winner'), true)
+})
+
+test('losing showdown cards remain revealed without gold highlight', () => {
+  const result = showdownFixture()
+  assert.equal(result.players.find(player => player.playerId === 'loser')?.holeCards.length, 2)
+  assert.equal(isShowdownWinningCard(result, '9:hearts', 'loser'), false)
+})
+
+test('every split-pot winner may highlight server-provided winning cards', () => {
+  const result = showdownFixture()
+  const split: OnlineFinalizedHand = { ...result, players: result.players.map(player => player.playerId === 'side-winner' ? { ...player, payout: 100 } : player) }
+  assert.equal(isShowdownWinningCard(split, 'T:hearts', 'winner'), true)
+  assert.equal(isShowdownWinningCard(split, 'A:spades', 'side-winner'), true)
+  assert.equal(isShowdownWinningCard(split, 'A:spades'), true)
+  assert.equal(isShowdownWinningCard(split, '9:hearts', 'loser'), false)
+  assert.equal(isShowdownWinningCard(split, '9:hearts'), false)
+})
+
+test('side-pot winner is highlighted by server winner flag, not client hand ranking', () => {
+  const result = showdownFixture()
+  assert.equal(isShowdownWinningCard(result, 'A:spades', 'side-winner'), true)
+  assert.equal(isShowdownWinningCard(result, '9:hearts', 'loser'), false)
+})
+
+test('uncontested payout never creates a gold combination highlight', () => {
+  const result = showdownFixture('UNCONTESTED')
+  assert.equal(isShowdownWinningCard(result, 'T:hearts', 'winner'), false)
+  assert.equal(result.players[0]?.holeCards.length, 0)
+})
+
+test('active hand still uses the viewer live contributing cards', () => {
+  const state = roomState()
+  assert.deepEqual(state.pokerTable.currentHand?.handStrength?.contributingCardIds, undefined)
+  assert.match(readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8'), /return Boolean\(handStrength\.value\?\.contributingCardIds\.includes\(id\)\)/)
+})
+
+test('seat and center metadata zones are separated for mobile and desktop breakpoints', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
+  const layouts = readFileSync(resolve(process.cwd(), 'app/utils/onlineRoomUi.ts'), 'utf8')
+  for (const count of [2, 4, 6]) {
+    const topSeat = Array.from({ length: count }, (_, index) => seatPosition(index, count)).find(position => position.top === '2%')
+    assert.ok(topSeat, `${count} player table has an explicitly top-anchored seat`)
+  }
+  assert.match(source, /'player-seat--top': seatPosition\(index, displayPlayers\.length\)\.top === '2%'/)
+  assert.match(source, /\.player-seat--top \{ transform: translate\(-50%, 0\); \}/)
+  assert.match(source, /\.table-meta \{[^}]*top: 40%/)
+  assert.ok(source.includes('.table-meta { top: 44%; } .board { top: 58%; }'))
+  assert.ok(source.includes('.table-meta { top: 35%; } .board { top: 52%; }'))
+  assert.match(source, /class="table-meta"[\s\S]*Банк/)
+  assert.doesNotMatch(source, /class="pot-pill"/)
+  assert.match(source, /text-overflow: ellipsis; white-space: nowrap/)
+  assert.match(source, /overflow: hidden/)
+  assert.doesNotMatch(layouts, /top: '14%'|top: '13%'/)
 })
 
 test('finished presentation keeps folded cards out of the finalized DTO and clears on next hand', () => {

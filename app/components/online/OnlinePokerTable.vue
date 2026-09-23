@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { OnlineAction, OnlineCard, OnlineConnectionStatus, OnlineHandPlayer, OnlineRoomState, OnlineTablePlayer, OnlineFinalizedShowdownPlayer } from '~/types/online'
-import { cardIsRed, cardLabel, displayHand, formatTurnSeconds, isPostHandWaitingState, isViewerActor, ownHoleCards, playerForViewer, remainingTurnSeconds, seatPosition, tablePlayerForViewer, toCall } from '~/utils/onlineRoomUi'
+import { cardIsRed, cardLabel, displayHand, formatTurnSeconds, isPostHandWaitingState, isShowdownWinningCard, isViewerActor, ownHoleCards, playerForViewer, remainingTurnSeconds, seatPosition, tablePlayerForViewer, toCall } from '~/utils/onlineRoomUi'
 
 const props = defineProps<{
   state: OnlineRoomState
@@ -99,8 +99,7 @@ function cardId(card: { rank: string; suit: string }): string {
 function isContributingCard(card: { rank: string; suit: string }, playerId?: string): boolean {
   const id = cardId(card)
   if (finalizedHand.value) {
-    const players = playerId ? [finalizedPlayer(playerId)].filter(Boolean) as OnlineFinalizedShowdownPlayer[] : finalizedWinners.value
-    return players.some(player => player.contributingCardIds.includes(id))
+    return isShowdownWinningCard(finalizedHand.value, id, playerId)
   }
   return Boolean(handStrength.value?.contributingCardIds.includes(id))
 }
@@ -161,7 +160,6 @@ function finalizedDisplayName(player: OnlineFinalizedShowdownPlayer): string {
           <span v-for="(card, index) in displayBoard" :key="`${card.rank}-${card.suit}-${index}`" class="card" :class="{ 'card--red': cardIsRed(card), 'card--gold': isContributingCard(card) }">{{ cardLabel(card) }}</span>
           <span v-if="!displayBoard.length" class="board-empty">Общие карты появятся здесь</span>
         </div>
-        <div v-if="visibleHand || finalizedHand" class="pot-pill">POT {{ displayPot }}</div>
         <div class="players" aria-label="Игроки">
           <article
             v-for="(player, index) in displayPlayers"
@@ -169,6 +167,7 @@ function finalizedDisplayName(player: OnlineFinalizedShowdownPlayer): string {
             class="player-seat"
             :class="{
               'player-seat--self': player.playerId === viewerId,
+              'player-seat--top': seatPosition(index, displayPlayers.length).top === '2%',
               'player-seat--actor': visibleHand?.currentActor === player.seat,
               'player-seat--offline': !player.connected,
               'player-seat--folded': statusPlayer(player.playerId)?.status === 'FOLDED',
@@ -278,18 +277,18 @@ function finalizedDisplayName(player: OnlineFinalizedShowdownPlayer): string {
 .notice { margin: 0; padding: .55rem .7rem; border-radius: .7rem; color: var(--accent-strong); background: rgba(242,180,81,.12); font-size: .85rem; }
 .table-wrap { min-height: 360px; }
 .felt { position: relative; isolation: isolate; min-height: 390px; overflow: hidden; border: 9px solid #70461e; border-radius: 48%; background: radial-gradient(ellipse at center, #1a744b 0%, #0c442d 60%, #092b20 100%); box-shadow: inset 0 0 0 3px rgba(255,255,255,.08), 0 18px 35px rgba(0,0,0,.28); }
-.table-meta { position: absolute; z-index: 1; top: 18%; left: 50%; transform: translateX(-50%); display: flex; gap: .55rem; align-items: center; color: rgba(255,255,255,.75); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; }
+.table-meta { position: absolute; z-index: 1; top: 40%; left: 50%; transform: translate(-50%, -50%); display: flex; gap: .55rem; align-items: center; max-width: calc(100% - 1.5rem); padding: .24rem .55rem; border: 1px solid rgba(255,255,255,.12); border-radius: 999px; background: rgba(7,35,24,.72); color: rgba(255,255,255,.8); font-size: .72rem; line-height: 1.2; white-space: nowrap; text-transform: uppercase; letter-spacing: .08em; }
 .table-meta strong { color: var(--accent-strong); letter-spacing: 0; text-transform: none; font-size: .9rem; }
-.board { position: absolute; z-index: 1; top: 38%; left: 50%; display: flex; justify-content: center; gap: .3rem; min-height: 52px; transform: translate(-50%, -50%); }
+.board { position: absolute; z-index: 1; top: 57%; left: 50%; display: flex; justify-content: center; gap: .3rem; min-height: 52px; transform: translate(-50%, -50%); }
 .card, .mini-card { display: grid; place-items: center; color: #15221b; background: #f7f4ea; border-radius: .38rem; font-weight: 700; box-shadow: 0 3px 8px rgba(0,0,0,.25); }
 .card { width: 38px; height: 52px; font-size: .85rem; }
 .card--large { width: 58px; height: 80px; font-size: 1.2rem; }
 .card--red { color: #bd3d38; }
 .card--gold { border-color: #f2b451; box-shadow: 0 0 0 2px rgba(242,180,81,.82), 0 0 15px rgba(242,180,81,.52); }
 .board-empty { color: rgba(255,255,255,.54); font-size: .72rem; white-space: nowrap; align-self: center; }
-.pot-pill { position: absolute; z-index: 1; top: 57%; left: 50%; transform: translateX(-50%); color: var(--accent-strong); font-weight: 700; font-size: .9rem; }
 .players { position: absolute; z-index: 4; inset: 0; pointer-events: none; }
 .player-seat { position: absolute; z-index: 5; width: 112px; min-width: 0; padding: .35rem; border: 1px solid rgba(255,255,255,.18); border-radius: .65rem; transform: translate(-50%, -50%); background: rgba(9,27,20,.94); font-size: .68rem; transition: border-color .15s, box-shadow .15s; pointer-events: auto; }
+.player-seat--top { transform: translate(-50%, 0); }
 .player-seat--self { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(242,180,81,.22); }
 .player-seat--actor { border-color: var(--accent-strong); box-shadow: 0 0 0 2px rgba(242,180,81,.3); }
 .player-seat--offline, .player-seat--folded, .player-seat--sitting-out { opacity: .55; }
@@ -298,7 +297,7 @@ function finalizedDisplayName(player: OnlineFinalizedShowdownPlayer): string {
 .player-info { min-width: 0; display: grid; gap: .05rem; }
 .player-info strong, .player-info span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .player-info span { color: var(--text-muted); }
-.player-info small { color: var(--text-muted); }
+.player-info small { overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; white-space: nowrap; }
 .player-info .player-bet { color: var(--accent-strong); font-weight: 700; }
 .player-info .player-action { color: #f5d88c; font-weight: 700; }
 .player-info .player-combination { color: #f2b451; font-weight: 700; }
@@ -335,6 +334,6 @@ function finalizedDisplayName(player: OnlineFinalizedShowdownPlayer): string {
 .action-grid button, .waiting-controls button { min-height: 46px; }
 .waiting { margin: 0; color: var(--text-muted); font-size: .85rem; }
 .reconnect-button { justify-self: center; }
-@media (min-width: 700px) { .online-table-page { padding: 1.2rem 1rem 2rem; } .felt { min-height: 520px; } .player-seat { width: 145px; padding: .5rem; font-size: .78rem; } .card { width: 48px; height: 68px; font-size: 1rem; } .card--large { width: 70px; height: 96px; } .action-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } .amount-control { grid-column: span 2; } }
-@media (max-width: 400px) { .felt { min-height: 345px; border-width: 6px; } .player-seat { width: 94px; font-size: .6rem; } .avatar { width: 21px; height: 21px; } .card { width: 31px; height: 44px; font-size: .72rem; } .board { gap: .18rem; } .seat-marker { min-width: 18px; font-size: .5rem; } }
+@media (min-width: 700px) { .online-table-page { padding: 1.2rem 1rem 2rem; } .felt { min-height: 520px; } .table-meta { top: 35%; } .board { top: 52%; } .player-seat { width: 145px; padding: .5rem; font-size: .78rem; } .card { width: 48px; height: 68px; font-size: 1rem; } .card--large { width: 70px; height: 96px; } .action-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } .amount-control { grid-column: span 2; } }
+@media (max-width: 400px) { .felt { min-height: 345px; border-width: 6px; } .table-meta { top: 44%; } .board { top: 58%; } .player-seat { width: 94px; font-size: .6rem; } .avatar { width: 21px; height: 21px; } .card { width: 31px; height: 44px; font-size: .72rem; } .board { gap: .18rem; } .seat-marker { min-width: 18px; font-size: .5rem; } }
 </style>

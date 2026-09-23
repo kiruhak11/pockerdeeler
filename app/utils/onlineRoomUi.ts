@@ -1,4 +1,4 @@
-import type { OnlineAction, OnlineCard, OnlineHand, OnlineHandPlayer, OnlineRoomState, OnlineTablePlayer } from '~/types/online'
+import type { OnlineAction, OnlineCard, OnlineFinalizedHand, OnlineHand, OnlineHandPlayer, OnlineRoomState, OnlineTablePlayer } from '~/types/online'
 
 export type OnlineSocketLocation = Readonly<{
   protocol: string
@@ -71,6 +71,14 @@ export function toCall(hand: OnlineRoomState['pokerTable']['currentHand'], viewe
   return player && hand ? Math.max(0, hand.currentBet - player.streetContribution) : 0
 }
 
+/** Show finalized gold only for cards belonging to a server-declared winner. */
+export function isShowdownWinningCard(hand: OnlineFinalizedHand | null | undefined, id: string, playerId?: string): boolean {
+  if (!hand || hand.type !== 'CONTESTED') return false
+  return hand.players.some(player =>
+    player.winner && (!playerId || player.playerId === playerId) && player.contributingCardIds.includes(id)
+  )
+}
+
 export function cardLabel(card: OnlineCard): string {
   const suit = { clubs: '♣', diamonds: '♦', hearts: '♥', spades: '♠' }[card.suit]
   return `${card.rank === 'T' ? '10' : card.rank}${suit}`
@@ -93,11 +101,11 @@ export function formatTurnSeconds(seconds: number | null): string {
 export function seatPosition(index: number, count: number): Readonly<{ left: string; top: string }> {
   const layouts: Record<number, readonly Readonly<{ left: string; top: string }>[]> = {
     1: [{ left: '50%', top: '86%' }],
-    2: [{ left: '50%', top: '86%' }, { left: '50%', top: '14%' }],
+    2: [{ left: '50%', top: '86%' }, { left: '50%', top: '2%' }],
     3: [{ left: '50%', top: '86%' }, { left: '16%', top: '26%' }, { left: '84%', top: '26%' }],
-    4: [{ left: '50%', top: '86%' }, { left: '13%', top: '52%' }, { left: '50%', top: '14%' }, { left: '87%', top: '52%' }],
+    4: [{ left: '50%', top: '86%' }, { left: '13%', top: '52%' }, { left: '50%', top: '2%' }, { left: '87%', top: '52%' }],
     5: [{ left: '50%', top: '86%' }, { left: '12%', top: '62%' }, { left: '20%', top: '20%' }, { left: '80%', top: '20%' }, { left: '88%', top: '62%' }],
-    6: [{ left: '50%', top: '87%' }, { left: '11%', top: '66%' }, { left: '15%', top: '28%' }, { left: '50%', top: '13%' }, { left: '85%', top: '28%' }, { left: '89%', top: '66%' }]
+    6: [{ left: '50%', top: '87%' }, { left: '11%', top: '66%' }, { left: '15%', top: '28%' }, { left: '50%', top: '2%' }, { left: '85%', top: '28%' }, { left: '89%', top: '66%' }]
   }
   const safeCount = Math.max(1, Math.min(6, Math.floor(count)))
   const layout = layouts[safeCount] ?? layouts[6]!
