@@ -35,6 +35,7 @@ function harness(overrides: {
   decision?: (id: string, code: string) => any
 } = {}) {
   const calls: Array<{ method: string; args: any[] }> = []
+  const logs: Array<{ event: string; fields: Readonly<Record<string, string | number | boolean>> }> = []
   const bots = overrides.bots ?? [bot('online-bot-01')]
   const rooms = overrides.rooms ?? []
   const adapter: OnlinePokerBotOrchestratorAdapter = {
@@ -67,9 +68,25 @@ function harness(overrides: {
   const orchestrator = new OnlinePokerBotOrchestrator({
     config: baseConfig(), adapter, lease,
     now: () => now, random: () => 0,
-    log: () => {}
+    log: (event, fields) => { logs.push({ event, fields }) }
   })
-  return { orchestrator, calls, setNow: (value: number) => { now = value }, adapter }
+  return { orchestrator, calls, logs, setNow: (value: number) => { now = value }, adapter }
+}
+
+function codedConflict() {
+  return Object.assign(new Error('stale room state'), { code: 'CONFLICT' })
+}
+
+function seatedRoom(botId: string, overrides: Record<string, unknown> = {}) {
+  const base = room({ ownerId: botId, ...overrides })
+  return {
+    ...base,
+    pokerTable: {
+      ...base.pokerTable,
+      players: [{ playerId: botId, seat: 1, stack: 1_000, connected: true, ready: false, sittingOut: false }],
+      seats: [{ seat: 1, playerId: botId }]
+    }
+  }
 }
 
 test('feature flag defaults off and disabled tick performs no bot or room work', async () => {
@@ -179,4 +196,212 @@ test('bot action uses strategy output, action id, table version and human-like d
   assert.match(action!.args[2].actionId, /^[0-9a-f-]{36}$/i)
   assert.equal(action!.args[2].expectedTableStateVersion, 7)
   assert.equal(action!.args[2].action.type, 'check')
+})
+
+test('stale ready conflict refreshes and treats an already-ready seat as complete', async () => {
+  const identity = bot('online-bot-01')
+  let current = seatedRoom(identity.id)
+  let readyCalls = 0
+  const h = harness({ bots: [identity], findRoom: () => 'AB2345', getRoom: () => current })
+  const adapter: OnlinePokerBotOrchestratorAdapter = {
+    ...h.adapter,
+    ready: async (...args) => {
+      readyCalls += 1
+      h.calls.push({ method: 'ready', args })
+      current = { ...current, pokerTable: { ...current.pokerTable, players: [{ ...current.pokerTable.players[0], ready: true }] } }
+      throw codedConflict()
+    }
+  }
+  let now = 1_000_000
+  const subject = new OnlinePokerBotOrchestrator({ config: baseConfig({ maxBotCreatedRooms: 0 }), adapter, lease: {
+    acquire: async botKey => ({ botKey, ownerId: 'w', token: '1', leaseKey: 'lease' }), renew: async () => true, release: async () => true
+  }, now: () => now, random: () => 0 })
+  await subject.tick()
+  now += 10_000
+  await subject.tick()
+  assert.equal(readyCalls, 1)
+  assert.equal(h.calls.filter(call => call.method === 'ready').length, 1)
+})
+
+test('stale ready conflict retries once after refresh when readiness is still needed', async () => {
+  const identity = bot('online-bot-01')
+  let current = seatedRoom(identity.id)
+  let readyCalls = 0
+  const h = harness({ bots: [identity], findRoom: () => 'AB2345', getRoom: () => current })
+  const adapter: OnlinePokerBotOrchestratorAdapter = {
+    ...h.adapter,
+    ready: async (...args) => {
+      readyCalls += 1
+      h.calls.push({ method: 'ready', args })
+      if (readyCalls === 1) throw codedConflict()
+      current = { ...current, pokerTable: { ...current.pokerTable, players: [{ ...current.pokerTable.players[0], ready: true }] } }
+      return { room: current } as any
+    }
+  }
+  let now = 1_000_000
+  const subject = new OnlinePokerBotOrchestrator({ config: baseConfig({ maxBotCreatedRooms: 0 }), adapter, lease: {
+    acquire: async botKey => ({ botKey, ownerId: 'w', token: '1', leaseKey: 'lease' }), renew: async () => true, release: async () => true
+  }, now: () => now, random: () => 0 })
+  await subject.tick()
+  now += 10_000
+  await subject.tick()
+  assert.equal(readyCalls, 2)
+  assert.equal(current.pokerTable.players[0].ready, true)
+})
+
+test('stale start conflict refreshes and does not start a hand twice', async () => {
+  const identity = bot('online-bot-01')
+  let current = room({ ownerId: identity.id, pokerTable: { ...room().pokerTable, stateVersion: 4, players: [
+    { playerId: identity.id, seat: 1, stack: 1_000, connected: true, ready: true, sittingOut: false },
+    { playerId: 'human', seat: 2, stack: 1_000, connected: true, ready: true, sittingOut: false }
+  ] } })
+  let starts = 0
+  const h = harness({ bots: [identity], findRoom: () => 'AB2345', getRoom: () => current })
+  const adapter: OnlinePokerBotOrchestratorAdapter = {
+    ...h.adapter,
+    startHand: async (...args) => {
+      starts += 1
+      h.calls.push({ method: 'start', args })
+      current = { ...current, pokerTable: { ...current.pokerTable, handSequence: current.pokerTable.handSequence + 1, currentHand: { handId: 'already-started', street: 'FINISHED' } } }
+      throw codedConflict()
+    }
+  }
+  let now = 1_000_000
+  const subject = new OnlinePokerBotOrchestrator({ config: baseConfig({ maxBotCreatedRooms: 0 }), adapter, lease: {
+    acquire: async botKey => ({ botKey, ownerId: 'w', token: '1', leaseKey: 'lease' }), renew: async () => true, release: async () => true
+  }, now: () => now, random: () => 0 })
+  await subject.tick()
+  now += 10_000
+  await subject.tick()
+  assert.equal(starts, 1)
+})
+
+test('lost lease during conflict recovery prevents retry', async () => {
+  const identity = bot('online-bot-01')
+  const current = seatedRoom(identity.id)
+  let calls = 0
+  const h = harness({ bots: [identity], findRoom: () => 'AB2345', getRoom: () => current })
+  const adapter: OnlinePokerBotOrchestratorAdapter = {
+    ...h.adapter,
+    ready: async (...args) => { calls += 1; h.calls.push({ method: 'ready', args }); throw codedConflict() }
+  }
+  let botRenewals = 0
+  let now = 1_000_000
+  const subject = new OnlinePokerBotOrchestrator({ config: baseConfig({ maxBotCreatedRooms: 0 }), adapter, lease: {
+    acquire: async botKey => ({ botKey, ownerId: 'w', token: '1', leaseKey: 'lease' }),
+    renew: async lease => lease.botKey === '__scheduler__' || ++botRenewals < 2,
+    release: async () => true
+  }, now: () => now, random: () => 0 })
+  await subject.tick()
+  now += 10_000
+  await subject.tick()
+  assert.equal(calls, 1)
+})
+
+test('leave conflict observes an already-released seat and never repeats cash-out', async () => {
+  const identity = { ...bot('online-bot-01'), balance: 0 }
+  let current = seatedRoom(identity.id)
+  current = { ...current, pokerTable: { ...current.pokerTable, players: [{ ...current.pokerTable.players[0], stack: 0 }] } }
+  let leaves = 0
+  const h = harness({ bots: [identity], findRoom: () => 'AB2345', getRoom: () => current })
+  const adapter: OnlinePokerBotOrchestratorAdapter = {
+    ...h.adapter,
+    leave: async (...args) => {
+      leaves += 1
+      h.calls.push({ method: 'leave', args })
+      current = { ...current, pokerTable: { ...current.pokerTable, players: [] } }
+      throw codedConflict()
+    }
+  }
+  const subject = new OnlinePokerBotOrchestrator({ config: baseConfig({ maxBotCreatedRooms: 0 }), adapter, lease: {
+    acquire: async botKey => ({ botKey, ownerId: 'w', token: '1', leaseKey: 'lease' }), renew: async () => true, release: async () => true
+  }, now: () => 1_010_000, random: () => 0 })
+  await subject.tick()
+  assert.equal(leaves, 1)
+})
+
+test('stale join refresh sees the existing seat and never debits twice', async () => {
+  const identity = bot('online-bot-01')
+  let current = room()
+  let joins = 0
+  let seated = false
+  const h = harness({ bots: [identity], rooms: [{ code: 'AB2345', playerCount: 1, maxPlayers: 6, status: 'WAITING', createdAt: new Date(0).toISOString(), startingStack: 1_000, smallBlind: 5, bigBlind: 10 }], getRoom: () => current })
+  const adapter: OnlinePokerBotOrchestratorAdapter = {
+    ...h.adapter,
+    joinRoom: async (...args) => {
+      joins += 1
+      h.calls.push({ method: 'join', args })
+      const joined = seatedRoom(identity.id)
+      seated = true
+      current = { ...current, pokerTable: joined.pokerTable }
+      throw codedConflict()
+    },
+    findSeatedRoom: async () => seated ? 'AB2345' : null
+  }
+  const subject = new OnlinePokerBotOrchestrator({ config: baseConfig({ maxBotCreatedRooms: 0 }), adapter, lease: {
+    acquire: async botKey => ({ botKey, ownerId: 'w', token: '1', leaseKey: 'lease' }), renew: async () => true, release: async () => true
+  }, random: () => 0 })
+  await subject.tick()
+  assert.equal(joins, 1)
+  assert.equal(h.calls.filter(call => call.method === 'join').length, 1)
+})
+
+function actionableBotRoom(botId: string) {
+  const own = { playerId: botId, seat: 1, stack: 1_000, streetContribution: 0, status: 'ACTIVE', holeCards: [{ rank: 'A', suit: 'spades' }, { rank: 'K', suit: 'spades' }] }
+  const hand = { handId: 'hand-action', street: 'PREFLOP', currentActor: 1, board: [], pot: 15, currentBet: 10, dealerSeat: 1, smallBlindSeat: 1, bigBlindSeat: 2, smallBlind: 5, bigBlind: 10, players: [own], turnDeadlineAt: 2_000_000 }
+  const base = room({ ownerId: botId, pokerTable: { ...room().pokerTable, stateVersion: 7, currentHand: hand, players: [{ playerId: botId, seat: 1, stack: 1_000, connected: true, ready: true, sittingOut: false }] } })
+  return base
+}
+
+test('bot action conflict refreshes and retries once with the same action id when turn remains legal', async () => {
+  const identity = bot('online-bot-01')
+  let current = actionableBotRoom(identity.id)
+  const actionIds: string[] = []
+  const h = harness({ bots: [identity], findRoom: () => 'AB2345', getRoom: () => current,
+    decision: () => ({ room: current, legalActions: ['check'], toCall: 0, minRaiseTo: 20, raiseReopened: true }) })
+  const adapter: OnlinePokerBotOrchestratorAdapter = {
+    ...h.adapter,
+    getDecisionSnapshot: async () => ({ room: current, legalActions: ['check'], toCall: 0, minRaiseTo: 20, raiseReopened: true } as any),
+    action: async (...args) => {
+      actionIds.push(args[2].actionId)
+      h.calls.push({ method: 'action', args })
+      if (actionIds.length === 2) current = { ...current, pokerTable: { ...current.pokerTable, currentHand: { ...current.pokerTable.currentHand, currentActor: 2 } } }
+      if (actionIds.length === 1) throw codedConflict()
+      return {}
+    }
+  }
+  let now = 1_000_000
+  const subject = new OnlinePokerBotOrchestrator({ config: baseConfig({ maxBotCreatedRooms: 0 }), adapter, lease: {
+    acquire: async botKey => ({ botKey, ownerId: 'w', token: '1', leaseKey: 'lease' }), renew: async () => true, release: async () => true
+  }, now: () => now, random: () => 0 })
+  await subject.tick()
+  now += 10_000
+  await subject.tick()
+  assert.equal(actionIds.length, 2)
+  assert.equal(actionIds[0], actionIds[1])
+})
+
+test('timeout winning the action race is treated as stale without retry', async () => {
+  const identity = bot('online-bot-01')
+  let current = actionableBotRoom(identity.id)
+  let actions = 0
+  const h = harness({ bots: [identity], findRoom: () => 'AB2345', getRoom: () => current,
+    decision: () => ({ room: current, legalActions: ['check'], toCall: 0, minRaiseTo: 20, raiseReopened: true }) })
+  const adapter: OnlinePokerBotOrchestratorAdapter = {
+    ...h.adapter,
+    action: async (...args) => {
+      actions += 1
+      h.calls.push({ method: 'action', args })
+      current = { ...current, pokerTable: { ...current.pokerTable, currentHand: { ...current.pokerTable.currentHand, currentActor: 2 } } }
+      throw codedConflict()
+    }
+  }
+  let now = 1_000_000
+  const subject = new OnlinePokerBotOrchestrator({ config: baseConfig({ maxBotCreatedRooms: 0 }), adapter, lease: {
+    acquire: async botKey => ({ botKey, ownerId: 'w', token: '1', leaseKey: 'lease' }), renew: async () => true, release: async () => true
+  }, now: () => now, random: () => 0 })
+  await subject.tick()
+  now += 10_000
+  await subject.tick()
+  assert.equal(actions, 1)
 })

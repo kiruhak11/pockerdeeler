@@ -170,6 +170,71 @@ export class OnlinePokerBotOrchestrator {
     this.schedulerLease = undefined
   }
 
+  /**
+   * Room CAS conflicts are expected when multiple bots (or a human) mutate the
+   * same room. Re-read once, treat an already-achieved goal as success, and
+   * retry at most once while the same lease token still owns the bot.
+   */
+  private async mutateWithConflictRecovery(
+    bot: PersistentBotIdentity,
+    code: string,
+    fence: OnlineRoomApiDependencies,
+    room: BotRoomSnapshot,
+    operation: string,
+    execute: (current: BotRoomSnapshot, retry?: boolean) => Promise<unknown>,
+    stillNeeded: (current: BotRoomSnapshot) => boolean
+  ): Promise<boolean> {
+    try {
+      await execute(room)
+      return true
+    } catch (error) {
+      if (!isConcurrencyConflict(error)) throw error
+      this.dependencies.log?.('bot_orchestrator_conflict', { botKey: bot.botKey, operation, code: errorCode(error) })
+    }
+
+    if (!await this.renewCurrentLease(bot, fence)) return false
+    const refreshed = await this.dependencies.adapter.getRoom(bot.id, code, fence)
+    if (!stillNeeded(refreshed.room)) {
+      this.dependencies.log?.('bot_orchestrator_conflict_resolved', { botKey: bot.botKey, operation, outcome: 'goal_already_met' })
+      return true
+    }
+    if (!await this.renewCurrentLease(bot, fence)) return false
+
+    try {
+      await execute(refreshed.room, true)
+      return true
+    } catch (error) {
+      if (!isConcurrencyConflict(error)) throw error
+      this.dependencies.log?.('bot_orchestrator_conflict', { botKey: bot.botKey, operation, code: errorCode(error), retry: 1 })
+      if (!await this.renewCurrentLease(bot, fence)) return false
+      const latest = await this.dependencies.adapter.getRoom(bot.id, code, fence)
+      if (!stillNeeded(latest.room)) {
+        this.dependencies.log?.('bot_orchestrator_conflict_resolved', { botKey: bot.botKey, operation, outcome: 'goal_already_met_after_retry' })
+        return true
+      }
+      this.dependencies.log?.('bot_orchestrator_conflict_deferred', { botKey: bot.botKey, operation })
+      return false
+    }
+    return true
+  }
+
+  private async renewCurrentLease(bot: PersistentBotIdentity, fence: OnlineRoomApiDependencies): Promise<boolean> {
+    const lease = this.leases.get(bot.botKey)
+    const expectedFence = fence.botFence
+    if (!lease || !expectedFence || lease.token !== expectedFence.token || lease.leaseKey !== expectedFence.key) {
+      this.leases.delete(bot.botKey)
+      this.dependencies.log?.('bot_lease_lost', { botKey: bot.botKey })
+      return false
+    }
+    const renewed = await this.dependencies.lease.renew(lease).catch(() => false)
+    if (!renewed) {
+      this.leases.delete(bot.botKey)
+      this.pending.delete(bot.id)
+      this.dependencies.log?.('bot_lease_lost', { botKey: bot.botKey })
+    }
+    return renewed
+  }
+
   private async findRoomOrCreate(bot: PersistentBotIdentity, rooms: readonly OnlineRoomLobbyEntry[], botIds: ReadonlySet<string>, fence: OnlineRoomApiDependencies): Promise<void> {
     const { config, adapter } = this.dependencies
     const candidates = [...rooms].filter(room => room.playerCount < room.maxPlayers).sort((a, b) => a.createdAt.localeCompare(b.createdAt))
@@ -185,8 +250,15 @@ export class OnlinePokerBotOrchestrator {
       const roomLimit = botOwnedRoom && !humanPresent ? 6 : config.maxBotsPerRoom
       if (botCount >= roomLimit) continue
       if (table.players.some(player => player.playerId === bot.id)) return
-      await adapter.joinRoom(bot.id, candidate.code, fence)
-      this.dependencies.log?.('bot_joined_public_room', { botKey: bot.botKey, roomCode: candidate.code })
+      await this.mutateWithConflictRecovery(bot, candidate.code, fence, publicRoom.room, 'join',
+        current => adapter.joinRoom(bot.id, candidate.code, fence),
+        current => current.visibility === 'PUBLIC'
+          && current.pokerTable.players.length < current.maxPlayers
+          && !current.pokerTable.players.some(player => player.playerId === bot.id)
+          && bot.balance >= candidate.startingStack)
+      if (await adapter.findSeatedRoom(bot.id).catch(() => null) === candidate.code) {
+        this.dependencies.log?.('bot_joined_public_room', { botKey: bot.botKey, roomCode: candidate.code })
+      }
       return
     }
 
@@ -217,7 +289,12 @@ export class OnlinePokerBotOrchestrator {
     if (!seated) { this.pending.delete(bot.id); return }
     const handInProgress = table.currentHand !== null && table.currentHand.street !== 'FINISHED'
     if ((!active || seated.stack <= 0) && !handInProgress) {
-      await adapter.leave(bot.id, code, room, fence)
+      const left = await this.mutateWithConflictRecovery(bot, code, fence, room, 'leave',
+        current => adapter.leave(bot.id, code, current, fence),
+        current => !current.pokerTable.currentHand || current.pokerTable.currentHand.street === 'FINISHED'
+          ? current.pokerTable.players.some(player => player.playerId === bot.id)
+          : false)
+      if (!left) return
       this.pending.delete(bot.id)
       this.dependencies.log?.('bot_left_room', { botKey: bot.botKey, roomCode: code })
       return
@@ -261,16 +338,36 @@ export class OnlinePokerBotOrchestrator {
       if (this.now() < work.dueAt) return
       const decision = work.decision!
       work.actionId ??= randomUUID()
-      try {
-        await adapter.action(bot.id, code, {
-          actionId: work.actionId,
-          expectedTableStateVersion: table.stateVersion,
-          action: { type: decision.type, ...(decision.amount === undefined ? {} : { amount: decision.amount }) }
-        }, fence)
-      } catch (error) {
-        this.dependencies.log?.('bot_action_rejected', { botKey: bot.botKey, code: errorCode(error) })
-        throw error
-      }
+      const acted = await this.mutateWithConflictRecovery(bot, code, fence, room, 'action',
+        async (current, retry) => {
+          let latestRoom = current
+          if (retry) {
+            const fresh = await adapter.getDecisionSnapshot(bot.id, code, fence)
+            latestRoom = fresh.room
+            const freshHand = latestRoom.pokerTable.currentHand
+            const freshOwn = freshHand?.players.find(player => player.playerId === bot.id)
+            if (!freshHand || freshHand.handId !== hand.handId || freshHand.currentActor !== seated.seat || !freshOwn
+              || !fresh.legalActions.includes(decision.type)) return
+            if (decision.type === 'raise' && (decision.amount === undefined || decision.amount < fresh.minRaiseTo
+              || decision.amount > freshOwn.streetContribution + freshOwn.stack)) return
+            if (decision.type === 'bet' && (decision.amount === undefined
+              || decision.amount > freshOwn.streetContribution + freshOwn.stack
+              || (decision.amount < freshHand.bigBlind && decision.amount !== freshOwn.streetContribution + freshOwn.stack))) return
+          }
+          const latestHand = latestRoom.pokerTable.currentHand
+          if (!latestHand || latestHand.handId !== hand.handId || latestHand.currentActor !== seated.seat) return
+          return adapter.action(bot.id, code, {
+            actionId: work.actionId!,
+            expectedTableStateVersion: latestRoom.pokerTable.stateVersion,
+            action: { type: decision.type, ...(decision.amount === undefined ? {} : { amount: decision.amount }) }
+          }, fence)
+        },
+        current => {
+          const latestHand = current.pokerTable.currentHand
+          return Boolean(latestHand && latestHand.handId === hand.handId && latestHand.currentActor === seated.seat
+            && latestHand.street !== 'FINISHED' && latestHand.street !== 'SHOWDOWN')
+        })
+      if (!acted) return
       this.pending.delete(bot.id)
       return
     }
@@ -280,7 +377,13 @@ export class OnlinePokerBotOrchestrator {
       const key = `ready:${table.stateVersion}`
       const work = this.scheduled(bot.id, key, 1_000 + this.random() * 3_000)
       if (this.now() < work.dueAt) return
-      await adapter.ready(bot.id, code, true, room, fence)
+      const readied = await this.mutateWithConflictRecovery(bot, code, fence, room, 'ready',
+        current => adapter.ready(bot.id, code, true, current, fence),
+        current => {
+          const currentSeat = current.pokerTable.players.find(player => player.playerId === bot.id)
+          return current.visibility === 'PUBLIC' && Boolean(currentSeat && !currentSeat.ready && currentSeat.stack > 0)
+        })
+      if (!readied) return
       this.pending.delete(bot.id)
       return
     }
@@ -290,7 +393,19 @@ export class OnlinePokerBotOrchestrator {
       const key = `start:${table.stateVersion}`
       const work = this.scheduled(bot.id, key, 1_500 + this.random() * 4_500)
       if (this.now() < work.dueAt) return
-      await adapter.startHand(bot.id, code, table.stateVersion, fence)
+      const observedHandSequence = table.handSequence
+      const observedHandId = table.currentHand?.handId ?? null
+      const started = await this.mutateWithConflictRecovery(bot, code, fence, room, 'start',
+        current => adapter.startHand(bot.id, code, current.pokerTable.stateVersion, fence),
+        current => {
+          const currentTable = current.pokerTable
+          if (currentTable.handSequence !== observedHandSequence
+            || (currentTable.currentHand?.handId ?? null) !== observedHandId) return false
+          const currentReady = currentTable.players.filter(player => player.ready && !player.sittingOut && player.stack > 0)
+          return current.visibility === 'PUBLIC' && current.ownerId === bot.id && currentReady.length >= 2
+            && (!currentTable.currentHand || currentTable.currentHand.street === 'FINISHED')
+        })
+      if (!started) return
       this.pending.delete(bot.id)
     }
     void botIds
@@ -314,6 +429,11 @@ export class OnlinePokerBotOrchestrator {
 function errorCode(error: unknown): string {
   const code = (error as { code?: unknown } | null)?.code
   return typeof code === 'string' ? code : 'OPERATION_FAILED'
+}
+
+function isConcurrencyConflict(error: unknown): boolean {
+  const code = errorCode(error)
+  return code === 'CONFLICT' || code === 'STALE_STATE' || code === 'STALE_STATE_VERSION'
 }
 
 export function botLeaseDependencies(lease: OnlinePokerBotLease): OnlineRoomApiDependencies {

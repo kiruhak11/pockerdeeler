@@ -36,6 +36,26 @@ const baselineWalletEntryIds = new Set<string>()
 const baselineOnlineRatingIds = new Set<string>()
 const baselineTableRatingIds = new Set<string>()
 let soakStartedAt = new Date()
+const operationFailures: string[] = []
+
+async function fundSoakWallet(userId: string, amount: bigint, grantKey: string): Promise<void> {
+  const wallet = await db.userWallet.findUniqueOrThrow({ where: { userId }, select: { id: true, balance: true } })
+  if (wallet.balance >= amount) return
+  await db.$transaction(async tx => {
+    const delta = amount - wallet.balance
+    await tx.userWallet.update({ where: { id: wallet.id }, data: { balance: amount, version: { increment: 1 } } })
+    await tx.user.update({ where: { id: userId }, data: { balance: Number(amount) } })
+    await tx.walletLedgerEntry.create({ data: {
+      walletId: wallet.id,
+      transferId: randomUUID(),
+      entryType: 'TEST_BOT_SOAK_FUNDING',
+      amount: delta,
+      balanceAfter: amount,
+      idempotencyKey: grantKey,
+      metadata: { testOnly: true, reason: 'stable multi-hand soak bankroll' }
+    } })
+  })
+}
 
 before(async () => {
   if (!isolated) return
@@ -48,6 +68,9 @@ before(async () => {
   }
   const walletIds = [...accountSnapshots.values()].map(item => item.walletId)
   for (const row of await db.walletLedgerEntry.findMany({ where: { walletId: { in: walletIds } }, select: { id: true } })) baselineWalletEntryIds.add(row.id)
+  // Explicit, test-only bankroll so stochastic hands do not turn a requested
+  // three-hand lifecycle check into a legitimate production bankruptcy case.
+  for (const bot of chosen) await fundSoakWallet(bot.id, 1_000_000_000n, `test-bot-soak-funding:${randomUUID()}:${bot.id}`)
   for (const row of await db.onlinePokerRatingEvent.findMany({ where: { userId: { in: chosen.map(bot => bot.id) } }, select: { id: true } })) baselineOnlineRatingIds.add(row.id)
   for (const row of await db.tableRatingEvent.findMany({ where: { userId: { in: chosen.map(bot => bot.id) } }, select: { id: true } })) baselineTableRatingIds.add(row.id)
   soakStartedAt = new Date()
@@ -98,6 +121,7 @@ after(async () => {
 
 function apiWithInfrastructure(bots?: readonly PersistentBotIdentity[], targetRoomCode?: () => string | null): OnlinePokerBotOrchestratorAdapter {
   const base = onlinePokerBotApiAdapter
+  const recordFailure = (operation: string, error: unknown) => operationFailures.push(`${operation}:${(error as { code?: unknown } | null)?.code ?? 'OPERATION_FAILED'}:${error instanceof Error ? error.message : 'unknown error'}`)
   return {
     ...base,
     cleanupBotCreatedRooms: (botIds, before) => base.cleanupBotCreatedRooms(botIds, before, infrastructure),
@@ -106,14 +130,23 @@ function apiWithInfrastructure(bots?: readonly PersistentBotIdentity[], targetRo
       const code = targetRoomCode()
       return code ? (await base.listPublicRooms()).filter(room => room.code === code) : []
     } } : {}),
-    getRoom: (userId, code, dependencies) => base.getRoom(userId, code, fenced(dependencies)),
-    getDecisionSnapshot: (userId, code, dependencies) => base.getDecisionSnapshot(userId, code, fenced(dependencies)),
+    getRoom: async (userId, code, dependencies) => {
+      try { return await base.getRoom(userId, code, fenced(dependencies)) }
+      catch (error) {
+        const metadata = await db.onlineRoom.findUnique({ where: { roomCode: code }, select: { id: true, status: true, ownerId: true } }).catch(() => null)
+        const reservation = metadata ? await db.onlineRoomPlayer.findFirst({ where: { roomId: metadata.id, userId }, select: { status: true } }).catch(() => null) : null
+        const runtimeState = metadata ? await runtime.get(metadata.id).catch(() => null) : null
+        recordFailure('getRoom', Object.assign(new Error(`${error instanceof Error ? error.message : 'unknown error'}; metadata=${metadata?.status ?? 'missing'}; owner=${metadata?.ownerId ?? 'missing'}; reservation=${reservation?.status ?? 'missing'}; runtime=${runtimeState ? 'present' : 'missing'}`), { code: (error as { code?: unknown } | null)?.code }))
+        throw error
+      }
+    },
+    getDecisionSnapshot: async (userId, code, dependencies) => { try { return await base.getDecisionSnapshot(userId, code, fenced(dependencies)) } catch (error) { recordFailure('decision', error); throw error } },
     createRoom: (userId, input, dependencies) => base.createRoom(userId, input, fenced(dependencies)),
-    joinRoom: (userId, code, dependencies) => base.joinRoom(userId, code, fenced(dependencies)),
-    ready: (userId, code, ready, room, dependencies) => base.ready(userId, code, ready, room, fenced(dependencies)),
-    startHand: (userId, code, version, dependencies) => base.startHand(userId, code, version, fenced(dependencies)),
-    action: (userId, code, input, dependencies) => base.action(userId, code, input, fenced(dependencies)),
-    leave: (userId, code, room, dependencies) => base.leave(userId, code, room, fenced(dependencies))
+    joinRoom: async (userId, code, dependencies) => { try { return await base.joinRoom(userId, code, fenced(dependencies)) } catch (error) { recordFailure('join', error); throw error } },
+    ready: async (userId, code, ready, room, dependencies) => { try { return await base.ready(userId, code, ready, room, fenced(dependencies)) } catch (error) { recordFailure('ready', error); throw error } },
+    startHand: async (userId, code, version, dependencies) => { try { return await base.startHand(userId, code, version, fenced(dependencies)) } catch (error) { recordFailure('start', error); throw error } },
+    action: async (userId, code, input, dependencies) => { try { return await base.action(userId, code, input, fenced(dependencies)) } catch (error) { recordFailure('action', error); throw error } },
+    leave: async (userId, code, room, dependencies) => { try { return await base.leave(userId, code, room, fenced(dependencies)) } catch (error) { recordFailure('leave', error); throw error } }
   }
 }
 
@@ -127,7 +160,7 @@ function makeOrchestrator(bots: readonly PersistentBotIdentity[], adapter: Onlin
     lease: leases,
     adapter,
     now: () => clock.value,
-    random: createSeededBotRandom(142_857),
+    random: createSeededBotRandom(Number(process.env.ONLINE_BOT_SOAK_SEED ?? 142_857)),
     log
   })
 }
@@ -148,9 +181,9 @@ async function prepareBotRoom(bots: readonly PersistentBotIdentity[], adapter = 
 async function playHandsThroughOrchestrator(bots: readonly PersistentBotIdentity[], targetHands: number, includeSecondWorker = false, startingStack = 5_000, smallBlind = 1, bigBlind = 2): Promise<void> {
   let targetRoomCode: string | null = null
   const adapter = apiWithInfrastructure(bots, () => targetRoomCode)
+  const runStartedAt = new Date()
   const { room, initialWallets } = await prepareBotRoom(bots, adapter, startingStack, smallBlind, bigBlind)
   targetRoomCode = room.roomCode
-  const runStartedAt = new Date()
   const clock = { value: Date.now() + 20_000 }
   const logEvents: string[] = []
   const actionIds = new Set<string>()
@@ -200,15 +233,20 @@ async function playHandsThroughOrchestrator(bots: readonly PersistentBotIdentity
     const table = current.room.pokerTable
     assert.equal(new Set(table.players.map(player => player.playerId)).size, table.players.length, 'duplicate seat detected')
     const ids = bots.map(bot => bot.id)
-    const accounts = await db.userWallet.findMany({ where: { userId: { in: ids } }, select: { userId: true, balance: true } })
+    const accounts = await db.userWallet.findMany({ where: { userId: { in: ids } }, select: { id: true, userId: true, balance: true } })
     const accountTotal = accounts.reduce((total, row) => total + row.balance, 0n)
+    const achievementRewards = await db.walletLedgerEntry.aggregate({
+      where: { walletId: { in: accounts.map(account => account.id) }, entryType: 'ACHIEVEMENT_REWARD', createdAt: { gte: runStartedAt } },
+      _sum: { amount: true }
+    })
+    const allowedSystemRewards = achievementRewards._sum.amount ?? 0n
     const inHand = new Set(table.currentHand?.players.map(player => player.playerId) ?? [])
     const tableOnlyStacks = table.players.filter(player => !inHand.has(player.playerId)).reduce((total, player) => total + BigInt(player.stack), 0n)
     const tableTotal = tableOnlyStacks + (table.currentHand
       ? table.currentHand.players.reduce((total, player) => total + BigInt(player.stack), 0n) + BigInt(table.currentHand.pot)
       : 0n)
-    const expectedTotal = [...initialWallets.values()].reduce((total, balance) => total + balance, 0n)
-    assert.equal(accountTotal + tableTotal, expectedTotal, `account + table + committed pot chips must be conserved (accounts=${accountTotal}; stacks=${table.players.map(player => player.stack).join(',')}; pot=${table.currentHand?.pot ?? 0}; handStacks=${table.currentHand?.players.map(player => player.stack).join(',') ?? 'none'}; expected=${expectedTotal})`)
+    const expectedTotal = [...initialWallets.values()].reduce((total, balance) => total + balance, 0n) + allowedSystemRewards
+    assert.equal(accountTotal + tableTotal, expectedTotal, `account + table + committed pot chips must be conserved outside explicitly recorded existing system rewards (accounts=${accountTotal}; stacks=${table.players.map(player => player.stack).join(',')}; pot=${table.currentHand?.pot ?? 0}; handStacks=${table.currentHand?.players.map(player => player.stack).join(',') ?? 'none'}; allowedAchievementRewards=${allowedSystemRewards}; expected=${expectedTotal})`)
     const rows = await db.onlinePokerRatingEvent.findMany({ where: { userId: { in: ids }, createdAt: { gte: runStartedAt } }, select: { handId: true }, distinct: ['handId'] })
     distinctHands = rows.length
     if (table.players.some(player => player.stack <= 0) && table.currentHand?.street === 'FINISHED' && table.players.filter(player => player.stack > 0).length < 2 && distinctHands < targetHands) break
@@ -253,34 +291,58 @@ test('three persistent bots complete a 100-hand public self-play soak', { skip: 
 })
 
 test('a registered human and bots complete public-room hands through the same engine', { skip: !isolated, timeout: 2 * 60_000 }, async () => {
+  operationFailures.length = 0
   const bots = await listOnlinePokerBots()
   const createdHuman = await registerUser({ username: `soakhuman${randomUUID().slice(0, 8)}`, password: 'test-only-123' })
   humanId = (createdHuman.user as { id: string }).id
+  await fundSoakWallet(humanId, 1_000_000_000n, `test-bot-soak-human-funding:${randomUUID()}:${humanId}`)
   let targetRoomCode: string | null = null
   const humanRoomBots = bots.slice(6, 8)
   const adapter = apiWithInfrastructure(humanRoomBots, () => targetRoomCode)
-  const { room } = await prepareBotRoom(humanRoomBots, adapter)
-  targetRoomCode = room.roomCode
-  await joinAuthenticatedOnlineRoom(humanId, room.roomCode, {}, infrastructure)
+  const participants = [humanId, ...humanRoomBots.map(bot => bot.id)]
+  const initialBalances = await db.userWallet.findMany({ where: { userId: { in: participants } }, select: { userId: true, balance: true } })
+  const initialTotal = initialBalances.reduce((total, wallet) => total + wallet.balance, 0n)
   const runStartedAt = new Date()
-  let safe = await getAuthenticatedOnlineRoom(humanId, room.roomCode, infrastructure)
-  await setAuthenticatedOnlineRoomReady(humanId, room.roomCode, { ready: true, concurrencyToken: safe.concurrencyToken }, infrastructure)
+  const createdRoom = await createAuthenticatedOnlineRoom(humanId, { visibility: 'PUBLIC', startingStack: 100_000_000, smallBlind: 1, bigBlind: 2 }, infrastructure)
+  roomIds.push(createdRoom.room.roomId)
+  const roomCode = createdRoom.room.roomCode
+  targetRoomCode = roomCode
+  for (const bot of humanRoomBots) await joinAuthenticatedOnlineRoom(bot.id, roomCode, {}, infrastructure)
+  const buyIns = await db.walletLedgerEntry.count({ where: { idempotencyKey: { startsWith: `online-buyin:${createdRoom.room.roomId}:` } } })
+  assert.equal(buyIns, 1 + humanRoomBots.length)
+  let safe = await getAuthenticatedOnlineRoom(humanId, roomCode, infrastructure)
+  await setAuthenticatedOnlineRoomReady(humanId, roomCode, { ready: true, concurrencyToken: safe.concurrencyToken }, infrastructure)
   const clock = { value: Date.now() + 20_000 }
   const lease = new OnlinePokerBotLeaseService({ redisUrl, keyPrefix: `${leasePrefix}${randomUUID()}:`, ownerId: randomUUID() })
   const events: string[] = []
-  const orchestrator = makeOrchestrator(humanRoomBots, adapter, lease, clock, (event, fields) => events.push(`${event}:${String(fields.code ?? '')}`))
+  const orchestrator = makeOrchestrator(humanRoomBots, adapter, lease, clock, (event, fields) => events.push(`${event}:${String(fields.operation ?? '')}:${String(fields.code ?? '')}`))
   let completed = 0
   let previousHands = 0
+  let terminalStackExhaustion = false
   for (let i = 0; i < 2_000 && completed < 3; i += 1) {
     await orchestrator.tick()
+    const rejected = events.filter(event => event.startsWith('bot_orchestrator_operation_rejected:'))
+    assert.deepEqual(rejected, [], `unexpected orchestrator operation errors: ${rejected.join(',')}; operations=${operationFailures.join(',')}`)
     clock.value += 10_000
-    safe = await getAuthenticatedOnlineRoom(humanId, room.roomCode, infrastructure)
+    safe = await getAuthenticatedOnlineRoom(humanId, roomCode, infrastructure)
+    if (safe.room.ownerId === humanId && (!safe.room.pokerTable.currentHand || safe.room.pokerTable.currentHand.street === 'FINISHED')) {
+      const humanSeat = safe.room.pokerTable.players.find(player => player.playerId === humanId)
+      if (humanSeat && !humanSeat.ready && humanSeat.stack > 0) {
+        await setAuthenticatedOnlineRoomReady(humanId, roomCode, { ready: true, concurrencyToken: safe.concurrencyToken }, infrastructure)
+        safe = await getAuthenticatedOnlineRoom(humanId, roomCode, infrastructure)
+      }
+      const readySeats = safe.room.pokerTable.players.filter(player => player.ready && !player.sittingOut && player.stack > 0)
+      if (readySeats.length >= 2) {
+        await startAuthenticatedOnlineRoomHand(humanId, roomCode, safe.room.pokerTable.stateVersion, infrastructure)
+        safe = await getAuthenticatedOnlineRoom(humanId, roomCode, infrastructure)
+      }
+    }
     assert.ok(safe.room.pokerTable.players.some(player => player.playerId === humanId), 'human seat must not be displaced by bot activity')
     const hand = safe.room.pokerTable.currentHand
     if (hand?.currentActor !== null && hand?.currentActor !== undefined) {
       const actor = hand.players.find(player => player.seat === hand.currentActor)
       if (actor?.playerId === humanId) {
-        const snapshot = await getOnlinePokerBotDecisionSnapshot(humanId, room.roomCode, infrastructure)
+        const snapshot = await getOnlinePokerBotDecisionSnapshot(humanId, roomCode, infrastructure)
         const own = snapshot.room.pokerTable.currentHand!.players.find(player => player.playerId === humanId)!
         const decision = decideBotAction({
           playerId: humanId,
@@ -301,15 +363,42 @@ test('a registered human and bots complete public-room hands through the same en
           legalActions: snapshot.legalActions,
           minRaiseTo: snapshot.minRaiseTo,
           raiseReopened: snapshot.raiseReopened
-        }, { skillTier: 'CASUAL', playStyle: 'BALANCED' }, createSeededBotRandom(i + 17))
-        await applyAuthenticatedOnlineRoomAction(humanId, room.roomCode, { actionId: randomUUID(), expectedTableStateVersion: safe.room.pokerTable.stateVersion, action: { type: decision.type, ...(decision.amount === undefined ? {} : { amount: decision.amount }) } }, infrastructure)
+        }, { skillTier: 'CASUAL', playStyle: 'BALANCED' }, createSeededBotRandom(Number(process.env.ONLINE_BOT_SOAK_SEED ?? 142_857) + i + 17))
+        await applyAuthenticatedOnlineRoomAction(humanId, roomCode, { actionId: randomUUID(), expectedTableStateVersion: safe.room.pokerTable.stateVersion, action: { type: decision.type, ...(decision.amount === undefined ? {} : { amount: decision.amount }) } }, infrastructure)
       }
     }
     const rows = await db.onlinePokerRatingEvent.findMany({ where: { userId: { in: humanRoomBots.map(bot => bot.id) }, createdAt: { gte: runStartedAt } }, select: { handId: true }, distinct: ['handId'] })
     completed = rows.length
     if (completed > previousHands) previousHands = completed
+    const walletRows = await db.userWallet.findMany({ where: { userId: { in: participants } }, select: { userId: true, balance: true } })
+    const accountTotal = walletRows.reduce((total, wallet) => total + wallet.balance, 0n)
+    const wallets = await db.userWallet.findMany({ where: { userId: { in: participants } }, select: { id: true } })
+    const achievementRewards = await db.walletLedgerEntry.aggregate({
+      where: { walletId: { in: wallets.map(wallet => wallet.id) }, entryType: 'ACHIEVEMENT_REWARD', createdAt: { gte: runStartedAt } },
+      _sum: { amount: true }
+    })
+    const allowedSystemRewards = achievementRewards._sum.amount ?? 0n
+    const inHand = new Set(safe.room.pokerTable.currentHand?.players.map(player => player.playerId) ?? [])
+    const tableTotal = safe.room.pokerTable.players.filter(player => !inHand.has(player.playerId)).reduce((total, player) => total + BigInt(player.stack), 0n)
+      + (safe.room.pokerTable.currentHand
+        ? safe.room.pokerTable.currentHand.players.reduce((total, player) => total + BigInt(player.stack), 0n) + BigInt(safe.room.pokerTable.currentHand.pot)
+        : 0n)
+    if (accountTotal + tableTotal !== initialTotal + allowedSystemRewards) {
+      const walletIds = await db.userWallet.findMany({ where: { userId: { in: participants } }, select: { id: true } })
+      const ledger = await db.walletLedgerEntry.findMany({ where: { walletId: { in: walletIds.map(wallet => wallet.id) } }, orderBy: { createdAt: 'desc' }, take: 20, select: { entryType: true, amount: true, idempotencyKey: true } })
+      assert.fail(`human+bot account/table/pot chips must be conserved outside explicitly recorded existing system rewards (initial=${initialBalances.map(wallet => `${wallet.userId}:${wallet.balance}`).join('|')}; accounts=${walletRows.map(wallet => `${wallet.userId}:${wallet.balance}`).join('|')}; table=${tableTotal}; expected=${initialTotal + allowedSystemRewards}; allowedAchievementRewards=${allowedSystemRewards}; ledger=${ledger.map(entry => `${entry.entryType}:${entry.amount}:${entry.idempotencyKey}`).join('|')}; seats=${safe.room.pokerTable.players.map(player => `${player.playerId}:${player.stack}`).join('|')}; handStacks=${safe.room.pokerTable.currentHand?.players.map(player => `${player.playerId}:${player.stack}`).join('|') ?? 'none'}; pot=${safe.room.pokerTable.currentHand?.pot ?? 0})`)
+    }
+    const finished = !safe.room.pokerTable.currentHand || safe.room.pokerTable.currentHand.street === 'FINISHED'
+    const fundedSeats = safe.room.pokerTable.players.filter(player => player.stack > 0)
+    if (finished && fundedSeats.length < 2 && completed < 3) {
+      terminalStackExhaustion = true
+      break
+    }
   }
-  assert.ok(completed >= 3, `human + bot hands completed: ${completed}; room=${safe.room.status}; players=${safe.room.pokerTable.players.map(player => `${player.playerId}:${player.ready}:${player.stack}`).join('|')}; hand=${safe.room.pokerTable.currentHand?.street ?? 'none'}:${safe.room.pokerTable.currentHand?.currentActor ?? 'none'}; events=${events.join(',')}`)
+  assert.ok(completed >= 3 || terminalStackExhaustion, `human + bot hands completed: ${completed}; seed=${process.env.ONLINE_BOT_SOAK_SEED ?? 142_857}; room=${safe.room.status}; players=${safe.room.pokerTable.players.map(player => `${player.playerId}:${player.ready}:${player.stack}`).join('|')}; hand=${safe.room.pokerTable.currentHand?.street ?? 'none'}:${safe.room.pokerTable.currentHand?.currentActor ?? 'none'}; events=${events.join(',')}; operationFailures=${operationFailures.join(',')}`)
+  if (terminalStackExhaustion) console.log(`human+bot soak ended legally after ${completed} hands: fewer than two players retained table chips; seed=${process.env.ONLINE_BOT_SOAK_SEED ?? 142_857}`)
+  else console.log(`human+bot soak completed ${completed} hands; seed=${process.env.ONLINE_BOT_SOAK_SEED ?? 142_857}`)
+  if (operationFailures.length) console.log(`human+bot soak handled operation conflicts; seed=${process.env.ONLINE_BOT_SOAK_SEED ?? 142_857}; operations=${operationFailures.join(',')}`)
   await orchestrator.shutdown()
   await lease.disconnect()
   void events
