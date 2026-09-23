@@ -32,6 +32,15 @@ function store(): OnlineRoomRuntimeStore {
   return new OnlineRoomRuntimeStore({ redis: redis!, keyPrefix, ttlSeconds: 60 })
 }
 
+async function deleteNamespaceKeys(prefix: string): Promise<void> {
+  let cursor = '0'
+  do {
+    const [nextCursor, keys] = await redis!.scan(cursor, 'MATCH', `${prefix}*`, 'COUNT', 200)
+    if (keys.length > 0) await redis!.del(...keys)
+    cursor = nextCursor
+  } while (cursor !== '0')
+}
+
 function room(options: { ownerStack?: number; secondStack?: number } = {}): OnlineRoomState {
   let state = createOnlineRoom({
     roomId: randomUUID(),
@@ -65,16 +74,12 @@ function withHand(state: OnlineRoomState, hand: NonNullable<OnlineRoomState['pok
 test.before(async () => {
   if (isolated) {
     await redis!.connect()
-    await redis!.flushdb()
   }
 })
 
 test.after(async () => {
   if (isolated) {
-    for (const prefix of prefixes) {
-      const keys = await redis!.keys(`${prefix}*`)
-      if (keys.length > 0) await redis!.del(...keys)
-    }
+    for (const prefix of prefixes) await deleteNamespaceKeys(prefix)
     redis!.disconnect()
   }
 })
@@ -124,6 +129,7 @@ test('a FINISHED hand still has no TTL while table stacks remain', { skip: !isol
 
 test('startup removes legacy TTLs from funded runtime keys', { skip: !isolated }, async () => {
   const keyPrefix = `pocker:test:online-room-legacy-ttl:${randomUUID()}:`
+  prefixes.push(keyPrefix)
   const funded = room()
   const first = new OnlineRoomRuntimeStore({ redis: redis!, keyPrefix, ttlSeconds: 60 })
   await first.create(funded)
