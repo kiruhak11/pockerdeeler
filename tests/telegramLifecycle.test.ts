@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { PrismaClient } from '@prisma/client'
+import { prisma } from '../server/db/client'
 import { enqueueExpiredPremiumEvents, premiumExpirationEventKey, seasonFinishedEventKey, seasonStartedEventKey } from '../server/services/telegramLifecycleService'
 import { ensureCurrentSeason, finalizeSeason } from '../server/services/seasonService'
 import { deliverTelegramUserEvents, notifyUserTelegram } from '../server/services/notificationService'
@@ -60,20 +61,44 @@ test('season finalization queues one finish and one start event for each user', 
   const db = new PrismaClient()
   const user = await db.user.create({ data: { username: `season_lifecycle_${Date.now()}`, passwordHash: 'test' } })
   await db.userWallet.create({ data: { userId: user.id, balance: 50_000n } })
-  let seasonNumbers: number[] = []
+  const preexistingSeason = await db.season.findFirst({ where: { status: 'active' }, orderBy: { number: 'desc' }, select: { number: true } })
+  let fixtureSeasonNumber: number | undefined
+  const originalTransaction = prisma.$transaction.bind(prisma)
+  class RollbackSeasonFinalization extends Error {
+    constructor(readonly result: Awaited<ReturnType<typeof finalizeSeason>>) {
+      super('Rollback test-only season finalization')
+    }
+  }
+
   try {
     const current = await ensureCurrentSeason()
-    const result = await finalizeSeason()
-    seasonNumbers = [current.number, result.nextSeasonNumber]
-    const events = await db.telegramUserEvent.findMany({ where: { userId: user.id }, orderBy: { eventKey: 'asc' } })
+    if (!preexistingSeason) fixtureSeasonNumber = current.number
+
+    ;(prisma as any).$transaction = (operation: any, options?: any) => originalTransaction(async tx => {
+      const result = await operation(tx)
+      const events = await tx.telegramUserEvent.findMany({ where: { userId: user.id }, orderBy: { eventKey: 'asc' } })
+      assert.equal(result.seasonNumber, current.number)
+      assert.equal(events.length, 2)
+      assert.deepEqual(events.map(event => event.category), ['seasons', 'seasons'])
+      assert.equal(new Set(events.map(event => event.eventKey)).size, 2)
+      assert.match(events.map(event => event.text).join('\n'), /завершён|Начался новый сезон/)
+      throw new RollbackSeasonFinalization(result)
+    }, options)
+
+    let result: Awaited<ReturnType<typeof finalizeSeason>> | undefined
+    try {
+      await finalizeSeason()
+      assert.fail('The test transaction should roll back after verifying queued events.')
+    } catch (error) {
+      if (!(error instanceof RollbackSeasonFinalization)) throw error
+      result = error.result
+    }
+    assert.ok(result)
     assert.equal(result.seasonNumber, current.number)
-    assert.equal(events.length, 2)
-    assert.deepEqual(events.map(event => event.category), ['seasons', 'seasons'])
-    assert.equal(new Set(events.map(event => event.eventKey)).size, 2)
-    assert.match(events.map(event => event.text).join('\n'), /завершён|Начался новый сезон/)
   } finally {
+    ;(prisma as any).$transaction = originalTransaction
     await db.user.delete({ where: { id: user.id } })
-    if (seasonNumbers.length) await db.season.deleteMany({ where: { number: { in: seasonNumbers } } })
+    if (fixtureSeasonNumber !== undefined) await db.season.deleteMany({ where: { number: fixtureSeasonNumber } })
     await db.$disconnect()
   }
 })
