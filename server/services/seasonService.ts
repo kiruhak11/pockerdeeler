@@ -151,9 +151,10 @@ export async function finalizeSeason() {
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended('season-transition', 0))::text`
     const activeRoom = await tx.room.findFirst({ where: { status: { notIn: ['lobby', 'finished', 'cancelled'] } }, select: { id: true } })
     const unsettledPlayer = await tx.player.findFirst({ where: { balanceSettled: false }, select: { id: true } })
+    const onlineFunds = await tx.onlineRoomPlayer.findFirst({ where: { status: { in: ['RESERVING', 'ACTIVE', 'CASH_OUT_PENDING'] } }, select: { id: true } })
     const liveCrash = await tx.crashRound.findFirst({ where: { phase: { in: ['betting', 'flying'] } }, select: { id: true } })
     const liveMines = await tx.miniGameSession.findFirst({ where: { status: 'ACTIVE' }, select: { id: true } })
-    if (activeRoom || unsettledPlayer || liveCrash || liveMines) throw createError({ statusCode: 409, statusMessage: 'Сезон нельзя завершить, пока есть активная игра или нерассчитанный баланс' })
+    if (activeRoom || unsettledPlayer || onlineFunds || liveCrash || liveMines) throw createError({ statusCode: 409, statusMessage: 'Сезон нельзя завершить, пока есть активная игра или нерассчитанный баланс' })
 
     const season = await tx.season.findFirst({ where: { status: 'active' }, orderBy: { number: 'desc' } })
     if (!season) throw createError({ statusCode: 404, statusMessage: 'Активный сезон не найден' })

@@ -568,7 +568,9 @@ function hasActiveHand(state: OnlineRoomState): boolean {
 }
 
 function expiryArgs(state: OnlineRoomState, ttlSeconds: number): ['EX', number] | [] {
-  return hasActiveHand(state) ? [] : ['EX', ttlSeconds]
+  // A seated player may hold real wallet-funded chips even between hands or
+  // after a finished hand. Keep that runtime until the last seat is cashed out.
+  return hasActiveHand(state) || state.pokerTable.players.length > 0 ? [] : ['EX', ttlSeconds]
 }
 
 export function onlineRoomRuntimeKey(roomId: string, keyPrefix = ONLINE_ROOM_RUNTIME_KEY_PREFIX): string {
@@ -584,6 +586,7 @@ export class OnlineRoomRuntimeStore {
   private readonly ttlSeconds: number
   private readonly actionTtlSeconds: number
   private connecting: Promise<void> | undefined
+  private fundedRuntimeSweep: Promise<void> | undefined
 
   constructor(options: OnlineRoomRuntimeStoreOptions = {}) {
     this.keyPrefix = options.keyPrefix ?? ONLINE_ROOM_RUNTIME_KEY_PREFIX
@@ -611,9 +614,35 @@ export class OnlineRoomRuntimeStore {
         await this.connecting
       }
       if (this.redis.status !== 'ready') throw new Error('Redis is not ready')
+      this.fundedRuntimeSweep ??= this.preserveFundedRuntimeKeys().catch(error => {
+        this.fundedRuntimeSweep = undefined
+        throw error
+      })
+      await this.fundedRuntimeSweep
     } catch (error) {
       throw new OnlineRoomRuntimeStoreError('REDIS_UNAVAILABLE', error instanceof Error ? error.message : 'Redis is unavailable.')
     }
+  }
+
+  /** Removes legacy TTLs from already funded rooms when deploying the no-expiry policy. */
+  private async preserveFundedRuntimeKeys(): Promise<void> {
+    let cursor = '0'
+    do {
+      const [nextCursor, keys] = await this.redis.scan(cursor, 'MATCH', `${this.keyPrefix}*`, 'COUNT', 200)
+      cursor = nextCursor
+      for (const key of keys) {
+        const roomId = key.slice(this.keyPrefix.length)
+        if (!roomId || roomId.includes(':')) continue
+        const payload = await this.redis.get(key)
+        if (payload === null) continue
+        try {
+          const record = decodeEnvelope(payload, roomId)
+          if (record.state.pokerTable.players.length > 0) await this.redis.persist(key)
+        } catch {
+          // Leave malformed values untouched for the normal controlled error path.
+        }
+      }
+    } while (cursor !== '0')
   }
 
   async disconnect(): Promise<void> {
@@ -670,7 +699,8 @@ export class OnlineRoomRuntimeStore {
       const payload = await this.redis.get(key)
       if (payload === null) return null
       const record = decodeEnvelope(payload, roomId)
-      if (!hasActiveHand(record.state)) await this.redis.expire(key, this.ttlSeconds)
+      if (hasActiveHand(record.state) || record.state.pokerTable.players.length > 0) await this.redis.persist(key)
+      else await this.redis.expire(key, this.ttlSeconds)
       return record
     } catch (error) {
       if (error instanceof OnlineRoomRuntimeStoreError) throw error

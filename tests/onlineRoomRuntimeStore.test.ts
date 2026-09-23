@@ -97,6 +97,55 @@ test('save and load a room with seated players', { skip: !isolated }, async () =
   assert.deepEqual(loaded?.state.pokerTable.seats, state.pokerTable.seats)
 })
 
+test('empty runtime expires but a WAITING room with funded seats has no TTL', { skip: !isolated }, async () => {
+  const runtime = store()
+  const createdEmpty = createOnlineRoom({ roomId: randomUUID(), roomCode: 'EF3456', ownerId: 'owner', ownerStack: 100, smallBlind: 5, bigBlind: 10 })
+  const empty = Object.freeze({ ...createdEmpty, pokerTable: Object.freeze({ ...createdEmpty.pokerTable, players: Object.freeze([]), seats: Object.freeze([]) }) })
+  await runtime.create(empty)
+  assert.ok(await redis!.ttl(runtime.keyFor(empty.roomId)) > 0)
+
+  const funded = room()
+  const seatedRuntime = store()
+  await seatedRuntime.create(funded)
+  assert.equal(await redis!.ttl(seatedRuntime.keyFor(funded.roomId)), -1)
+  await redis!.expire(seatedRuntime.keyFor(funded.roomId), 30)
+  await seatedRuntime.get(funded.roomId)
+  assert.equal(await redis!.ttl(seatedRuntime.keyFor(funded.roomId)), -1)
+})
+
+test('a FINISHED hand still has no TTL while table stacks remain', { skip: !isolated }, async () => {
+  const started = activeRoom()
+  const hand = Object.freeze({ ...started.pokerTable.currentHand!, street: 'FINISHED' as const, currentActor: null })
+  const finished = withHand(started, hand)
+  const runtime = store()
+  await runtime.create(finished)
+  assert.equal(await redis!.ttl(runtime.keyFor(finished.roomId)), -1)
+})
+
+test('startup removes legacy TTLs from funded runtime keys', { skip: !isolated }, async () => {
+  const keyPrefix = `pocker:test:online-room-legacy-ttl:${randomUUID()}:`
+  const funded = room()
+  const first = new OnlineRoomRuntimeStore({ redis: redis!, keyPrefix, ttlSeconds: 60 })
+  await first.create(funded)
+  await redis!.expire(first.keyFor(funded.roomId), 30)
+
+  const recovered = new OnlineRoomRuntimeStore({ redis: redis!, keyPrefix, ttlSeconds: 60 })
+  await recovered.connect()
+  assert.equal(await redis!.ttl(recovered.keyFor(funded.roomId)), -1)
+})
+
+test('runtime TTL resumes after every seat leaves and table chips are cashed out', { skip: !isolated }, async () => {
+  let state = room()
+  const runtime = store()
+  let record = await runtime.create(state)
+  state = leaveOnlineRoom(state, 'owner')
+  record = await runtime.update(state.roomId, record.runtimeRevision, () => state)
+  state = leaveOnlineRoom(state, 'player-2')
+  record = await runtime.update(state.roomId, record.runtimeRevision, () => state)
+  assert.equal(state.pokerTable.players.length, 0)
+  assert.ok(await redis!.ttl(runtime.keyFor(state.roomId)) > 0)
+})
+
 test('save and load an active hand', { skip: !isolated }, async () => {
   const state = activeRoom()
   const runtime = store()
@@ -283,15 +332,15 @@ test('safe snapshot hides deck and burn cards', { skip: !isolated }, async () =>
   assert.equal('burnCards' in (safe.pokerTable.currentHand as object), false)
 })
 
-test('active room TTL remains present during normal activity', { skip: !isolated }, async () => {
+test('funded room runtime remains permanent while seats hold table stacks', { skip: !isolated }, async () => {
   const state = room()
   const runtime = store()
   await runtime.create(state)
   const waitingTtlBefore = await redis!.ttl(runtime.keyFor(state.roomId))
   await runtime.get(state.roomId)
   const waitingTtlAfter = await redis!.ttl(runtime.keyFor(state.roomId))
-  assert.ok(waitingTtlBefore > 0)
-  assert.ok(waitingTtlAfter > 0)
+  assert.equal(waitingTtlBefore, -1)
+  assert.equal(waitingTtlAfter, -1)
 
   const active = activeRoom()
   const activeRuntime = store()
