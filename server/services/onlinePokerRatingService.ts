@@ -4,6 +4,21 @@ import type { OnlineRoomState } from '../utils/pokerOnlineRoom'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
+export function getOnlineHandRatingActionFacts(
+  hand: NonNullable<OnlineRoomState['pokerTable']['currentHand']>,
+  playerId: string
+): Readonly<{ hadAction: boolean; hadRaise: boolean; hadAllIn: boolean }> {
+  const summary = hand.actionSummary?.find(candidate => candidate.playerId === playerId)
+  const player = hand.players.find(candidate => candidate.playerId === playerId)
+  if (!player) throw new Error('Rating action facts require a player in the hand.')
+  return Object.freeze({
+    // For pre-fix/older states only the latest street action remains observable.
+    hadAction: summary?.hadAction ?? player.lastAction != null,
+    hadRaise: summary?.hadRaise ?? (player.lastAction === 'bet' || player.lastAction === 'raise'),
+    hadAllIn: summary?.hadAllIn ?? player.lastAction === 'all-in'
+  })
+}
+
 /**
  * Idempotently records a finalized ONLINE hand into the same User rating and
  * statistics used by the ordinary leaderboard. No wallet/achievement reward
@@ -22,13 +37,14 @@ export async function recordFinalizedOnlinePokerHand(state: OnlineRoomState): Pr
     for (const player of [...hand.players].sort((a, b) => a.playerId.localeCompare(b.playerId))) {
       if (!UUID.test(player.playerId)) continue
       const won = winnerIds.has(player.playerId)
+      const { hadAction, hadRaise, hadAllIn } = getOnlineHandRatingActionFacts(hand, player.playerId)
       const { delta, reason } = calculateTableRatingChange({
         won,
         split: won && splitWinnerIds.has(player.playerId),
         folded: player.status === 'FOLDED',
-        hadAction: player.lastAction !== null,
-        hadRaise: player.lastAction === 'bet' || player.lastAction === 'raise',
-        hadAllIn: player.lastAction === 'all-in'
+        hadAction,
+        hadRaise,
+        hadAllIn
       })
       const alreadyRecorded = await tx.onlinePokerRatingEvent.findUnique({
         where: { userId_handId: { userId: player.playerId, handId: hand.handId } },

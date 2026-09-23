@@ -5,6 +5,7 @@ import {
   HAND_ACTION_TYPES,
   HAND_STREETS,
   type HandPlayerState,
+  type HandActionSummary,
   type InternalHandState,
   type BetActionLevel
 } from '../utils/pokerHandState'
@@ -201,7 +202,8 @@ function serializeHand(hand: InternalHandState): JsonRecord {
     currentActor: hand.currentActor,
     deck: serializeDeckSnapshot(hand.deck),
     burnCards: serializeCards(hand.burnCards),
-    lastActedAtBet: hand.lastActedAtBet.map(level => ({ playerId: level.playerId, bet: level.bet }))
+    lastActedAtBet: hand.lastActedAtBet.map(level => ({ playerId: level.playerId, bet: level.bet })),
+    actionSummary: (hand.actionSummary ?? []).map(summary => ({ ...summary }))
   }
 }
 
@@ -245,6 +247,30 @@ function deserializeHand(value: unknown): InternalHandState {
     const level = requireRecord(item, 'Last action level')
     return Object.freeze({ playerId: requireString(level.playerId, 'Last action player id'), bet: requireSafeInteger(level.bet, 'Last action bet') })
   })
+  // Older runtime snapshots have no hand-lifetime summary. Recover only facts
+  // still represented by their current lastAction; earlier streets cannot be
+  // inferred safely and are deliberately not fabricated.
+  const actionSummary: HandActionSummary[] = raw.actionSummary === undefined
+    ? players.map(player => Object.freeze({
+        playerId: player.playerId,
+        hadAction: player.lastAction != null,
+        hadRaise: player.lastAction === 'bet' || player.lastAction === 'raise',
+        hadAllIn: player.lastAction === 'all-in'
+      }))
+    : requireArray(raw.actionSummary, 'Hand action summary').map(item => {
+        const summary = requireRecord(item, 'Hand action summary entry')
+        return Object.freeze({
+          playerId: requireString(summary.playerId, 'Action summary player id'),
+          hadAction: requireBoolean(summary.hadAction, 'Action summary hadAction'),
+          hadRaise: requireBoolean(summary.hadRaise, 'Action summary hadRaise'),
+          hadAllIn: requireBoolean(summary.hadAllIn, 'Action summary hadAllIn')
+        })
+      })
+  if (actionSummary.length !== players.length
+    || new Set(actionSummary.map(summary => summary.playerId)).size !== players.length
+    || players.some(player => !actionSummary.some(summary => summary.playerId === player.playerId))) {
+    fail('CORRUPTED_STATE', 'Hand action summary does not match the hand players.')
+  }
   return Object.freeze({
     handId: requireString(raw.handId, 'Hand id'),
     players: Object.freeze(players),
@@ -263,7 +289,8 @@ function deserializeHand(value: unknown): InternalHandState {
     currentActor: raw.currentActor === null ? null : requireSafeInteger(raw.currentActor, 'Current actor', 1),
     deck,
     burnCards,
-    lastActedAtBet: Object.freeze(lastActedAtBet) as readonly BetActionLevel[]
+    lastActedAtBet: Object.freeze(lastActedAtBet) as readonly BetActionLevel[],
+    actionSummary: Object.freeze(actionSummary)
   })
 }
 

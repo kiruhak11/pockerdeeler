@@ -27,6 +27,14 @@ export type HandPlayerState = Readonly<{
   lastAction?: HandActionType | null
 }>
 
+/** Compact server-only action facts retained for the lifetime of one hand. */
+export type HandActionSummary = Readonly<{
+  playerId: string
+  hadAction: boolean
+  hadRaise: boolean
+  hadAllIn: boolean
+}>
+
 export type HandState = Readonly<{
   handId: string
   players: readonly HandPlayerState[]
@@ -54,6 +62,8 @@ export type InternalHandState = HandState & Readonly<{
   deck: Deck
   burnCards: readonly Card[]
   lastActedAtBet: readonly BetActionLevel[]
+  /** Not included in player-safe state; unlike lastAction this survives street changes. */
+  actionSummary: readonly HandActionSummary[]
 }>
 
 export type PlayerSafeHandPlayer = Readonly<Omit<HandPlayerState, 'holeCards'> & {
@@ -304,7 +314,13 @@ export function startHand(options: StartHandOptions): InternalHandState {
     currentActor,
     deck,
     burnCards: Object.freeze([]),
-    lastActedAtBet: Object.freeze([])
+    lastActedAtBet: Object.freeze([]),
+    actionSummary: Object.freeze(handPlayers.map(player => Object.freeze({
+      playerId: player.playerId,
+      hadAction: false,
+      hadRaise: false,
+      hadAllIn: false
+    })))
   })
   return state
 }

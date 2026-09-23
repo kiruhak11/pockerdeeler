@@ -105,6 +105,20 @@ function nextState(
 ): InternalHandState {
   const actedPlayer = Object.freeze({ ...changedPlayer, lastAction: actionType })
   const players = Object.freeze(state.players.map(candidate => candidate.playerId === player.playerId ? actedPlayer : candidate))
+  const priorSummary = state.actionSummary ?? state.players.map(candidate => ({
+    playerId: candidate.playerId,
+    hadAction: candidate.lastAction != null,
+    hadRaise: candidate.lastAction === 'bet' || candidate.lastAction === 'raise',
+    hadAllIn: candidate.lastAction === 'all-in'
+  }))
+  const actionSummary = Object.freeze(priorSummary.map(summary => summary.playerId !== player.playerId
+    ? summary
+    : Object.freeze({
+        ...summary,
+        hadAction: true,
+        hadRaise: summary.hadRaise || actionType === 'bet' || actionType === 'raise',
+        hadAllIn: summary.hadAllIn || actionType === 'all-in'
+      })))
   const bettingRoundComplete = roundComplete(players, currentBet, actedThisRound)
   const stateForTurn = { ...state, players } as InternalHandState
   const currentActor = bettingRoundComplete ? null : nextActorSeat(stateForTurn, player.seat)
@@ -118,7 +132,8 @@ function nextState(
     actedThisRound: Object.freeze([...actedThisRound]),
     bettingRoundComplete,
     currentActor,
-    lastActedAtBet: Object.freeze(recordActionLevel(state.lastActedAtBet, player.playerId, actionLevel))
+    lastActedAtBet: Object.freeze(recordActionLevel(state.lastActedAtBet, player.playerId, actionLevel)),
+    actionSummary
   })
 }
 
