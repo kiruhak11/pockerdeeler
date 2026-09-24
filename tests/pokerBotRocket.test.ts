@@ -18,9 +18,16 @@ import {
 } from '../server/services/crashService'
 import { OnlinePokerBotLeaseService } from '../server/services/onlinePokerBotLeaseService'
 import { issueUserAuthToken } from '../server/services/userAccountService'
+import {
+  commitOnlineBuyInSeat,
+  completeOnlineCashOut,
+  prepareOnlineCashOut,
+  reserveOnlineBuyIn
+} from '../server/services/onlineRoomAccountingService'
 
 const dbUrl = process.env.DATABASE_URL
 const isolatedDb = Boolean(dbUrl && (/:55439\//.test(dbUrl) || /_test(?:$|[?])/.test(dbUrl)))
+const singleConnectionPool = Boolean(dbUrl && /(?:[?&])connection_limit=1(?:&|$)/.test(dbUrl))
 const testRedisUrl = process.env.ONLINE_POKER_BOT_TEST_REDIS_URL ?? process.env.ONLINE_ROOM_TEST_REDIS_URL
 const isolatedRedis = Boolean(testRedisUrl && /^redis:\/\/127\.0\.0\.1:\d+\/\d+$/.test(testRedisUrl))
 const db = new PrismaClient()
@@ -328,6 +335,82 @@ test('human Rocket bet still uses its authenticated public path and unchanged wa
   assert.equal(result.bet?.stake, 100)
   assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId } })).balance, 900n)
   assert.equal(await db.walletLedgerEntry.count({ where: { idempotencyKey: `crash:stake:${round.id}:${userId}` } }), 1)
+})
+
+test('ONLINE buy-in and Rocket debit serialize with connection_limit=1', { skip: !(isolatedDb && singleConnectionPool) }, async () => {
+  const { id: userId, botKey } = await createBotFixture(100)
+  const round = await createBettingRound(150)
+  const room = await db.onlineRoom.create({
+    data: {
+      roomCode: `R${randomUUID().replaceAll('-', '').slice(0, 5).toUpperCase()}`,
+      visibility: 'PUBLIC',
+      ownerId: userId,
+      status: 'WAITING',
+      maxPlayers: 6,
+      startingStack: 70n
+    },
+    select: { id: true }
+  })
+  roomsForCleanup.push(room.id)
+  const fence: BotRocketFence = { key: `pocker:online-bot-lease:v1:${botKey}`, token: `925:${randomUUID()}`, isLeaseCurrent: async () => true }
+  await registerBotRocketLease(userId, fence)
+
+  const [poker, rocket] = await Promise.allSettled([
+    reserveOnlineBuyIn({ roomId: room.id, userId, seat: 1, amount: 70 }),
+    placeCrashBetForBot(userId, { expectedRoundId: round.id, stake: 60, autoCashout: 1.5 }, fence)
+  ])
+  const pokerWon = poker.status === 'fulfilled'
+  const rocketWon = rocket.status === 'fulfilled' && rocket.value
+  assert.notEqual(pokerWon, rocketWon, 'exactly one operation can reserve the shared wallet funds')
+  if (!pokerWon) {
+    assert.equal(poker.status, 'rejected')
+    const error = poker.reason as { statusCode?: number; statusMessage?: string }
+    assert.equal(error.statusCode, 409)
+    assert.match(error.statusMessage ?? '', /недостаточно свободных фишек/i)
+  }
+  if (rocket.status === 'rejected') throw rocket.reason
+
+  const wallet = await db.userWallet.findUniqueOrThrow({ where: { userId } })
+  assert.equal(wallet.balance, pokerWon ? 30n : 40n)
+  assert.equal(await db.onlineRoomPlayer.count({ where: { roomId: room.id, userId } }), pokerWon ? 1 : 0)
+  assert.equal(await db.crashBet.count({ where: { roundId: round.id, userId } }), rocketWon ? 1 : 0)
+  assert.equal(await db.walletLedgerEntry.count({ where: { wallet: { userId }, entryType: 'ONLINE_POKER_BUY_IN' } }), pokerWon ? 1 : 0)
+  assert.equal(await db.walletLedgerEntry.count({ where: { idempotencyKey: `crash:stake:${round.id}:${userId}` } }), rocketWon ? 1 : 0)
+})
+
+test('ONLINE cash-out and Rocket start serialize with connection_limit=1', { skip: !(isolatedDb && singleConnectionPool) }, async () => {
+  const { id: userId, botKey } = await createBotFixture(100)
+  const round = await createBettingRound(150)
+  const room = await db.onlineRoom.create({
+    data: {
+      roomCode: `R${randomUUID().replaceAll('-', '').slice(0, 5).toUpperCase()}`,
+      visibility: 'PUBLIC',
+      ownerId: userId,
+      status: 'WAITING',
+      maxPlayers: 6,
+      startingStack: 70n
+    },
+    select: { id: true }
+  })
+  roomsForCleanup.push(room.id)
+  const reservation = await reserveOnlineBuyIn({ roomId: room.id, userId, seat: 1, amount: 70 })
+  await commitOnlineBuyInSeat({ roomId: room.id, userId, sequence: reservation.sequence, seat: 1 }, async () => true)
+  assert.equal(await prepareOnlineCashOut({ roomId: room.id, userId, amount: 70 }), true)
+
+  const fence: BotRocketFence = { key: `pocker:online-bot-lease:v1:${botKey}`, token: `926:${randomUUID()}`, isLeaseCurrent: async () => true }
+  await registerBotRocketLease(userId, fence)
+  const [cashOut, rocket] = await Promise.all([
+    completeOnlineCashOut({ roomId: room.id, userId }),
+    placeCrashBetForBot(userId, { expectedRoundId: round.id, stake: 60, autoCashout: 1.5 }, fence)
+  ])
+
+  assert.equal(cashOut, true)
+  assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId } })).balance, rocket ? 40n : 100n)
+  const reservationAfter = await db.onlineRoomPlayer.findUniqueOrThrow({ where: { roomId_userId: { roomId: room.id, userId } } })
+  assert.equal(reservationAfter.status, 'CASHED_OUT')
+  assert.equal(await db.crashBet.count({ where: { roundId: round.id, userId } }), rocket ? 1 : 0)
+  assert.equal(await db.walletLedgerEntry.count({ where: { wallet: { userId }, entryType: 'ONLINE_POKER_CASH_OUT' } }), 1)
+  assert.equal(await db.walletLedgerEntry.count({ where: { idempotencyKey: `crash:stake:${round.id}:${userId}` } }), rocket ? 1 : 0)
 })
 
 test('two Redis lease owners cannot pass a stale Rocket fence after takeover', { skip: !(isolatedDb && isolatedRedis) }, async () => {

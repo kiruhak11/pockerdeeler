@@ -25,6 +25,7 @@ const dbUrl = process.env.DATABASE_URL
 const redisUrl = process.env.ONLINE_ROOM_TEST_REDIS_URL
 const isolated = Boolean(dbUrl)
 const apiIsolated = Boolean(dbUrl && redisUrl && /^redis:\/\/127\.0\.0\.1:\d+\/\d+$/.test(redisUrl))
+const singleConnectionPool = Boolean(dbUrl && /(?:[?&])connection_limit=1(?:&|$)/.test(dbUrl))
 const db = new PrismaClient()
 const redis = apiIsolated ? new Redis(redisUrl!, { lazyConnect: true }) : undefined
 const users: string[] = []
@@ -245,6 +246,28 @@ test('authenticated create, join and leave move real account chips exactly once'
   assert.equal(left.room.pokerTable.players.some(player => player.playerId === joiner.id), false)
   const joinerAfterCashOut = await db.userWallet.findUniqueOrThrow({ where: { userId: joiner.id } })
   assert.equal(joinerAfterCashOut.balance, 20_000n)
+})
+
+test('authenticated ONLINE join and cash-out work with a single PostgreSQL connection', { skip: !(apiIsolated && singleConnectionPool) }, async () => {
+  const owner = await db.user.create({ data: { username: `oa_single_owner_${randomUUID().replaceAll('-', '').slice(0, 16)}`, passwordHash: 'test', balance: 20_000, wallet: { create: { balance: 20_000n } } } })
+  const player = await db.user.create({ data: { username: `oa_single_player_${randomUUID().replaceAll('-', '').slice(0, 16)}`, passwordHash: 'test', balance: 10_000, wallet: { create: { balance: 10_000n } } } })
+  users.push(owner.id, player.id)
+  if (redis!.status === 'wait') await redis!.connect()
+  const runtime = apiRuntime()
+  const created = await createAuthenticatedOnlineRoom(owner.id, { startingStack: 5_000 }, { runtime })
+  rooms.push(created.room.roomId)
+
+  const joined = await joinAuthenticatedOnlineRoom(player.id, created.room.roomCode, { concurrencyToken: created.concurrencyToken }, { runtime })
+  assert.equal(joined.room.pokerTable.players.find(candidate => candidate.playerId === player.id)?.stack, 5_000)
+  assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId: player.id } })).balance, 5_000n)
+  assert.equal((await db.onlineRoomPlayer.findUniqueOrThrow({ where: { roomId_userId: { roomId: created.room.roomId, userId: player.id } } })).status, 'ACTIVE')
+  assert.equal(await db.walletLedgerEntry.count({ where: { wallet: { userId: player.id }, entryType: 'ONLINE_POKER_BUY_IN' } }), 1)
+
+  const left = await leaveAuthenticatedOnlineRoom(player.id, created.room.roomCode, { concurrencyToken: joined.concurrencyToken }, { runtime })
+  assert.equal(left.room.pokerTable.players.some(candidate => candidate.playerId === player.id), false)
+  assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId: player.id } })).balance, 10_000n)
+  assert.equal((await db.onlineRoomPlayer.findUniqueOrThrow({ where: { roomId_userId: { roomId: created.room.roomId, userId: player.id } } })).status, 'CASHED_OUT')
+  assert.equal(await db.walletLedgerEntry.count({ where: { wallet: { userId: player.id }, entryType: 'ONLINE_POKER_CASH_OUT' } }), 1)
 })
 
 test('two concurrent API joins commit one seat and one buy-in', { skip: !apiIsolated }, async () => {

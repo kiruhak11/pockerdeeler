@@ -824,6 +824,35 @@ type InternalRoomUpdateResult = Readonly<{
   runtimeRevision: number
 }>
 
+async function finishRoomRuntimeMutation(
+  userId: string,
+  metadata: PersistentRoom,
+  record: OnlineRoomRuntimeRecord,
+  duplicate: boolean,
+  dependencies?: OnlineRoomApiDependencies
+): Promise<InternalRoomUpdateResult> {
+  // Keep every global Prisma operation outside callers' interactive
+  // transactions. In particular, a funded join holds a wallet/room lock while
+  // its Redis seat CAS runs; profile/rating/metadata reads must not check out a
+  // second connection from a PgBouncer pool of size one.
+  if (record.state.pokerTable.finalizedHand) await recordFinalizedOnlinePokerHand(record.state)
+  if (!duplicate) {
+    await syncMetadataAfterMutation(metadata, record.state).catch(() => undefined)
+    void publishOnlineRoomChanged({
+      type: 'ROOM_CHANGED',
+      roomId: record.state.roomId,
+      roomCode: record.state.roomCode,
+      roomVersion: record.state.roomVersion,
+      tableStateVersion: record.state.pokerTable.stateVersion
+    }).catch(() => undefined)
+  }
+  return Object.freeze({
+    result: await safeOnlineRoomResult(record.state, userId, record.runtimeRevision),
+    duplicate,
+    runtimeRevision: record.runtimeRevision
+  })
+}
+
 async function updateRoomInternal(
   userId: string,
   code: string,
@@ -849,22 +878,7 @@ async function updateRoomInternal(
       : Object.freeze({ record: await runtimeStore(dependencies).update(metadata.id, revision, state => updater(state), dependencies?.botFence), duplicate: false })
     // Rating writes are idempotent by (user, hand). Retrying a finalized action
     // must also retry the durable result projection if the prior DB write failed.
-    if (updated.record.state.pokerTable.finalizedHand) await recordFinalizedOnlinePokerHand(updated.record.state)
-    if (!updated.duplicate) {
-      await syncMetadataAfterMutation(metadata, updated.record.state).catch(() => undefined)
-      void publishOnlineRoomChanged({
-        type: 'ROOM_CHANGED',
-        roomId: updated.record.state.roomId,
-        roomCode: updated.record.state.roomCode,
-        roomVersion: updated.record.state.roomVersion,
-        tableStateVersion: updated.record.state.pokerTable.stateVersion
-      }).catch(() => undefined)
-    }
-    return Object.freeze({
-      result: await safeOnlineRoomResult(updated.record.state, userId, updated.record.runtimeRevision),
-      duplicate: updated.duplicate,
-      runtimeRevision: updated.record.runtimeRevision
-    })
+    return await finishRoomRuntimeMutation(userId, metadata, updated.record, updated.duplicate, dependencies)
   } catch (error) {
     throw mapRuntimeError(error)
   }
@@ -913,12 +927,21 @@ export async function joinAuthenticatedOnlineRoom(userId: string, code: string, 
     ? { concurrencyToken: input.concurrencyToken, expectedRoomVersion: input.expectedRoomVersion }
     : { ...input, concurrencyToken: issueConcurrencyToken(metadata.id, currentRecord.runtimeRevision) }
   try {
-    const result = await commitOnlineBuyInSeat({ roomId: metadata.id, userId, sequence: reservation.sequence, seat: reservation.seat }, () => updateRoom(userId, code, currentInput, state => {
-      const joinSecret = metadata.privateJoinSecretHash ?? undefined
-      if (metadata.visibility === 'PRIVATE' && state.privateJoinSecret !== joinSecret) fail('UNAVAILABLE', 'Private room authorization state is inconsistent.', 503)
-      return joinOnlineRoom(state, { playerId: userId, stack: reservation.amount, seat: reservation.seat, ...(joinSecret ? { joinSecret } : {}), expectedRoomVersion: input.expectedRoomVersion })
-    }, dependencies))
-    return result
+    const record = await commitOnlineBuyInSeat({ roomId: metadata.id, userId, sequence: reservation.sequence, seat: reservation.seat }, () => {
+      // The reservation transaction owns the wallet/room locks until Redis
+      // confirms the seat and PostgreSQL can mark it ACTIVE. Do only the
+      // authoritative Redis CAS here: updateRoomInternal performs room-code,
+      // profile, rating and metadata queries through the global Prisma client,
+      // which deadlocks when PgBouncer provides just this transaction's one
+      // connection.
+      const revision = expectedRevision(metadata.id, currentInput.concurrencyToken)
+      return runtimeStore(dependencies).update(metadata.id, revision, state => {
+        const joinSecret = metadata.privateJoinSecretHash ?? undefined
+        if (metadata.visibility === 'PRIVATE' && state.privateJoinSecret !== joinSecret) fail('UNAVAILABLE', 'Private room authorization state is inconsistent.', 503)
+        return joinOnlineRoom(state, { playerId: userId, stack: reservation.amount, seat: reservation.seat, ...(joinSecret ? { joinSecret } : {}), expectedRoomVersion: input.expectedRoomVersion })
+      }, dependencies?.botFence)
+    })
+    return (await finishRoomRuntimeMutation(userId, metadata, record, false, dependencies)).result
   } catch (error) {
     // Reconcile only after the reservation transaction has released its row
     // lock. This rereads Redis while holding the same DB lock, so a failed CAS
