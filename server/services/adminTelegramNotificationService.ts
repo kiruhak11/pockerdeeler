@@ -14,6 +14,7 @@ const defaults: AdminTelegramSettings = {
   enabled: true,
   categories: { payments: true, users: true, games: true, premium: true, achievements: true }
 }
+const pendingAdminTelegramNotifications = new Set<Promise<boolean>>()
 
 export function normalizeAdminTelegramSettings(value: unknown): AdminTelegramSettings {
   const input = value && typeof value === 'object' ? value as Record<string, unknown> : {}
@@ -29,7 +30,7 @@ export async function getAdminTelegramSettings() {
   return normalizeAdminTelegramSettings(row?.value ?? defaults)
 }
 
-export async function notifyAdminTelegram(category: AdminTelegramCategory, text: string) {
+async function sendAdminTelegramNotification(category: AdminTelegramCategory, text: string) {
   try {
     const settings = await getAdminTelegramSettings()
     if (!settings.enabled || !settings.categories[category]) return false
@@ -42,6 +43,23 @@ export async function notifyAdminTelegram(category: AdminTelegramCategory, text:
   } catch (error) {
     console.error('[telegram admin notification]', error instanceof Error ? error.message : String(error))
     return false
+  }
+}
+
+export function notifyAdminTelegram(category: AdminTelegramCategory, text: string) {
+  const task = sendAdminTelegramNotification(category, text)
+  pendingAdminTelegramNotifications.add(task)
+  void task.then(
+    () => pendingAdminTelegramNotifications.delete(task),
+    () => pendingAdminTelegramNotifications.delete(task)
+  )
+  return task
+}
+
+// Lets integration tests wait for detached admin sends before removing fixtures.
+export async function awaitPendingAdminTelegramNotifications() {
+  while (pendingAdminTelegramNotifications.size > 0) {
+    await Promise.allSettled([...pendingAdminTelegramNotifications])
   }
 }
 
