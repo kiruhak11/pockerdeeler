@@ -18,6 +18,8 @@ test('new registration records the four mandatory snapshots once and excludes di
     const rows = await db.legalAcceptance.findMany({ where: { requestId }, include: { document: true }, orderBy: { document: { type: 'asc' } } })
     assert.deepEqual(rows.map(row => row.document.type), ['AGE_CONFIRMATION', 'PERSONAL_DATA_CONSENT', 'PRIVACY_POLICY', 'USER_AGREEMENT'])
     assert.ok(rows.every(row => row.context === 'REGISTRATION' && row.version === row.document.version && row.contentHash === row.document.contentHash))
+    assert.equal(rows.find(row => row.document.type === 'PERSONAL_DATA_CONSENT')?.version, '1.1')
+    assert.equal(rows.find(row => row.document.type === 'USER_AGREEMENT')?.version, '1.0')
     assert.equal(rows.some(row => row.document.type === 'PERSONAL_DATA_DISTRIBUTION'), false)
     assert.equal(rows.length, 4)
     assert.throws(() => assertRegistrationLegalConfirmations({ ...confirmations, personalDataConsent: false }))

@@ -178,6 +178,10 @@ test('phone start uses shared limits without changing the active verification fl
       assert.equal((await get('/auth/session', sessionCookie)).response.status, 200, 'refresh keeps the cookie session')
       assert.equal(await prisma.accountSession.count({ where: { userId: complete.data.user.id } }), 1)
       assert.equal(await prisma.walletLedgerEntry.count({ where: { wallet: { userId: complete.data.user.id }, entryType: 'ACCOUNT_OPENING_GRANT' } }), 1)
+      const registrationAcceptances = await prisma.legalAcceptance.findMany({ where: { userId: complete.data.user.id, context: 'REGISTRATION' }, include: { document: true } })
+      assert.equal(registrationAcceptances.length, 4)
+      assert.ok(registrationAcceptances.every(row => row.version === row.document.version && row.contentHash === row.document.contentHash))
+      assert.equal(registrationAcceptances.find(row => row.document.type === 'PERSONAL_DATA_CONSENT')?.version, '1.1')
 
       const duplicate = await post('/phone/complete', {
         id: first.data.id, username: complete.data.user.username, password: 'Isolated-test-password-2026',

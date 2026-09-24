@@ -37,13 +37,13 @@ const effectiveFrom = '2026-09-19T00:00:00.000+07:00'
 const publishedAt = effectiveFrom
 const effectiveDate = '19 сентября 2026 года'
 
-function documentMeta(type: LegalDocumentType, slug: string, title: string, shortTitle: string, summary: string, sections: LegalSection[]): LegalDocument {
-  return { type, slug, title, shortTitle, version: '1.0', effectiveFrom, publishedAt, effectiveDate, summary, sections }
+function documentMeta(type: LegalDocumentType, slug: string, title: string, shortTitle: string, summary: string, sections: LegalSection[], version = '1.0'): LegalDocument {
+  return { type, slug, title, shortTitle, version, effectiveFrom, publishedAt, effectiveDate, summary, sections }
 }
 
 // Published snapshots are append-only: a later revision must be added as a new
 // entry/version instead of mutating the text of an already published document.
-// The registry below contains only the ten public documents from Legal Pack v1.0.
+// Most public documents remain at v1.0; revised documents explicitly use v1.1.
 export const legalDocuments: LegalDocument[] = [
   documentMeta('USER_AGREEMENT', 'user-agreement', 'ПОЛЬЗОВАТЕЛЬСКОЕ СОГЛАШЕНИЕ POCKER', 'Пользовательское соглашение', 'Условия использования платформы Pocker.', [
     { heading: 'Введение', paragraphs: ['Настоящее Пользовательское соглашение регулирует использование сайта https://pocker.kiruhak11.ru (далее — «Pocker», «Сервис»). Владельцем и оператором Сервиса является самозанятый плательщик налога на профессиональный доход Коваленко Кирилл Максимович, использующий коммерческое обозначение «Poker Dealer Desk», ИНН 222175187182.'] },
@@ -87,7 +87,7 @@ export const legalDocuments: LegalDocument[] = [
     { heading: '4. Online multiplayer', paragraphs: ['Правила online multiplayer применяются только после фактического запуска режима и публикуются отдельно. Сервер контролирует перемешивание, раздачу, блайнды, очередность действий, side pots, flop, turn, river, showdown, комбинации и разделение банка. Клиент не может определить результат; при переподключении используется состояние сервера.'] },
     { heading: '5. Честная игра', items: ['сговор и использование нескольких аккаунтов;', 'эксплуатация ошибок;', 'вмешательство в сеть или сервер;', 'автоматизация действий;', 'внешние денежные ставки.'], paragraphs: ['Владелец может признать операцию недействительной из-за ошибки или нарушения правил.'] },
     { heading: '6. Споры', paragraphs: ['При разногласиях приоритет имеют серверные журналы, кроме случая очевидной ошибки.'] }
-  ]),
+  ], '1.1'),
   documentMeta('PRIVACY_POLICY', 'privacy', 'ПОЛИТИКА ОБРАБОТКИ ПЕРСОНАЛЬНЫХ ДАННЫХ POCKER', 'Политика конфиденциальности', 'Политика конфиденциальности.', [
     { heading: 'Оператор', paragraphs: ['Оператор: Коваленко Кирилл Максимович, самозанятый плательщик НПД, ИНН 222175187182, адрес: г. Барнаул, ул. Заречная, д. 62, email: support@pocker.kiruhak11.ru, телефон: +7 960 943-00-29.'] },
     { heading: '1. Какие данные обрабатываются', items: ['номер телефона и данные авторизации;', 'ник, игровая история, статистика, рейтинг, достижения, баланс и история побед;', 'IP-адрес, cookies, устройство, браузер, события безопасности и действия на сайте;', 'необходимые сведения о платеже ЮKassa;', 'сообщения в комнатах и их метаданные;', 'обращения в поддержку.'] },
@@ -110,7 +110,7 @@ export const legalDocuments: LegalDocument[] = [
     { heading: '4. Автоматизация', paragraphs: ['Обработка может выполняться с использованием средств автоматизации.'] },
     { heading: '5. Срок и отзыв', paragraphs: ['Согласие действует до достижения целей или отзыва, если дальнейшая обработка не требуется законом или иным правовым основанием. Отзыв направляется оператору по email support@pocker.kiruhak11.ru. Отзыв не отменяет законность обработки до его получения.'] },
     { heading: '6. Подтверждения пользователя', paragraphs: ['Пользователь подтверждает, что ему исполнилось 18 лет, что данные принадлежат ему или используются правомерно и что он ознакомлен с условиями согласия. Электронная фиксация согласия должна хранить документ, версию, дату и время, идентификатор пользователя и технические сведения, необходимые для подтверждения факта согласия.'] }
-  ]),
+  ], '1.1'),
   documentMeta('PERSONAL_DATA_DISTRIBUTION', 'personal-data-distribution', 'СОГЛАСИЕ НА ОБРАБОТКУ ПЕРСОНАЛЬНЫХ ДАННЫХ, РАЗРЕШЕННЫХ ДЛЯ РАСПРОСТРАНЕНИЯ', 'Согласие на распространение данных', 'Отдельное согласие для публичных элементов Pocker.', [
     { heading: 'Введение', paragraphs: ['Настоящее согласие является отдельным от общего согласия на обработку персональных данных и применяется к публичным элементам Pocker.'] },
     { heading: '1. Публичные категории', items: ['ник;', 'игровая статистика;', 'достижения;', 'виртуальный баланс;', 'рейтинг;', 'история побед.'] },
@@ -138,7 +138,7 @@ export const legalDocuments: LegalDocument[] = [
   documentMeta('REQUISITES', 'requisites', 'РЕКВИЗИТЫ И СВЕДЕНИЯ О ВЛАДЕЛЬЦЕ POCKER', 'Реквизиты владельца', 'Информация для пользователей.', [
     { heading: 'Сведения о владельце', items: ['Владелец/исполнитель: Коваленко Кирилл Максимович.', 'Статус: физическое лицо, специальный налоговый режим НПД/самозанятый.', 'Коммерческое обозначение: Poker Dealer Desk.', 'ИНН: 222175187182.', 'ОГРНИП/ОГРН: не применяется; владелец не является индивидуальным предпринимателем или юридическим лицом.', 'Сайт: https://pocker.kiruhak11.ru.', 'Адрес: г. Барнаул, ул. Заречная, д. 62.', 'Email: support@pocker.kiruhak11.ru.', 'Телефон: +7 960 943-00-29.', 'Платежный провайдер: ЮKassa.', 'Хостинг: Jino, Российская Федерация.'] },
     { heading: 'Примечание', paragraphs: ['Сведения о чеках и онлайн-кассе применяются в соответствии с фактическим статусом и обязанностями владельца и не подменяются вымышленными реквизитами.'] }
-  ])
+  ], '1.1')
 ]
 
 export function getLegalDocument(slug: string) {

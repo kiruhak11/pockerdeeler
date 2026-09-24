@@ -18,10 +18,10 @@ const publicSlugs = [
 test('legal registry contains exactly the ten current public documents', () => {
   assert.deepEqual(legalDocuments.map(document => document.slug), publicSlugs)
   assert.equal(new Set(legalDocuments.map(document => document.type)).size, 10)
-  assert.ok(legalDocuments.every(document => document.version === '1.0'))
-  assert.equal(getLegalDocument('game-rules')?.version, '1.0')
-  assert.equal(getLegalDocument('personal-data-consent')?.version, '1.0')
-  assert.equal(getLegalDocument('requisites')?.version, '1.0')
+  assert.ok(legalDocuments.filter(document => !['game-rules', 'personal-data-consent', 'requisites'].includes(document.slug)).every(document => document.version === '1.0'))
+  assert.equal(getLegalDocument('game-rules')?.version, '1.1')
+  assert.equal(getLegalDocument('personal-data-consent')?.version, '1.1')
+  assert.equal(getLegalDocument('requisites')?.version, '1.1')
   assert.equal(legalDocuments.some(document => /чек-лист|checklist/i.test(`${document.title} ${document.summary} ${JSON.stringify(document.sections)}`)), false)
 })
 
@@ -31,7 +31,10 @@ test('public registry routes resolve and internal snapshots are not public', () 
   }
   assert.equal(getLegalDocument('internal-legal-checklist'), undefined)
   assert.equal(legalDocumentSnapshots.filter(document => document.publicPath).length, 10)
-  assert.equal(legalDocumentSnapshots.some(document => ['GAME_RULES', 'PERSONAL_DATA_CONSENT', 'REQUISITES'].includes(document.type) && document.version === '1.1'), false)
+  for (const type of ['GAME_RULES', 'PERSONAL_DATA_CONSENT', 'REQUISITES']) {
+    assert.equal(legalDocumentSnapshots.filter(document => document.type === type).length, 1)
+    assert.equal(legalDocumentSnapshots.find(document => document.type === type)?.version, '1.1')
+  }
   assert.ok(legalDocumentSnapshots.filter(document => document.publicPath === null).every(document => ['VIRTUAL_CURRENCY_NOTICE', 'AGE_CONFIRMATION'].includes(document.type)))
 })
 
