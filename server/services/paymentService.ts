@@ -66,6 +66,10 @@ async function getOrCreateCheckoutPayment(input: { userId: string; type: Payment
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       return await prisma.$transaction(async tx => {
+        // Serialize payment creation for one checkout across app instances.
+        // The unique checkoutId constraint remains the final idempotency
+        // guard, while ReadCommitted lets a waiter observe the prior commit.
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended('payment-checkout:' || ${input.requestId}, 0))::text AS locked`
         const checkout = await tx.legalCheckoutSession.findUnique({ where: { id: input.requestId } })
         if (!checkout) throw createError({ statusCode: 409, message: 'Checkout не найден' })
         if (checkout.userId !== input.userId) throw createError({ statusCode: 403, message: 'Checkout принадлежит другому пользователю' })
@@ -92,7 +96,7 @@ async function getOrCreateCheckoutPayment(input: { userId: string; type: Payment
           metadata: { ...input.metadata, productKey: input.productKey, internalPaymentId, orderId, checkoutId: input.requestId },
           returnUrl
         } })
-      }, { isolationLevel: 'Serializable' })
+      }, { isolationLevel: 'ReadCommitted' })
     } catch (error) {
       if (isSerializationConflict(error) && attempt < 2) {
         await new Promise(resolve => setTimeout(resolve, 15 * (attempt + 1)))

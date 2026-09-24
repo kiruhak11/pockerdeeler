@@ -205,6 +205,10 @@ function isSerializationConflict(error: unknown) {
   return code === 'P2034' || code === 'P2002' || (code === 'P2010' && meta?.code === '40001') || meta?.message?.includes('could not serialize access') === true
 }
 
+async function lockLegalAcceptanceRequest(tx: Prisma.TransactionClient, requestId: string) {
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended('legal-acceptance:' || ${requestId}, 0))::text AS locked`
+}
+
 export async function acceptCurrentLegalDocuments(input: LegalAcceptanceInput) {
   assertLegalConfirmations(input.context, input.confirmations)
   // The registry is append-only and is shared by every checkout. Initialize
@@ -212,6 +216,14 @@ export async function acceptCurrentLegalDocuments(input: LegalAcceptanceInput) {
   // do not contend on the same upsert/update statements.
   await ensureLegalDocuments()
   const transaction = () => prisma.$transaction(async tx => {
+    // Serialize all uses of an explicit acceptance id across app instances.
+    // The lock protects the ownership check below; the unique
+    // (requestId, documentId) key then makes a same-owner retry idempotent.
+    // ReadCommitted is intentional here: after waiting for this lock, each
+    // statement must see the transaction that released it.
+    if (input.requestId) {
+      await lockLegalAcceptanceRequest(tx, input.requestId)
+    }
     const requestId = input.checkout
       ? (await ensureCheckoutSession(tx, { userId: input.userId, context: input.context, requestId: input.requestId, productKey: input.productKey })).id
       : (input.requestId || randomUUID())
@@ -248,7 +260,7 @@ export async function acceptCurrentLegalDocuments(input: LegalAcceptanceInput) {
       rows.push(acceptance)
     }
     return { context: input.context, requestId, checkout: input.checkout === true, acceptedAt: rows[0]?.acceptedAt, documents: rows.map(row => ({ documentId: row.documentId, version: row.version, contentHash: row.contentHash })) }
-  }, { isolationLevel: 'Serializable' })
+  }, { isolationLevel: 'ReadCommitted' })
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       return await transaction()
@@ -272,6 +284,7 @@ export async function acceptRegistrationLegalDocuments(tx: Prisma.TransactionCli
   // entering the registration transaction. A concurrent first registration
   // must not turn a harmless registry race into a P2002 that aborts its tx.
   await ensureLegalDocuments()
+  await lockLegalAcceptanceRequest(tx, input.requestId)
   await ensureLegalDocuments(tx)
   const existing = await tx.legalAcceptance.findMany({ where: { requestId: input.requestId }, select: { userId: true, context: true } })
   if (existing.some(row => row.userId !== input.userId)) throw createError({ statusCode: 409, message: 'Идентификатор запроса принадлежит другому пользователю' })
