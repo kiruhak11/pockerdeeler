@@ -6,6 +6,7 @@ export type UserTelegramCategory = typeof USER_TELEGRAM_CATEGORIES[number]
 type Settings = Record<UserTelegramCategory, boolean>
 
 const defaults: Settings = { purchases: true, premium: true, friends: true, games: true, achievements: true, seasons: true, adminChanges: true }
+const pendingUserTelegramNotifications = new Set<Promise<boolean>>()
 
 export function normalizeUserTelegramSettings(value: unknown): Settings {
   const raw = value && typeof value === 'object' ? value as Record<string, unknown> : {}
@@ -35,7 +36,19 @@ export async function notifyUserTelegram(userId: string, category: UserTelegramC
 }
 
 export function dispatchUserTelegram(userId: string, category: UserTelegramCategory, text: string) {
-  void notifyUserTelegram(userId, category, text)
+  const task = notifyUserTelegram(userId, category, text)
+  pendingUserTelegramNotifications.add(task)
+  void task.then(
+    () => pendingUserTelegramNotifications.delete(task),
+    () => pendingUserTelegramNotifications.delete(task)
+  )
+}
+
+// Lets integration tests await detached sends without making their caller wait.
+export async function awaitPendingUserTelegramNotifications() {
+  while (pendingUserTelegramNotifications.size > 0) {
+    await Promise.allSettled([...pendingUserTelegramNotifications])
+  }
 }
 
 export async function queueTelegramUserEvent(tx: Pick<import('@prisma/client').Prisma.TransactionClient, 'telegramUserEvent'>, input: { userId: string; category: UserTelegramCategory; eventKey: string; text: string }) {

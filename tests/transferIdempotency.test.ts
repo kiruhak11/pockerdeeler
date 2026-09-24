@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { PrismaClient } from '@prisma/client'
 import { registerUser } from '../server/services/userAccountService'
 import { transferToFriend } from '../server/services/socialService'
+import { awaitPendingUserTelegramNotifications } from '../server/services/notificationService'
 
 const isolated = Boolean(process.env.DATABASE_URL?.includes(':55439/') || process.env.DATABASE_URL?.includes('_test'))
 const db = new PrismaClient()
@@ -23,12 +24,6 @@ async function connectFriends(firstId: string, secondId: string) {
   })
 }
 
-async function waitFor(predicate: () => boolean) {
-  const deadline = Date.now() + 2_000
-  while (!predicate() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
-  assert.equal(predicate(), true, 'notification did not finish in time')
-}
-
 function errorStatus(error: unknown) {
   return (error as { statusCode?: number }).statusCode
 }
@@ -45,19 +40,22 @@ test('initial transfer and exact retry move money once and notify once', { skip:
   await db.telegramSubscription.create({ data: { userId: recipient.user.id, chatId: `transfer-chat-${randomUUID()}`, telegramUserId: `transfer-tg-${randomUUID()}` } })
 
   const previousToken = process.env.TELEGRAM_BOT_TOKEN
+  const previousProxyUrl = process.env.TELEGRAM_PROXY_URL
   const previousFetch = globalThis.fetch
   let notifications = 0
   process.env.TELEGRAM_BOT_TOKEN = 'transfer-test-token'
+  delete process.env.TELEGRAM_PROXY_URL
   globalThis.fetch = async () => {
     notifications++
     return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200, headers: { 'content-type': 'application/json' } })
   }
   try {
     const requestId = randomUUID()
-    const first = await transferToFriend({ token: sender.token, friendUserId: recipient.user.id, amount: 125, requestId })
-    await waitFor(() => notifications === 1)
-    const retry = await transferToFriend({ token: sender.token, friendUserId: recipient.user.id, amount: 125, requestId })
-    await new Promise(resolve => setTimeout(resolve, 50))
+    const [first, retry] = await Promise.all([
+      transferToFriend({ token: sender.token, friendUserId: recipient.user.id, amount: 125, requestId }),
+      transferToFriend({ token: sender.token, friendUserId: recipient.user.id, amount: 125, requestId })
+    ])
+    await awaitPendingUserTelegramNotifications()
 
     assert.deepEqual(retry, first)
     assert.equal(notifications, 1)
@@ -68,6 +66,54 @@ test('initial transfer and exact retry move money once and notify once', { skip:
     globalThis.fetch = previousFetch
     if (previousToken === undefined) delete process.env.TELEGRAM_BOT_TOKEN
     else process.env.TELEGRAM_BOT_TOKEN = previousToken
+    if (previousProxyUrl === undefined) delete process.env.TELEGRAM_PROXY_URL
+    else process.env.TELEGRAM_PROXY_URL = previousProxyUrl
+  }
+})
+
+test('Telegram transport failure does not repeat an idempotent transfer', { skip: !isolated }, async () => {
+  const sender = await account('transfer_failure_sender')
+  const recipient = await account('transfer_failure_recipient')
+  await connectFriends(sender.user.id, recipient.user.id)
+  await db.telegramSubscription.create({ data: { userId: recipient.user.id, chatId: `transfer-failure-chat-${randomUUID()}`, telegramUserId: `transfer-failure-tg-${randomUUID()}` } })
+
+  const previousToken = process.env.TELEGRAM_BOT_TOKEN
+  const previousProxyUrl = process.env.TELEGRAM_PROXY_URL
+  const previousFetch = globalThis.fetch
+  const previousConsoleError = console.error
+  let transportAttempts = 0
+  let notificationErrors = 0
+  process.env.TELEGRAM_BOT_TOKEN = 'transfer-test-token'
+  delete process.env.TELEGRAM_PROXY_URL
+  globalThis.fetch = async () => {
+    transportAttempts += 1
+    throw new Error('controlled Telegram transport failure')
+  }
+  console.error = () => { notificationErrors += 1 }
+
+  try {
+    const requestId = randomUUID()
+    const first = await transferToFriend({ token: sender.token, friendUserId: recipient.user.id, amount: 125, requestId })
+    await awaitPendingUserTelegramNotifications()
+    const attemptsAfterFirstTransfer = transportAttempts
+    const errorsAfterFirstTransfer = notificationErrors
+    const retry = await transferToFriend({ token: sender.token, friendUserId: recipient.user.id, amount: 125, requestId })
+    await awaitPendingUserTelegramNotifications()
+
+    assert.deepEqual(retry, first)
+    assert.ok(attemptsAfterFirstTransfer >= 1)
+    assert.equal(transportAttempts, attemptsAfterFirstTransfer)
+    assert.equal(notificationErrors, errorsAfterFirstTransfer)
+    assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId: sender.user.id } })).balance, 4_875n)
+    assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId: recipient.user.id } })).balance, 5_125n)
+    assert.equal(await db.walletLedgerEntry.count({ where: { idempotencyKey: { in: [`friend-transfer:debit:${requestId}`, `friend-transfer:credit:${requestId}`] } } }), 2)
+  } finally {
+    globalThis.fetch = previousFetch
+    console.error = previousConsoleError
+    if (previousToken === undefined) delete process.env.TELEGRAM_BOT_TOKEN
+    else process.env.TELEGRAM_BOT_TOKEN = previousToken
+    if (previousProxyUrl === undefined) delete process.env.TELEGRAM_PROXY_URL
+    else process.env.TELEGRAM_PROXY_URL = previousProxyUrl
   }
 })
 
