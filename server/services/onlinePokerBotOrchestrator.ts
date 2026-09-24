@@ -5,6 +5,7 @@ import type { BotDecisionContext } from '../utils/pokerBotDecision'
 import type { BettingActionType } from '../utils/pokerBetting'
 import type { ApiOnlineRoomResult, OnlineRoomLobbyEntry, OnlineRoomApiDependencies } from './onlineRoomApiService'
 import type { OnlinePokerBotLease, OnlinePokerBotLeaseService } from './onlinePokerBotLeaseService'
+import type { BotRocketFence, BotRocketSnapshot } from './crashService'
 
 export type OnlinePokerBotOrchestratorConfig = Readonly<{
   enabled: boolean
@@ -19,6 +20,7 @@ export type OnlinePokerBotOrchestratorConfig = Readonly<{
   bigBlind: number
   quickJoinProbability: number
   createRoomProbability: number
+  rocketPlayProbability?: number
 }>
 
 export function readOnlinePokerBotOrchestratorConfig(env: NodeJS.ProcessEnv = process.env): OnlinePokerBotOrchestratorConfig {
@@ -49,7 +51,8 @@ export function readOnlinePokerBotOrchestratorConfig(env: NodeJS.ProcessEnv = pr
     smallBlind,
     bigBlind,
     quickJoinProbability: probability('BOT_ORCHESTRATOR_QUICK_JOIN_CHANCE', 0.02),
-    createRoomProbability: probability('BOT_ORCHESTRATOR_CREATE_CHANCE', 0.01)
+    createRoomProbability: probability('BOT_ORCHESTRATOR_CREATE_CHANCE', 0.01),
+    rocketPlayProbability: probability('BOT_ORCHESTRATOR_ROCKET_CHANCE', 0.15)
   })
 }
 
@@ -76,6 +79,9 @@ export type OnlinePokerBotOrchestratorAdapter = Readonly<{
   startHand(userId: string, code: string, expectedStateVersion: number, dependencies: OnlineRoomApiDependencies): Promise<ApiOnlineRoomResult>
   action(userId: string, code: string, input: Readonly<{ actionId: string; expectedTableStateVersion: number; action: Readonly<{ type: BettingActionType; amount?: number }> }>, dependencies: OnlineRoomApiDependencies): Promise<unknown>
   leave(userId: string, code: string, room: BotRoomSnapshot, dependencies: OnlineRoomApiDependencies): Promise<ApiOnlineRoomResult>
+  registerRocketLease?(userId: string, fence: BotRocketFence): Promise<void>
+  getRocketSnapshot?(botIds: readonly string[], assertSchedulerLease: () => Promise<boolean>): Promise<BotRocketSnapshot>
+  placeRocketBet?(userId: string, input: Readonly<{ expectedRoundId: string; stake: number; autoCashout: number | null }>, fence: BotRocketFence): Promise<boolean>
 }>
 
 export type OnlinePokerBotOrchestratorDependencies = Readonly<{
@@ -88,12 +94,20 @@ export type OnlinePokerBotOrchestratorDependencies = Readonly<{
 }>
 
 type PendingWork = { key: string; dueAt: number; actionId?: string; decision?: ReturnType<typeof decideBotAction> }
+type PendingRocketBet = Readonly<{
+  roundId: string
+  dueAt: number
+  shouldPlay: boolean
+  stake: number
+  autoCashout: number
+}>
 
 /** Coordinates bots; poker decisions and mutations stay in their existing authoritative services. */
 export class OnlinePokerBotOrchestrator {
   private readonly now: () => number
   private readonly random: () => number
   private readonly pending = new Map<string, PendingWork>()
+  private readonly pendingRocketBets = new Map<string, PendingRocketBet>()
   private readonly leases = new Map<string, OnlinePokerBotLease>()
   private activeBotIds = new Set<string>()
   private schedulerLease: OnlinePokerBotLease | undefined
@@ -130,6 +144,16 @@ export class OnlinePokerBotOrchestrator {
         if (activeIds.has(bot.id) && bot.botEnabled && !this.activeBotIds.has(bot.id)) this.dependencies.log?.('bot_activated', { botKey: bot.botKey })
       }
       this.activeBotIds = activeIds
+      let rocketSnapshot: BotRocketSnapshot | undefined
+      if (adapter.getRocketSnapshot && adapter.placeRocketBet) {
+        const schedulerLease = this.schedulerLease
+        rocketSnapshot = await adapter.getRocketSnapshot(bots.filter(bot => bot.botEnabled).map(bot => bot.id), async () => {
+          return schedulerLease ? this.dependencies.lease.renew(schedulerLease).catch(() => false) : false
+        }).catch(error => {
+          this.dependencies.log?.('bot_rocket_snapshot_failed', { code: errorCode(error) })
+          return undefined
+        })
+      }
       await Promise.all(bots.map(async bot => {
         let lease = this.leases.get(bot.botKey)
         if (lease && !await this.dependencies.lease.renew(lease).catch(() => false)) {
@@ -137,24 +161,54 @@ export class OnlinePokerBotOrchestrator {
           this.leases.delete(bot.botKey)
           lease = undefined
         }
+        let acquiredLease = false
         if (!bot.botEnabled) {
           if (lease) await this.dependencies.lease.release(lease).catch(() => false)
           this.leases.delete(bot.botKey)
+          this.pendingRocketBets.delete(bot.id)
           return
         }
-        lease ??= await this.dependencies.lease.acquire(bot.botKey).catch(() => null) ?? undefined
+        if (!lease) {
+          lease = await this.dependencies.lease.acquire(bot.botKey).catch(() => null) ?? undefined
+          acquiredLease = Boolean(lease)
+        }
         if (!lease) return
+        const rocketFence = this.rocketFence(lease)
+        if (acquiredLease && adapter.registerRocketLease) {
+          try {
+            await adapter.registerRocketLease(bot.id, rocketFence)
+          } catch (error) {
+            await this.dependencies.lease.release(lease).catch(() => false)
+            this.pendingRocketBets.delete(bot.id)
+            this.dependencies.log?.('bot_rocket_lease_registration_rejected', { botKey: bot.botKey, code: errorCode(error) })
+            return
+          }
+        }
         this.leases.set(bot.botKey, lease)
         try {
           const fence: OnlineRoomApiDependencies = { botFence: { key: lease.leaseKey, token: lease.token } }
           const roomCode = await adapter.findSeatedRoom(bot.id).catch(() => null)
           if (roomCode) {
+            this.pendingRocketBets.delete(bot.id)
             await this.progressSeatedBot(bot, roomCode, fence, activeIds.has(bot.id), botIds)
             return
           }
           this.pending.delete(bot.id)
-          if (!activeIds.has(bot.id) || bot.balance < config.startingStack) return
-          await this.findRoomOrCreate(bot, rooms, botIds, fence)
+          if (!activeIds.has(bot.id)) {
+            this.pendingRocketBets.delete(bot.id)
+            return
+          }
+          if (bot.balance >= config.startingStack) {
+            const pokerPriority = await this.findRoomOrCreate(bot, rooms, botIds, fence)
+            if (pokerPriority) {
+              this.pendingRocketBets.delete(bot.id)
+              return
+            }
+          }
+          const rocketState = rocketSnapshot?.bots[bot.id]
+          if (rocketSnapshot && rocketState && adapter.placeRocketBet) {
+            await this.progressRocketBot(bot, rocketSnapshot, rocketState, rocketFence)
+          } else this.pendingRocketBets.delete(bot.id)
         } catch (error) {
           this.dependencies.log?.('bot_orchestrator_operation_rejected', { botKey: bot.botKey, code: errorCode(error) })
         }
@@ -165,6 +219,7 @@ export class OnlinePokerBotOrchestrator {
   async shutdown(): Promise<void> {
     const current = [...this.leases.values()]
     this.leases.clear()
+    this.pendingRocketBets.clear()
     await Promise.all(current.map(lease => this.dependencies.lease.release(lease).catch(() => false)))
     if (this.schedulerLease) await this.dependencies.lease.release(this.schedulerLease).catch(() => false)
     this.schedulerLease = undefined
@@ -235,7 +290,7 @@ export class OnlinePokerBotOrchestrator {
     return renewed
   }
 
-  private async findRoomOrCreate(bot: PersistentBotIdentity, rooms: readonly OnlineRoomLobbyEntry[], botIds: ReadonlySet<string>, fence: OnlineRoomApiDependencies): Promise<void> {
+  private async findRoomOrCreate(bot: PersistentBotIdentity, rooms: readonly OnlineRoomLobbyEntry[], botIds: ReadonlySet<string>, fence: OnlineRoomApiDependencies): Promise<boolean> {
     const { config, adapter } = this.dependencies
     const candidates = [...rooms].filter(room => room.playerCount < room.maxPlayers).sort((a, b) => a.createdAt.localeCompare(b.createdAt))
     for (const candidate of candidates) {
@@ -249,7 +304,7 @@ export class OnlinePokerBotOrchestrator {
       const humanPresent = table.players.some(player => !botIds.has(player.playerId))
       const roomLimit = botOwnedRoom && !humanPresent ? 6 : config.maxBotsPerRoom
       if (botCount >= roomLimit) continue
-      if (table.players.some(player => player.playerId === bot.id)) return
+      if (table.players.some(player => player.playerId === bot.id)) return true
       await this.mutateWithConflictRecovery(bot, candidate.code, fence, publicRoom.room, 'join',
         current => adapter.joinRoom(bot.id, candidate.code, fence),
         current => current.visibility === 'PUBLIC'
@@ -259,7 +314,7 @@ export class OnlinePokerBotOrchestrator {
       if (await adapter.findSeatedRoom(bot.id).catch(() => null) === candidate.code) {
         this.dependencies.log?.('bot_joined_public_room', { botKey: bot.botKey, roomCode: candidate.code })
       }
-      return
+      return true
     }
 
     const activeBotRooms = await adapter.countBotCreatedRooms([...botIds])
@@ -269,11 +324,58 @@ export class OnlinePokerBotOrchestrator {
       try {
         const created = await adapter.createRoom(bot.id, { visibility: 'PUBLIC', startingStack: config.startingStack, smallBlind: config.smallBlind, bigBlind: config.bigBlind }, fence)
         this.dependencies.log?.('bot_created_public_room', { botKey: bot.botKey, roomCode: created.room.roomCode })
+        return true
       } catch (error) {
         this.createdRoomReservations -= 1
         throw error
       }
     }
+    return false
+  }
+
+  private rocketFence(lease: OnlinePokerBotLease): BotRocketFence {
+    return Object.freeze({
+      key: lease.leaseKey,
+      token: lease.token,
+      isLeaseCurrent: () => this.dependencies.lease.renew(lease).catch(() => false)
+    })
+  }
+
+  private async progressRocketBot(
+    bot: PersistentBotIdentity,
+    snapshot: BotRocketSnapshot,
+    state: Readonly<{ balance: number; hasBet: boolean }>,
+    fence: BotRocketFence
+  ): Promise<void> {
+    const { adapter, config } = this.dependencies
+    const placeRocketBet = adapter.placeRocketBet
+    if (!placeRocketBet) return
+    if (snapshot.phase !== 'betting' || state.hasBet || state.balance < 1 || snapshot.bettingMsRemaining < 100) {
+      this.pendingRocketBets.delete(bot.id)
+      return
+    }
+
+    let plan = this.pendingRocketBets.get(bot.id)
+    if (!plan || plan.roundId !== snapshot.roundId) {
+      const shouldPlay = this.random() < (config.rocketPlayProbability ?? 0)
+      const delayMs = 700 + this.random() * 4_300
+      const remaining = snapshot.bettingMsRemaining
+      const dueAt = this.now() + Math.min(delayMs, Math.max(100, remaining - 100))
+      const portion = 0.005 + this.random() * 0.015
+      const stake = Math.min(1_000_000, Math.max(1, Math.floor(state.balance * portion)))
+      const autoCashout = Math.floor((1.05 + this.random() * 1.95) * 100) / 100
+      plan = Object.freeze({ roundId: snapshot.roundId, dueAt, shouldPlay, stake, autoCashout })
+      this.pendingRocketBets.set(bot.id, plan)
+    }
+    if (!plan.shouldPlay || this.now() < plan.dueAt) return
+
+    const placed = await placeRocketBet(bot.id, {
+      expectedRoundId: plan.roundId,
+      stake: Math.min(plan.stake, state.balance),
+      autoCashout: plan.autoCashout
+    }, fence)
+    this.pendingRocketBets.delete(bot.id)
+    if (placed) this.dependencies.log?.('bot_rocket_bet_placed', { botKey: bot.botKey, stake: Math.min(plan.stake, state.balance) })
   }
 
   private async progressSeatedBot(bot: PersistentBotIdentity, code: string, fence: OnlineRoomApiDependencies, active: boolean, botIds: ReadonlySet<string>): Promise<void> {

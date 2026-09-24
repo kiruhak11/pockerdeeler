@@ -6,11 +6,160 @@ import { verifyUserAuthToken } from './userAccountService'
 import { adjustUserWallet } from './walletService'
 import { getEconomySnapshot, recentMiniGameThrottle, settleMiniGameEconomy } from './miniGameEconomyService'
 import { crashAtFromUnit } from '../utils/crashMath'
+import { lockOnlineFundsTransition } from './onlineRoomAccountingService'
 
 const BETTING_MS = 15_000
 const ROUND_GAP_MS = 2_500
 const CRASH_LOCK = 928_374
 type Tx = Prisma.TransactionClient
+
+export type BotRocketFence = Readonly<{
+  key: string
+  token: string
+  isLeaseCurrent: () => Promise<boolean>
+}>
+
+export type BotRocketSnapshot = Readonly<{
+  roundId: string
+  phase: 'betting' | 'flying' | 'crashed'
+  bettingMsRemaining: number
+  bots: Readonly<Record<string, Readonly<{ balance: number; hasBet: boolean }>>>
+}>
+
+function botLeaseError() {
+  return Object.assign(createError({ statusCode: 409, statusMessage: 'Bot lease is no longer valid.' }), { code: 'BOT_LEASE_LOST' })
+}
+
+function fenceGeneration(fence: BotRocketFence): bigint {
+  const match = /^(\d+):([A-Za-z0-9_-]{1,128})$/.exec(fence.token)
+  if (!match) throw botLeaseError()
+  return BigInt(match[1]!)
+}
+
+async function persistBotRocketFence(tx: Tx, userId: string, fence: BotRocketFence) {
+  if (!await fence.isLeaseCurrent().catch(() => false)) throw botLeaseError()
+  const nextFence = fenceGeneration(fence)
+  const bot = await tx.user.findUnique({ where: { id: userId }, select: { botKey: true, isBot: true, botEnabled: true } })
+  // Lease namespaces are injected by the orchestrator (and isolated tests may
+  // use a private prefix); the final key segment must still identify this bot.
+  if (!bot?.isBot || !bot.botEnabled || !bot.botKey || !fence.key.endsWith(`:${bot.botKey}`)) throw botLeaseError()
+
+  // Persist the Redis generation in PostgreSQL. Lease registration and every
+  // Rocket wallet mutation take CRASH_LOCK, so takeover is serialized against
+  // an in-flight old worker before the new lease is allowed to act.
+  const accepted = await tx.user.updateMany({
+    where: { id: userId, isBot: true, botEnabled: true, botFencingToken: { lte: nextFence } },
+    data: { botFencingToken: nextFence }
+  })
+  if (accepted.count !== 1) throw botLeaseError()
+}
+
+/** Register a newly acquired shared bot lease before the worker can act. */
+export async function registerBotRocketLease(userId: string, fence: BotRocketFence): Promise<void> {
+  await prisma.$transaction(async tx => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${CRASH_LOCK})`
+    await persistBotRocketFence(tx, userId, fence)
+  })
+}
+
+/** Server-only snapshot for the existing bot orchestrator; never includes outcome secrets. */
+export async function getBotRocketSnapshot(
+  botIds: readonly string[],
+  assertSchedulerLease: () => Promise<boolean>
+): Promise<BotRocketSnapshot> {
+  return prisma.$transaction(async tx => {
+    const round = await currentRound(tx)
+    if (!await assertSchedulerLease().catch(() => false)) throw botLeaseError()
+    await settleAutoCashouts(tx, round)
+    const ids = [...new Set(botIds)]
+    const users = await tx.user.findMany({
+      where: { id: { in: ids }, isBot: true, botEnabled: true },
+      select: { id: true, wallet: { select: { balance: true } } }
+    })
+    const bets = await tx.crashBet.findMany({ where: { roundId: round.id, userId: { in: ids } }, select: { userId: true } })
+    const alreadyBet = new Set(bets.map(bet => bet.userId))
+    const bots: Record<string, { balance: number; hasBet: boolean }> = Object.create(null)
+    for (const user of users) {
+      if (!user.wallet) continue
+      bots[user.id] = { balance: Number(user.wallet.balance), hasBet: alreadyBet.has(user.id) }
+    }
+    const phase = round.phase
+    if (phase !== 'betting' && phase !== 'flying' && phase !== 'crashed') throw new Error('Rocket round phase is invalid.')
+    return Object.freeze({
+      roundId: round.id,
+      phase,
+      bettingMsRemaining: phase === 'betting' ? Math.max(0, BETTING_MS - (Date.now() - round.startedAt.getTime())) : 0,
+      bots: Object.freeze(bots)
+    })
+  })
+}
+
+function isInsufficientWalletFunds(error: unknown): boolean {
+  const value = error as { statusCode?: unknown; statusMessage?: unknown } | null
+  return value?.statusCode === 409 && typeof value.statusMessage === 'string'
+    && value.statusMessage.includes('недостаточно свободных фишек')
+}
+
+function validateCrashBetInput(stake: number, autoCashout: number | null) {
+  if (!Number.isSafeInteger(stake) || stake < 1 || stake > 1_000_000) throw createError({ statusCode: 400, statusMessage: 'Ставка должна быть от 1 до 1 000 000' })
+  if (autoCashout !== null && (!Number.isFinite(autoCashout) || Math.round(autoCashout * 100) / 100 !== autoCashout || autoCashout < 1.01 || autoCashout > 1000)) throw createError({ statusCode: 400, statusMessage: 'Автовывод должен быть от 1.01x до 1000x, максимум 2 знака после запятой' })
+  return autoCashout === null ? null : Math.floor(autoCashout * 100)
+}
+
+async function placeCrashBetForUser(
+  userId: string,
+  stake: number,
+  autoCashout: number | null,
+  botOptions?: Readonly<{ expectedRoundId: string; fence: BotRocketFence }>
+) {
+  const autoCashoutAt = validateCrashBetInput(stake, autoCashout)
+  try {
+    return await prisma.$transaction(async tx => {
+      // Take the same lock used by currentRound before checking/recording the
+      // lease. Serialize against ONLINE buy-in/cash-out transitions as well,
+      // so a seat cannot become RESERVING between the poker-priority check and
+      // the wallet debit. A takeover registers its newer generation under this lock too.
+      if (botOptions) {
+        await lockOnlineFundsTransition(tx)
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${CRASH_LOCK})`
+        await persistBotRocketFence(tx, userId, botOptions.fence)
+        const pokerReservation = await tx.onlineRoomPlayer.findFirst({
+          where: { userId, status: { in: ['RESERVING', 'ACTIVE', 'CASH_OUT_PENDING'] } },
+          select: { id: true }
+        })
+        if (pokerReservation) return false
+      }
+      const round = await currentRound(tx)
+      if (botOptions && (round.id !== botOptions.expectedRoundId || round.phase !== 'betting')) return false
+      if (round.phase !== 'betting') throw createError({ statusCode: 409, statusMessage: 'Ставки принимаются только до взлёта' })
+      const existing = await tx.crashBet.findUnique({ where: { roundId_userId: { roundId: round.id, userId } } })
+      if (existing) {
+        if (botOptions) return false
+        throw createError({ statusCode: 409, statusMessage: 'Ставка уже сделана' })
+      }
+      await adjustUserWallet(tx, { userId, delta: -BigInt(stake), entryType: 'CRASH_STAKE', idempotencyKey: `crash:stake:${round.id}:${userId}`, metadata: { roundId: round.id } })
+      await tx.crashBet.create({ data: { roundId: round.id, userId, stake, autoCashout: autoCashoutAt } })
+      if (botOptions) return true
+      return response(tx, userId)
+    })
+  } catch (error) {
+    if (botOptions && isInsufficientWalletFunds(error)) return false
+    throw error
+  }
+}
+
+/** Fenced, account-backed bot bet using the same round, wallet, ledger and CrashBet path as humans. */
+export async function placeCrashBetForBot(
+  userId: string,
+  input: Readonly<{ expectedRoundId: string; stake: number; autoCashout: number | null }>,
+  fence: BotRocketFence
+): Promise<boolean> {
+  if (!input.expectedRoundId) return false
+  return Boolean(await placeCrashBetForUser(userId, input.stake, input.autoCashout, {
+    expectedRoundId: input.expectedRoundId,
+    fence
+  }))
+}
 
 function newSeed() {
   const seed = randomBytes(32).toString('hex')
@@ -104,18 +253,7 @@ export async function crashState(token?: string | null) {
 
 export async function placeCrashBet(token: string | null | undefined, stake: number, autoCashout: number | null = null) {
   const userId = await userIdFromToken(token)
-  if (!Number.isSafeInteger(stake) || stake < 1 || stake > 1_000_000) throw createError({ statusCode: 400, statusMessage: 'Ставка должна быть от 1 до 1 000 000' })
-  if (autoCashout !== null && (!Number.isFinite(autoCashout) || Math.round(autoCashout * 100) / 100 !== autoCashout || autoCashout < 1.01 || autoCashout > 1000)) throw createError({ statusCode: 400, statusMessage: 'Автовывод должен быть от 1.01x до 1000x, максимум 2 знака после запятой' })
-  const autoCashoutAt = autoCashout === null ? null : Math.floor(autoCashout * 100)
-  return prisma.$transaction(async tx => {
-    const round = await currentRound(tx)
-    if (round.phase !== 'betting') throw createError({ statusCode: 409, statusMessage: 'Ставки принимаются только до взлёта' })
-    const existing = await tx.crashBet.findUnique({ where: { roundId_userId: { roundId: round.id, userId } } })
-    if (existing) throw createError({ statusCode: 409, statusMessage: 'Ставка уже сделана' })
-    await adjustUserWallet(tx, { userId, delta: -BigInt(stake), entryType: 'CRASH_STAKE', idempotencyKey: `crash:stake:${round.id}:${userId}`, metadata: { roundId: round.id } })
-    await tx.crashBet.create({ data: { roundId: round.id, userId, stake, autoCashout: autoCashoutAt } })
-    return response(tx, userId)
-  })
+  return placeCrashBetForUser(userId, stake, autoCashout)
 }
 
 export async function cashoutCrash(token: string | null | undefined) {

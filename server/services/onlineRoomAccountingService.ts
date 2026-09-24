@@ -40,9 +40,11 @@ async function lockRoom(tx: Prisma.TransactionClient, roomId: string, allowClose
 }
 
 /** Serializes all ONLINE wallet transitions with the season wallet reset. */
-async function lockSeasonTransition(tx: Prisma.TransactionClient): Promise<void> {
+export async function lockOnlineFundsTransition(tx: Prisma.TransactionClient): Promise<void> {
   await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended('season-transition', 0))::text`
 }
+
+const lockSeasonTransition = lockOnlineFundsTransition
 
 async function lockPlayer(tx: Prisma.TransactionClient, roomId: string, userId: string) {
   return tx.onlineRoomPlayer.findUnique({ where: { roomId_userId: { roomId, userId } } })

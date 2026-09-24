@@ -14,6 +14,7 @@ import {
   type OnlinePokerBotDecisionSnapshot
 } from './onlineRoomApiService'
 import { ensureOnlinePokerBots, listOnlinePokerBots } from './botIdentityService'
+import { getBotRocketSnapshot, placeCrashBetForBot, registerBotRocketLease } from './crashService'
 import type { BotActionDecisionSnapshot, OnlinePokerBotOrchestratorAdapter } from './onlinePokerBotOrchestrator'
 import type { OnlineRoomApiDependencies } from './onlineRoomApiService'
 
@@ -47,7 +48,10 @@ export const onlinePokerBotApiAdapter: OnlinePokerBotOrchestratorAdapter = Objec
       concurrencyToken: current.concurrencyToken,
       expectedRoomVersion: current.room.roomVersion
     }, dependencies)
-  }
+  },
+  registerRocketLease: registerBotRocketLease,
+  getRocketSnapshot: getBotRocketSnapshot,
+  placeRocketBet: placeCrashBetForBot
 })
 
 export { ensureOnlinePokerBots }

@@ -111,6 +111,7 @@ model User {
   botSkillTier            String?          @map("bot_skill_tier") @db.VarChar(16)
   botPlayStyle            String?          @map("bot_play_style") @db.VarChar(32)
   botEnabled              Boolean          @default(true) @map("bot_enabled")
+  botFencingToken         BigInt           @default(0) @map("bot_fencing_token")
   blockedAt               DateTime?        @map("blocked_at") @db.Timestamptz(6)
   deletedAt               DateTime?        @map("deleted_at") @db.Timestamptz(6)
   mustChangePassword      Boolean          @default(false) @map("must_change_password")
