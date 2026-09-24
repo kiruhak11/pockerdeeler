@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { createError, getCookie, getRequestHeader, getRequestIP, setCookie, type H3Event } from 'h3'
 import { prisma } from '../db/client'
 import { hashPassword, sessionHash, issueUserAuthToken, getUserProfile, getUserByToken } from './userAccountService'
-import { acceptRegistrationLegalDocuments, assertRegistrationLegalConfirmations, type RegistrationLegalConfirmationInput } from './legalService'
+import { acceptRegistrationLegalDocuments, assertRegistrationLegalConfirmations, ensureRegistrationLegalDocuments, type RegistrationLegalConfirmationInput } from './legalService'
 import { isolatedAuthTests, accountCookie } from '../utils/accountCookie'
 import { assertPhoneStartLimit } from '../utils/phoneStartLimit'
 
@@ -94,7 +94,14 @@ export async function pollPhoneVerification(event: H3Event, id: string) {
 export async function completePhoneVerification(event: H3Event, input: { id: string; username?: string; password: string; legal?: RegistrationLegalConfirmationInput }) {
   const browserHash = verificationBrowser(event)
   if (input.password.length < 12 || input.password.length > 128) throw createError({ statusCode: 400, message: 'Пароль: от 12 до 128 символов' })
-  const linkedUser = accountCookie(event) ? await getUserByToken(accountCookie(event)) : null
+  // Registration's legal snapshots must be ready before the user/verification
+  // transaction starts. Seeding them inside that transaction through the
+  // global Prisma client deadlocks a one-connection PgBouncer pool.
+  const verification = await prisma.phoneVerification.findUnique({ where: { id: input.id }, select: { purpose: true } })
+  if (verification?.purpose === 'register') await ensureRegistrationLegalDocuments()
+  // Only phone linking is authenticated by an existing account session. A
+  // stale cookie must not prevent a new registration or password recovery.
+  const linkedUser = verification?.purpose === 'link' && accountCookie(event) ? await getUserByToken(accountCookie(event)) : null
   const result = await prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT id FROM phone_verifications WHERE id = ${input.id}::uuid FOR UPDATE`
     const v = await tx.phoneVerification.findUnique({ where: { id: input.id } })

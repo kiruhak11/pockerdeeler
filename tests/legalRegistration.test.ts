@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { PrismaClient } from '@prisma/client'
-import { acceptRegistrationLegalDocuments, assertRegistrationLegalConfirmations } from '../server/services/legalService'
+import { acceptRegistrationLegalDocuments, assertRegistrationLegalConfirmations, ensureRegistrationLegalDocuments } from '../server/services/legalService'
 
 const confirmations = { ageConfirmed: true, termsAccepted: true, privacyAcknowledged: true, personalDataConsent: true }
 
@@ -12,6 +12,7 @@ test('new registration records the four mandatory snapshots once and excludes di
   const user = await db.user.create({ data: { username: `legal_registration_${suffix}`, passwordHash: 'test' } })
   const requestId = randomUUID()
   try {
+    await ensureRegistrationLegalDocuments()
     await db.$transaction(tx => acceptRegistrationLegalDocuments(tx, { userId: user.id, requestId, confirmations, ip: '127.0.0.1', userAgent: 'registration-test' }))
     await db.$transaction(tx => acceptRegistrationLegalDocuments(tx, { userId: user.id, requestId, confirmations, ip: '127.0.0.1', userAgent: 'registration-test-retry' }))
     const rows = await db.legalAcceptance.findMany({ where: { requestId }, include: { document: true }, orderBy: { document: { type: 'asc' } } })

@@ -305,16 +305,25 @@ export class OnlinePokerBotOrchestrator {
       const roomLimit = botOwnedRoom && !humanPresent ? 6 : config.maxBotsPerRoom
       if (botCount >= roomLimit) continue
       if (table.players.some(player => player.playerId === bot.id)) return true
+      let joinAccepted = false
       await this.mutateWithConflictRecovery(bot, candidate.code, fence, publicRoom.room, 'join',
-        current => adapter.joinRoom(bot.id, candidate.code, fence),
+        async () => {
+          const result = await adapter.joinRoom(bot.id, candidate.code, fence)
+          joinAccepted = true
+          return result
+        },
         current => current.visibility === 'PUBLIC'
           && current.pokerTable.players.length < current.maxPlayers
           && !current.pokerTable.players.some(player => player.playerId === bot.id)
           && bot.balance >= candidate.startingStack)
-      if (await adapter.findSeatedRoom(bot.id).catch(() => null) === candidate.code) {
+      const seatedRoomCode = await adapter.findSeatedRoom(bot.id).catch(() => null)
+      if (seatedRoomCode === candidate.code) {
         this.dependencies.log?.('bot_joined_public_room', { botKey: bot.botKey, roomCode: candidate.code })
+        return true
       }
-      return true
+      // A fulfilled join response or an existing seat elsewhere must stop us
+      // from trying another room, but a stale/full candidate is not a join.
+      if (joinAccepted || seatedRoomCode) return true
     }
 
     const activeBotRooms = await adapter.countBotCreatedRooms([...botIds])

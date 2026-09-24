@@ -32,6 +32,11 @@ export type RegistrationLegalConfirmationInput = {
 
 const registrationRequiredTypes: LegalDocumentType[] = ['USER_AGREEMENT', 'PRIVACY_POLICY', 'PERSONAL_DATA_CONSENT', 'AGE_CONFIRMATION']
 
+/** Seed the registration registry before opening the account-creation transaction. */
+export async function ensureRegistrationLegalDocuments() {
+  await ensureLegalDocuments(prisma, registrationRequiredTypes)
+}
+
 export type LegalAcceptanceInput = {
   userId: string
   context: LegalAcceptanceContext
@@ -280,12 +285,11 @@ export async function acceptRegistrationLegalDocuments(tx: Prisma.TransactionCli
   userAgent: string
 }) {
   assertRegistrationLegalConfirmations(input.confirmations)
-  // Seed and validate the append-only registry on a committed client before
-  // entering the registration transaction. A concurrent first registration
-  // must not turn a harmless registry race into a P2002 that aborts its tx.
-  await ensureLegalDocuments()
+  // The caller seeds the registry before opening its transaction. Never issue
+  // a global Prisma query here: registration already holds the transaction
+  // connection, which can be the only connection available through PgBouncer.
   await lockLegalAcceptanceRequest(tx, input.requestId)
-  await ensureLegalDocuments(tx)
+  await ensureLegalDocuments(tx, registrationRequiredTypes)
   const existing = await tx.legalAcceptance.findMany({ where: { requestId: input.requestId }, select: { userId: true, context: true } })
   if (existing.some(row => row.userId !== input.userId)) throw createError({ statusCode: 409, message: 'Идентификатор запроса принадлежит другому пользователю' })
   if (existing.some(row => row.context !== 'REGISTRATION')) throw createError({ statusCode: 409, message: 'Идентификатор запроса уже использован в другом контексте' })

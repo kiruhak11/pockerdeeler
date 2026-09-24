@@ -110,6 +110,40 @@ test('bot joins an old public room through adapter join and respects room bot ca
   assert.equal(h.calls.find(call => call.method === 'join')!.args[1], 'AB2345')
 })
 
+test('a stale full public room candidate does not block joining the next candidate', async () => {
+  const identity = bot('online-bot-01')
+  const fullRoom = room({ pokerTable: { ...room().pokerTable, players: Array.from({ length: 6 }, (_, index) => ({
+    playerId: `human-${index}`, seat: index + 1, stack: 1_000, connected: true, ready: false, sittingOut: false
+  })) } })
+  const rooms = [
+    { code: 'AB2345', playerCount: 1, maxPlayers: 6, status: 'WAITING', createdAt: new Date(0).toISOString(), startingStack: 1_000, smallBlind: 5, bigBlind: 10 },
+    { code: 'CD3456', playerCount: 1, maxPlayers: 6, status: 'WAITING', createdAt: new Date(1).toISOString(), startingStack: 1_000, smallBlind: 5, bigBlind: 10 }
+  ]
+  const h = harness({ bots: [identity], rooms, getRoom: (_id, code) => code === 'AB2345' ? fullRoom : room() })
+  const attemptedCodes: string[] = []
+  let seatedCode: string | null = null
+  const adapter: OnlinePokerBotOrchestratorAdapter = {
+    ...h.adapter,
+    findSeatedRoom: async () => seatedCode,
+    joinRoom: async (_id, code) => {
+      attemptedCodes.push(code)
+      if (code === 'AB2345') throw codedConflict()
+      seatedCode = code
+      return { room: room() } as any
+    }
+  }
+  const subject = new OnlinePokerBotOrchestrator({ config: baseConfig({ maxBotCreatedRooms: 0 }), adapter, lease: {
+    acquire: async botKey => ({ botKey, ownerId: 'worker', token: '1:worker', leaseKey: `lease:${botKey}` }),
+    renew: async () => true,
+    release: async () => true
+  }, random: () => 0 })
+
+  await subject.tick()
+
+  assert.deepEqual(attemptedCodes, ['AB2345', 'CD3456'])
+  assert.equal(seatedCode, 'CD3456')
+})
+
 test('a human room is not filled beyond the configured bot limit', async () => {
   const ids = ['online-bot-01-id', 'online-bot-02-id', 'online-bot-03-id']
   const occupied = room({ pokerTable: { ...room().pokerTable, players: ids.map((playerId, index) => ({ playerId, seat: index + 1, stack: 1_000, connected: true, ready: false, sittingOut: false })) } })

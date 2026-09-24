@@ -5,6 +5,9 @@ import { createServer } from 'node:http'
 import { createApp, eventHandler, readBody, toNodeListener } from 'h3'
 import Redis from 'ioredis'
 import { completePhoneVerification, pollPhoneVerification, startPhoneVerification } from '../server/services/phoneService'
+import { getUserProfile, sessionHash } from '../server/services/userAccountService'
+import { prisma } from '../server/db/client'
+import { accountCookie, clearAccountCookie, COOKIE_MARKER, saveAccountCookie } from '../server/utils/accountCookie'
 import { checkPhoneStartQuota, closePhoneStartLimitStore, consumePhoneStartCounters, PHONE_START_LIMITS, resolvePhoneSourceIp } from '../server/utils/phoneStartLimit'
 
 test('phone source IP ignores client forwarded headers without an explicitly trusted peer', () => {
@@ -33,9 +36,41 @@ test('missing Redis configuration fails closed', async () => {
   }
 })
 
+test('production auth cookie is secure, host-only, HttpOnly and usable behind an HTTPS proxy', async () => {
+  const previousNodeEnv = process.env.NODE_ENV
+  process.env.NODE_ENV = 'production'
+  const app = createApp()
+  app.use('/cookie', eventHandler(event => {
+    saveAccountCookie(event, 'opaque-session-token-for-cookie-test')
+    return { ok: true }
+  }))
+  const server = createServer(toNodeListener(app))
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('Test server did not bind')
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/cookie`, {
+      headers: { host: 'pocker.example', 'x-forwarded-proto': 'https' }
+    })
+    const cookie = response.headers.get('set-cookie') || ''
+    assert.equal(response.status, 200)
+    assert.match(cookie, /^poker_account=opaque-session-token-for-cookie-test;/)
+    assert.match(cookie, /(?:^|; )Secure(?:;|$)/)
+    assert.match(cookie, /(?:^|; )HttpOnly(?:;|$)/)
+    assert.match(cookie, /(?:^|; )SameSite=Lax(?:;|$)/)
+    assert.match(cookie, /(?:^|; )Path=\/(?:;|$)/)
+    assert.match(cookie, /Max-Age=2592000/)
+    assert.doesNotMatch(cookie, /Domain=/i)
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV
+    else process.env.NODE_ENV = previousNodeEnv
+  }
+})
+
 const testRedisUrl = process.env.PHONE_TEST_REDIS_URL
 const testDbUrl = process.env.DATABASE_URL
-const isolated = Boolean(testRedisUrl && /^redis:\/\/127\.0\.0\.1:56380\/15$/.test(testRedisUrl) && testDbUrl?.includes('pocker_phone_limit_test'))
+const isolated = Boolean(testRedisUrl && /^redis:\/\/127\.0\.0\.1:\d+\/\d+$/.test(testRedisUrl) && testDbUrl?.includes('_test'))
 
 test('phone start uses shared limits without changing the active verification flow', { skip: !isolated }, async t => {
   const previousRedisUrl = process.env.REDIS_URL
@@ -66,7 +101,24 @@ test('phone start uses shared limits without changing the active verification fl
   const app = createApp()
   app.use('/phone/start', eventHandler(async event => startPhoneVerification(event, await readBody(event))))
   app.use('/phone/status', eventHandler(async event => pollPhoneVerification(event, (await readBody(event)).id)))
-  app.use('/phone/complete', eventHandler(async event => completePhoneVerification(event, await readBody(event))))
+  app.use('/phone/complete', eventHandler(async event => {
+    const input = await readBody(event)
+    const result = await completePhoneVerification(event, { ...input, legal: {
+      ageConfirmed: input.ageConfirmed,
+      termsAccepted: input.termsAccepted,
+      privacyAcknowledged: input.privacyAcknowledged,
+      personalDataConsent: input.personalDataConsent
+    } })
+    saveAccountCookie(event, result.token)
+    return { user: result.user, token: COOKIE_MARKER }
+  }))
+  app.use('/auth/session', eventHandler(async event => ({ user: await getUserProfile(accountCookie(event)) })))
+  app.use('/auth/logout', eventHandler(async event => {
+    const token = accountCookie(event)
+    if (token) await prisma.accountSession.updateMany({ where: { tokenHash: sessionHash(token) }, data: { revokedAt: new Date() } })
+    clearAccountCookie(event)
+    return { success: true }
+  }))
   const server = createServer(toNodeListener(app))
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
@@ -75,8 +127,12 @@ test('phone start uses shared limits without changing the active verification fl
   const cookie = () => `poker_phone_browser=${randomBytes(32).toString('base64url')}`
   async function post(path: string, body: Record<string, unknown>, browserCookie = cookie(), headers: Record<string, string> = {}) {
     const response = await originalFetch(`${base}${path}`, {
-      method: 'POST', headers: { 'content-type': 'application/json', cookie: browserCookie, ...headers }, body: JSON.stringify(body)
+      method: 'POST', headers: { 'content-type': 'application/json', origin: base, cookie: browserCookie, ...headers }, body: JSON.stringify(body)
     })
+    return { response, data: await response.json() as Record<string, any> }
+  }
+  async function get(path: string, requestCookie = '') {
+    const response = await originalFetch(`${base}${path}`, { headers: { origin: base, ...(requestCookie ? { cookie: requestCookie } : {}) } })
     return { response, data: await response.json() as Record<string, any> }
   }
 
@@ -84,6 +140,9 @@ test('phone start uses shared limits without changing the active verification fl
     await t.test('normal start, active request reuse, status and registration remain available', async () => {
       await redis.flushdb()
       const browser = cookie(), phone = `+7999${String(Math.floor(Math.random() * 10_000_000)).padStart(7, '0')}`, requestId = randomUUID()
+      assert.equal((await get('/auth/session', browser)).response.status, 401)
+      const staleAccountCookie = `${browser}; poker_account=stale-session-token-that-is-not-in-this-test-database`
+      assert.equal((await get('/auth/session', staleAccountCookie)).response.status, 401)
       const first = await post('/phone/start', { phone, purpose: 'register', requestId }, browser)
       assert.equal(first.response.status, 200)
       assert.equal(first.data.status, 'pending')
@@ -100,10 +159,68 @@ test('phone start uses shared limits without changing the active verification fl
       assert.equal(providerStatusCalls, 1)
       const complete = await post('/phone/complete', {
         id: first.data.id, username: `phone_limit_${randomUUID().slice(0, 8)}`, password: 'Isolated-test-password-2026',
-        legal: { ageConfirmed: true, termsAccepted: true, privacyAcknowledged: true, personalDataConsent: true }
-      }, browser)
+        ageConfirmed: true, termsAccepted: true, privacyAcknowledged: true, personalDataConsent: true
+      }, staleAccountCookie)
       assert.equal(complete.response.status, 200)
       assert.equal(complete.data.user.phone, phone)
+      assert.equal(complete.data.token, COOKIE_MARKER)
+      const setCookie = complete.response.headers.get('set-cookie') || ''
+      assert.match(setCookie, /^poker_account=[^;]+;/)
+      assert.match(setCookie, /HttpOnly/)
+      assert.match(setCookie, /SameSite=Lax/)
+      assert.match(setCookie, /Path=\//)
+      const accountToken = setCookie.match(/(?:^|,\s*)poker_account=([^;,]+)/)?.[1]
+      assert.ok(accountToken)
+      const sessionCookie = `poker_account=${accountToken}`
+      const authenticated = await get('/auth/session', sessionCookie)
+      assert.equal(authenticated.response.status, 200)
+      assert.equal(authenticated.data.user.id, complete.data.user.id)
+      assert.equal((await get('/auth/session', sessionCookie)).response.status, 200, 'refresh keeps the cookie session')
+      assert.equal(await prisma.accountSession.count({ where: { userId: complete.data.user.id } }), 1)
+      assert.equal(await prisma.walletLedgerEntry.count({ where: { wallet: { userId: complete.data.user.id }, entryType: 'ACCOUNT_OPENING_GRANT' } }), 1)
+
+      const duplicate = await post('/phone/complete', {
+        id: first.data.id, username: complete.data.user.username, password: 'Isolated-test-password-2026',
+        ageConfirmed: true, termsAccepted: true, privacyAcknowledged: true, personalDataConsent: true
+      }, browser)
+      assert.equal(duplicate.response.status, 403)
+      assert.equal(await prisma.accountSession.count({ where: { userId: complete.data.user.id } }), 1)
+
+      const logout = await post('/auth/logout', {}, sessionCookie)
+      assert.equal(logout.response.status, 200)
+      assert.match(logout.response.headers.get('set-cookie') || '', /poker_account=;/)
+      assert.equal((await get('/auth/session', sessionCookie)).response.status, 401)
+    })
+
+    await t.test('unverified registration never creates a user or account session', async () => {
+      await redis.flushdb()
+      const browser = cookie(), phone = `+7998${String(Math.floor(Math.random() * 10_000_000)).padStart(7, '0')}`
+      const started = await post('/phone/start', { phone, purpose: 'register', requestId: randomUUID() }, browser)
+      const rejected = await post('/phone/complete', {
+        id: started.data.id, username: `phone_unverified_${randomUUID().slice(0, 8)}`, password: 'Isolated-test-password-2026',
+        ageConfirmed: true, termsAccepted: true, privacyAcknowledged: true, personalDataConsent: true
+      }, browser)
+      assert.equal(rejected.response.status, 403)
+      assert.equal((await get('/auth/session', browser)).response.status, 401)
+      assert.equal(await prisma.user.count({ where: { phone } }), 0)
+      assert.equal(await prisma.accountSession.count({ where: { user: { phone } } }), 0)
+    })
+
+    await t.test('two simultaneous completions create one user and one session', async () => {
+      await redis.flushdb()
+      const browser = cookie(), phone = `+7997${String(Math.floor(Math.random() * 10_000_000)).padStart(7, '0')}`
+      const started = await post('/phone/start', { phone, purpose: 'register', requestId: randomUUID() }, browser)
+      const verified = await post('/phone/status', { id: started.data.id }, browser)
+      assert.equal(verified.data.status, 'verified')
+      const payload = {
+        id: started.data.id, username: `phone_concurrent_${randomUUID().slice(0, 8)}`, password: 'Isolated-test-password-2026',
+        ageConfirmed: true, termsAccepted: true, privacyAcknowledged: true, personalDataConsent: true
+      }
+      const results = await Promise.all([post('/phone/complete', payload, browser), post('/phone/complete', payload, browser)])
+      assert.deepEqual(results.map(result => result.response.status).sort(), [200, 403])
+      const user = await prisma.user.findUniqueOrThrow({ where: { phone } })
+      assert.equal(await prisma.accountSession.count({ where: { userId: user.id } }), 1)
+      assert.equal(await prisma.walletLedgerEntry.count({ where: { wallet: { userId: user.id }, entryType: 'ACCOUNT_OPENING_GRANT' } }), 1)
     })
 
     await t.test('new cookies cannot bypass the normalized phone limit; 429 precedes SMS.ru', async () => {
