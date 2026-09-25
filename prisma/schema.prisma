@@ -143,6 +143,9 @@ model User {
   deletedAt               DateTime?        @map("deleted_at") @db.Timestamptz(6)
   mustChangePassword      Boolean          @default(false) @map("must_change_password")
   accountSessions         AccountSession[]
+  externalIdentities      ExternalIdentity[]
+  websocketAuthTickets    WebSocketAuthTicket[]
+  accountOrigin           String           @default("WEB") @map("account_origin") @db.VarChar(32)
   rewardSessions          RewardSession[]
   balance                 Int              @default(5000)
   predictionRating        Int              @default(1000) @map("prediction_rating")
@@ -209,6 +212,21 @@ model User {
   @@index([username])
   @@index([isBot, botEnabled])
   @@map("users")
+}
+
+model ExternalIdentity {
+  id             String   @id @default(uuid()) @db.Uuid
+  provider       String   @db.VarChar(32)
+  providerUserId String   @map("provider_user_id") @db.VarChar(256)
+  userId         String   @map("user_id") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerUserId])
+  @@unique([provider, userId])
+  @@index([userId])
+  @@map("external_identities")
 }
 
 model LegalDocument {
@@ -476,6 +494,19 @@ model AccountSession {
 
   @@index([userId])
   @@map("account_sessions")
+}
+
+model WebSocketAuthTicket {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  tokenHash  String    @unique @map("token_hash") @db.VarChar(64)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("websocket_auth_tickets")
 }
 
 model PhoneVerification {

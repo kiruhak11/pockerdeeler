@@ -5,9 +5,10 @@ export type OnlineSocketLocation = Readonly<{
   host: string
 }>
 
-export function onlineSocketUrl(location: OnlineSocketLocation, code: string): string {
+export function onlineSocketUrl(location: OnlineSocketLocation, code: string, ticket?: string): string {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${protocol}//${location.host}/ws/online/${encodeURIComponent(code.trim().toUpperCase())}`
+  const query = ticket ? `?ticket=${encodeURIComponent(ticket)}` : ''
+  return `${protocol}//${location.host}/ws/online/${encodeURIComponent(code.trim().toUpperCase())}${query}`
 }
 
 export function createOnlineActionId(random: () => string = () => Math.random().toString(36).slice(2)): string {

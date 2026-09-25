@@ -2,10 +2,13 @@
 import OnlinePokerTable from '~/components/online/OnlinePokerTable.vue'
 import { useAccountStore } from '~/stores/account'
 import { useOnlineRoomSocket } from '~/composables/useOnlineRoomSocket'
+import { ensureYandexSession, yandexAuthHeaders } from '~/platform/yandexSession'
+import { platformFromPath } from '~/platform/types'
 import type { OnlineApiResult, OnlineRoomState } from '~/types/online'
 
 const route = useRoute()
 const account = useAccountStore()
+const isYandex = computed(() => platformFromPath(route.path, route.query.platform) === 'YANDEX_GAMES')
 const code = computed(() => String(route.params.code || '').trim().toUpperCase())
 const state = ref<OnlineRoomState | null>(null)
 const concurrencyToken = ref<string | null>(null)
@@ -74,7 +77,7 @@ async function loadState() {
   errorStatus.value = null
   joinPrompt.value = false
   try {
-    const result = await $fetch<OnlineApiResult>(`/api/online/rooms/${encodeURIComponent(code.value)}/state`, { retry: 0 })
+    const result = await $fetch<OnlineApiResult>(`/api/online/rooms/${encodeURIComponent(code.value)}/state`, { headers: yandexAuthHeaders(isYandex.value), retry: 0 })
     applyAuthoritativeState(result.room, result.concurrencyToken)
     const player = result.room.pokerTable.players.find(candidate => candidate.playerId === account.user?.id)
     privateRoom.value = result.room.visibility === 'PRIVATE'
@@ -100,7 +103,7 @@ async function loadSpectatorCount() {
     return
   }
   try {
-    const result = await $fetch<{ count: number }>(`/api/online/rooms/${encodeURIComponent(code.value)}/spectators`, { retry: 0 })
+    const result = await $fetch<{ count: number }>(`/api/online/rooms/${encodeURIComponent(code.value)}/spectators`, { headers: yandexAuthHeaders(isYandex.value), retry: 0 })
     spectatorCount.value = Number.isSafeInteger(result.count) && result.count >= 0 ? result.count : 0
   } catch {
     // The game state remains available if the optional live spectator count is temporarily unavailable.
@@ -109,7 +112,7 @@ async function loadSpectatorCount() {
 
 async function joinRoom() {
   if (joinBusy.value || !account.user) {
-    if (!account.user) await navigateTo(`/login?redirect=${encodeURIComponent(`/online/${code.value}`)}`)
+    if (!account.user) await navigateTo(isYandex.value ? '/yandex' : `/login?redirect=${encodeURIComponent(`/online/${code.value}`)}`)
     return
   }
   joinBusy.value = true
@@ -123,6 +126,7 @@ async function joinRoom() {
         ...(state.value?.roomVersion === undefined ? {} : { expectedRoomVersion: state.value.roomVersion }),
         ...(joinSecret.value ? { joinSecret: joinSecret.value } : {})
       },
+      headers: yandexAuthHeaders(isYandex.value),
       retry: 0
     })
     seatingSucceeded = true
@@ -130,6 +134,7 @@ async function joinRoom() {
     const readyResult = await $fetch<OnlineApiResult>(`/api/online/rooms/${encodeURIComponent(code.value)}/ready`, {
       method: 'POST',
       body: { ready: true, concurrencyToken: result.concurrencyToken, expectedRoomVersion: result.room.roomVersion },
+      headers: yandexAuthHeaders(isYandex.value),
       retry: 0
     })
     applyAuthoritativeState(readyResult.room, readyResult.concurrencyToken)
@@ -147,7 +152,7 @@ async function joinRoom() {
 async function mutate(path: 'ready' | 'sitting-out', payload: Record<string, unknown>) {
   if (!concurrencyToken.value) return
   try {
-    const result = await $fetch<OnlineApiResult>(`/api/online/rooms/${encodeURIComponent(code.value)}/${path}`, { method: 'POST', body: { ...payload, concurrencyToken: concurrencyToken.value, expectedRoomVersion: state.value?.roomVersion }, retry: 0 })
+    const result = await $fetch<OnlineApiResult>(`/api/online/rooms/${encodeURIComponent(code.value)}/${path}`, { method: 'POST', body: { ...payload, concurrencyToken: concurrencyToken.value, expectedRoomVersion: state.value?.roomVersion }, headers: yandexAuthHeaders(isYandex.value), retry: 0 })
     applyAuthoritativeState(result.room, result.concurrencyToken)
     notice.value = ''
     socket.requestState()
@@ -161,10 +166,10 @@ async function leave() {
   if (!concurrencyToken.value) return
   if (import.meta.client && !window.confirm('Выйти из этой комнаты?')) return
   try {
-    await $fetch(`/api/online/rooms/${encodeURIComponent(code.value)}/leave`, { method: 'POST', body: { concurrencyToken: concurrencyToken.value, expectedRoomVersion: state.value?.roomVersion }, retry: 0 })
+    await $fetch(`/api/online/rooms/${encodeURIComponent(code.value)}/leave`, { method: 'POST', body: { concurrencyToken: concurrencyToken.value, expectedRoomVersion: state.value?.roomVersion }, headers: yandexAuthHeaders(isYandex.value), retry: 0 })
     notice.value = ''
     socket.disconnect()
-    await navigateTo('/rooms')
+    await navigateTo(isYandex.value ? '/yandex' : '/rooms')
   } catch (error) {
     notice.value = friendlyError(error)
     if (statusCode(error) === 409) await loadState()
@@ -176,7 +181,7 @@ async function changeStack(payload: { direction: 'ADD' | 'WITHDRAW'; amount: num
   stackOperationBusy.value = true
   try {
     const result = await $fetch<OnlineApiResult & { walletBalance: number }>(`/api/online/rooms/${encodeURIComponent(code.value)}/stack`, {
-      method: 'POST', body: payload, retry: 0
+      method: 'POST', body: payload, headers: yandexAuthHeaders(isYandex.value), retry: 0
     })
     applyAuthoritativeState(result.room, result.concurrencyToken)
     walletBalance.value = result.walletBalance
@@ -187,7 +192,9 @@ async function changeStack(payload: { direction: 'ADD' | 'WITHDRAW'; amount: num
     notice.value = friendlyError(error)
     await loadState()
     try {
-      const session = await $fetch<any>('/api/auth/session')
+      const session = isYandex.value
+        ? await $fetch<any>('/api/auth/yandex/session', { headers: yandexAuthHeaders(isYandex.value) })
+        : await $fetch<any>('/api/auth/session')
       walletBalance.value = Number(session.user?.balance) || 0
     } catch { /* Keep the last known balance if the session refresh is unavailable. */ }
   } finally {
@@ -198,10 +205,13 @@ async function changeStack(payload: { direction: 'ADD' | 'WITHDRAW'; amount: num
 onMounted(async () => {
   await account.loadSession()
   try {
-    await $fetch('/api/auth/session').then((response: any) => {
-      account.setUser(response.user)
-      walletBalance.value = Number(response.user?.balance) || 0
-    })
+    const user = isYandex.value
+      ? await ensureYandexSession()
+      : (await $fetch<{ user: any }>('/api/auth/session')).user
+    if (user) {
+      account.setUser(user)
+      walletBalance.value = Number(user.balance) || 0
+    }
   } catch { /* room endpoint reports auth state */ }
   await loadState()
   await loadSpectatorCount()
@@ -218,9 +228,10 @@ useHead(() => ({ title: state.value ? `ONLINE ${state.value.roomCode} · Poker` 
   <main v-else-if="errorStatus" class="online-state page-shell">
     <section class="panel">
       <h1>{{ errorStatus === 'not-found' ? 'Стол не найден' : errorStatus === 'unauthorized' ? 'Нужен вход' : 'Не удалось открыть стол' }}</h1>
-      <p>{{ errorStatus === 'unauthorized' ? 'Войдите в аккаунт и откройте ссылку на стол ещё раз.' : errorStatus === 'not-found' ? 'Проверьте код комнаты.' : 'Сервис временно недоступен. Попробуйте снова.' }}</p>
-      <NuxtLink v-if="errorStatus === 'unauthorized'" class="btn" :to="`/login?redirect=${encodeURIComponent(`/online/${code}`)}`">Войти</NuxtLink>
-      <NuxtLink class="btn" to="/rooms">К списку столов</NuxtLink>
+      <p>{{ errorStatus === 'unauthorized' ? (isYandex ? 'Гостевая сессия истекла. Вернитесь в игру и повторите подключение.' : 'Войдите в аккаунт и откройте ссылку на стол ещё раз.') : errorStatus === 'not-found' ? 'Проверьте код комнаты.' : 'Сервис временно недоступен. Попробуйте снова.' }}</p>
+      <NuxtLink v-if="errorStatus === 'unauthorized' && isYandex" class="btn" to="/yandex">Вернуться в игру</NuxtLink>
+      <NuxtLink v-else-if="errorStatus === 'unauthorized'" class="btn" :to="`/login?redirect=${encodeURIComponent(`/online/${code}`)}`">Войти</NuxtLink>
+      <NuxtLink class="btn" :to="isYandex ? '/yandex' : '/rooms'">К списку столов</NuxtLink>
       <button v-if="errorStatus === 'unavailable' || errorStatus === 'error'" class="btn btn--ghost" type="button" @click="loadState">Повторить</button>
     </section>
   </main>

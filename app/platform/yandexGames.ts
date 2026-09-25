@@ -12,10 +12,11 @@ type YandexPlayer = {
   getUniqueID(): string
   getName?(): string
   getPhoto?(size?: 'small' | 'medium' | 'large'): string
+  signature?: string
 }
 
 type YandexGamesSdk = {
-  getPlayer(): Promise<YandexPlayer>
+  getPlayer(options?: { signed?: boolean }): Promise<YandexPlayer>
   auth: { openAuthDialog(): Promise<void> }
   features?: {
     LoadingAPI?: { ready(): void | Promise<void> }
@@ -40,7 +41,7 @@ function optionalText(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
-function identityFromPlayer(player: YandexPlayer): PlatformPlayerIdentity {
+function identityFromPlayer(player: YandexPlayer, signature?: string): PlatformPlayerIdentity {
   const authorized = player.isAuthorized()
   const displayName = authorized ? optionalText(player.getName?.()) : undefined
   const avatarUrl = authorized ? optionalText(player.getPhoto?.('medium')) : undefined
@@ -48,6 +49,7 @@ function identityFromPlayer(player: YandexPlayer): PlatformPlayerIdentity {
     platform: APPLICATION_PLATFORMS.YANDEX_GAMES,
     platformUserId: player.getUniqueID(),
     authorized,
+    ...(signature ? { signature } : {}),
     ...(displayName ? { displayName } : {}),
     ...(avatarUrl ? { avatarUrl } : {})
   }
@@ -62,7 +64,7 @@ function createMockSdk(mode: Exclude<YandexMockMode, 'off'>): YandexGamesSdk {
     getPhoto: () => ''
   }
   return {
-    getPlayer: async () => player,
+    getPlayer: async options => options?.signed ? { ...player, signature: 'dev-mock-authorized-player' } : player,
     auth: { openAuthDialog: async () => { authorized = true } },
     features: {
       LoadingAPI: { ready() {} },
@@ -121,7 +123,9 @@ export class YandexGamesPlatformAdapter implements GamePlatformAdapter {
       await this.sdk.auth.openAuthDialog()
       this.player = await this.sdk.getPlayer()
     }
-    return identityFromPlayer(this.player)
+    if (!this.player.isAuthorized()) return identityFromPlayer(this.player)
+    this.player = await this.sdk.getPlayer({ signed: true })
+    return identityFromPlayer(this.player, this.player.signature)
   }
 
   async gameReady(): Promise<void> {

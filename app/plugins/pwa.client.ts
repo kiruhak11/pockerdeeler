@@ -8,7 +8,7 @@ interface InstallPromptEvent extends Event {
 
 export default defineNuxtPlugin(nuxtApp => {
   const route = useRoute()
-  if (platformFromPath(route.path) === 'YANDEX_GAMES') return
+  if (platformFromPath(route.path, route.query.platform) === 'YANDEX_GAMES') return
   const { state, persist, openInstallHelp, openOnboarding } = usePwa()
   const { safeToUpdate } = usePwaSafety()
   let deferred: InstallPromptEvent | null = null

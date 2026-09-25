@@ -1,5 +1,7 @@
 import { actionMessage, createOnlineActionId, onlineSocketUrl, pingMessage, startHandMessage } from '~/utils/onlineRoomUi'
 import type { OnlineAction, OnlineConnectionStatus, OnlineRoomState } from '~/types/online'
+import { platformFromPath } from '~/platform/types'
+import { yandexAuthHeaders } from '~/platform/yandexSession'
 
 type SocketHandlers = Readonly<{
   onState?: (state: OnlineRoomState, concurrencyToken?: string) => void
@@ -7,6 +9,8 @@ type SocketHandlers = Readonly<{
 }>
 
 export function useOnlineRoomSocket(roomCode: MaybeRefOrGetter<string>, handlers: SocketHandlers = {}) {
+  const route = useRoute()
+  const isYandex = computed(() => platformFromPath(route.path, route.query.platform) === 'YANDEX_GAMES')
   const status = ref<OnlineConnectionStatus>('loading')
   const errorMessage = ref('')
   const pendingActionId = ref<string | null>(null)
@@ -87,13 +91,19 @@ export function useOnlineRoomSocket(roomCode: MaybeRefOrGetter<string>, handlers
     if (payload.type === 'PONG') return
   }
 
-  function connect() {
+  async function connect() {
     if (!mounted || !enabled || socket.value || !code.value || typeof window === 'undefined') return
     status.value = attempt > 0 ? 'reconnecting' : 'connecting'
     errorMessage.value = ''
     let current: WebSocket
     try {
-      current = new WebSocket(onlineSocketUrl(window.location, code.value))
+      let ticket: string | undefined
+      if (isYandex.value) {
+        const result = await $fetch<{ ticket: string }>('/api/auth/yandex/ws-ticket', { method: 'POST', headers: yandexAuthHeaders(isYandex.value), retry: 0 })
+        ticket = result.ticket
+      }
+      if (!mounted || !enabled || socket.value) return
+      current = new WebSocket(onlineSocketUrl(window.location, code.value, ticket))
     } catch {
       scheduleReconnect()
       return

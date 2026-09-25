@@ -54,7 +54,7 @@ export async function verifyUserAuthToken(token: string, client: AuthClient = pr
   return { userId: session.userId }
 }
 
-function toPublicUser(user: { id: string; username: string; balance: number; predictionRating?: number; tableRating?: number; tableHandsPlayed?: number; tableHandsWon?: number; tableCurrentStreak?: number; tableBestStreak?: number; predictionCount?: number; predictionWins?: number; predictionSplitWins?: number; premiumType?: string; premiumUntil?: Date | null; lastDailyBonusAt?: Date | null; phone?: string | null; phoneVerifiedAt?: Date | null; role?: string; mustChangePassword?: boolean }, wallet?: { balance: bigint; version: number } | null) {
+export function toPublicUser(user: { id: string; username: string; balance: number; predictionRating?: number; tableRating?: number; tableHandsPlayed?: number; tableHandsWon?: number; tableCurrentStreak?: number; tableBestStreak?: number; predictionCount?: number; predictionWins?: number; predictionSplitWins?: number; premiumType?: string; premiumUntil?: Date | null; lastDailyBonusAt?: Date | null; phone?: string | null; phoneVerifiedAt?: Date | null; role?: string; mustChangePassword?: boolean }, wallet?: { balance: bigint; version: number } | null) {
   return {
     id: user.id,
     username: user.username,

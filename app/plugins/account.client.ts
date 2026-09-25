@@ -6,7 +6,7 @@ export default defineNuxtPlugin((nuxtApp) => {
   // Do not mutate Pinia before hydration. SSR renders the anonymous shell;
   // loading the HttpOnly session after mount keeps the first client tree equal.
   nuxtApp.hook('app:mounted', () => {
-    if (platformFromPath(route.path) === 'YANDEX_GAMES') return
+    if (platformFromPath(route.path, route.query.platform) === 'YANDEX_GAMES') return
     void (async () => {
       try {
         const { user } = await $fetch('/api/auth/session')

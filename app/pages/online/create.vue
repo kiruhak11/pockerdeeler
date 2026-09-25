@@ -2,7 +2,10 @@
 import { getHttpErrorMessage } from '~/utils/httpError'
 import { useAccountAuth } from '~/composables/useAccountAuth'
 import { useAccountStore } from '~/stores/account'
+import { ensureYandexSession, yandexAuthHeaders } from '~/platform/yandexSession'
+import { platformFromPath } from '~/platform/types'
 
+const route = useRoute()
 const account = useAccountStore()
 const { loadMe } = useAccountAuth()
 const visibility = ref<'PUBLIC' | 'PRIVATE'>('PUBLIC')
@@ -12,15 +15,17 @@ const smallBlind = ref(5)
 const bigBlind = ref(10)
 const busy = ref(false)
 const error = ref('')
+const isYandex = computed(() => platformFromPath(route.path, route.query.platform) === 'YANDEX_GAMES')
 
 async function createRoom() {
   if (busy.value) return
   busy.value = true
   error.value = ''
   try {
-    if (!account.user) await loadMe()
+    if (isYandex.value) await ensureYandexSession()
+    else if (!account.user) await loadMe()
     if (!account.user) {
-      await navigateTo('/login?redirect=/online/create')
+      await navigateTo(isYandex.value ? '/yandex' : '/login?redirect=/online/create')
       return
     }
     const result = await $fetch<{ room: { roomCode: string } }>('/api/online/rooms', {
@@ -32,14 +37,15 @@ async function createRoom() {
         bigBlind: bigBlind.value,
         ...(visibility.value === 'PRIVATE' ? { privateJoinSecret: privateJoinSecret.value } : {})
       },
-      retry: 0
+      headers: yandexAuthHeaders(isYandex.value), retry: 0
     })
     privateJoinSecret.value = ''
-    await navigateTo(`/online/${result.room.roomCode}`)
+    await navigateTo(`/online/${result.room.roomCode}${isYandex.value ? '?platform=YANDEX_GAMES' : ''}`)
   } catch (cause) {
     const status = (cause as { statusCode?: number; status?: number }).statusCode ?? (cause as { statusCode?: number; status?: number }).status
     if (status === 401) {
-      await navigateTo('/login?redirect=/online/create')
+      if (isYandex.value) error.value = getHttpErrorMessage(cause, 'Не удалось восстановить гостевую сессию.')
+      else await navigateTo('/login?redirect=/online/create')
     } else {
       error.value = getHttpErrorMessage(cause, 'Не удалось создать онлайн-стол. Попробуйте ещё раз.')
     }
@@ -48,13 +54,13 @@ async function createRoom() {
   }
 }
 
-onMounted(() => { void loadMe().catch(() => {}) })
+onMounted(() => { if (isYandex.value) void ensureYandexSession().catch(() => {}) ; else void loadMe().catch(() => {}) })
 useHead({ title: 'Создать онлайн-стол · Poker Dealer Desk' })
 </script>
 
 <template>
   <main class="page-shell online-create">
-    <NuxtLink class="online-create__back" to="/rooms">← К столам</NuxtLink>
+    <NuxtLink class="online-create__back" :to="isYandex ? '/yandex' : '/rooms'">← К столам</NuxtLink>
     <section class="panel online-create__panel">
       <span class="eyebrow">ONLINE</span>
       <h1>Создать онлайн-стол</h1>
@@ -80,7 +86,7 @@ useHead({ title: 'Создать онлайн-стол · Poker Dealer Desk' })
       </div>
       <p v-if="error" class="online-create__error" role="alert">{{ error }}</p>
       <button class="btn" type="button" :disabled="busy || (visibility === 'PRIVATE' && !privateJoinSecret)" @click="createRoom">{{ busy ? 'Создаём…' : 'Создать стол' }}</button>
-      <NuxtLink class="online-create__home-link" to="/create">Нужен стол с настоящими картами? Создать домашнюю игру</NuxtLink>
+      <NuxtLink v-if="!isYandex" class="online-create__home-link" to="/create">Нужен стол с настоящими картами? Создать домашнюю игру</NuxtLink>
     </section>
   </main>
 </template>

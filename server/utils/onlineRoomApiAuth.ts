@@ -1,4 +1,4 @@
-import { createError, type H3Event } from 'h3'
+import { createError, getHeader, type H3Event } from 'h3'
 import { accountCookie, assertSameOrigin } from './accountCookie'
 import { verifyUserAuthToken } from '../services/userAccountService'
 import { isDatabaseUnavailableError } from './databaseErrors'
@@ -7,7 +7,9 @@ import { isDatabaseUnavailableError } from './databaseErrors'
 export async function requireOnlineRoomUser(event: H3Event): Promise<{ userId: string }> {
   let auth: { userId: string } | null
   try {
-    auth = await verifyUserAuthToken(accountCookie(event))
+    const authorization = getHeader(event, 'authorization') || ''
+    const bearer = /^Bearer\s+([^\s]+)$/i.exec(authorization)?.[1] || ''
+    auth = await verifyUserAuthToken(bearer || accountCookie(event))
   } catch (error) {
     if (isDatabaseUnavailableError(error)) {
       throw createError({ statusCode: 503, statusMessage: 'Online room service is temporarily unavailable.' })

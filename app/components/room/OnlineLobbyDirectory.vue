@@ -45,7 +45,7 @@ onMounted(() => { void refresh() })
     <p v-if="error" class="online-lobby__error" role="alert">{{ error }}</p>
     <template v-else>
       <p v-if="loading && !rooms.length" class="page-subtitle">Ищем онлайн-столы…</p>
-      <div v-else-if="!rooms.length" class="online-lobby__empty"><p>Сейчас нет доступных онлайн-столов</p><NuxtLink v-if="props.platformMode === 'web'" class="btn" to="/online/create">Создать онлайн-комнату</NuxtLink></div>
+      <div v-else-if="!rooms.length" class="online-lobby__empty"><p>Сейчас нет доступных онлайн-столов</p><NuxtLink class="btn" :to="props.platformMode === 'yandex' ? '/online/create?platform=YANDEX_GAMES' : '/online/create'">Создать онлайн-комнату</NuxtLink></div>
       <div v-else class="online-lobby__grid">
         <article v-for="room in rooms" :key="room.code" class="online-lobby__card">
           <div class="online-lobby__card-top"><span :class="{ live: room.status === 'IN_HAND', full: room.status === 'FULL' }"><i />{{ room.status === 'IN_HAND' ? 'Игра идёт' : room.status === 'FULL' ? 'Стол заполнен' : 'Ожидает игроков' }}</span><strong>{{ room.code }}</strong></div>
@@ -53,7 +53,7 @@ onMounted(() => { void refresh() })
           <p>{{ room.playerCount }}/{{ room.maxPlayers }} игроков<span v-if="room.spectatorCount !== undefined"> · {{ room.spectatorCount }} зрителей</span></p>
           <p class="online-lobby__settings">Стек {{ room.startingStack.toLocaleString('ru-RU') }} · Блайнды {{ room.smallBlind }}/{{ room.bigBlind }}</p>
           <div class="online-lobby__actions">
-            <button v-if="props.platformMode === 'yandex'" class="btn" type="button" disabled>Подключение скоро</button>
+            <NuxtLink v-if="props.platformMode === 'yandex'" class="btn" :to="`/online/${room.code}?platform=YANDEX_GAMES${room.status === 'WAITING' && room.visibility === 'PUBLIC' ? '&join=1' : ''}`">{{ room.visibility === 'PRIVATE' ? 'Ввести пароль' : room.status === 'WAITING' ? 'Занять место' : 'Смотреть' }}</NuxtLink>
             <NuxtLink v-else-if="room.visibility === 'PRIVATE'" class="btn" :to="`/online/${room.code}`">Ввести пароль</NuxtLink>
             <NuxtLink v-else-if="room.status === 'WAITING'" class="btn" :to="`/online/${room.code}?join=1`">Занять место</NuxtLink>
             <NuxtLink v-else class="btn" :to="`/online/${room.code}`">Смотреть</NuxtLink>

@@ -2,10 +2,13 @@
 import OnlineLobbyDirectory from '~/components/room/OnlineLobbyDirectory.vue'
 import type { PlatformPlayerIdentity } from '~/platform/types'
 import { getBrowserYandexGamesAdapter, type YandexMockMode } from '~/platform/yandexGames'
+import { ensureYandexSession, readYandexSessionToken, saveYandexSession } from '~/platform/yandexSession'
+import type { AccountUser } from '~/types/account'
 
 const runtimeConfig = useRuntimeConfig()
 const status = ref<'loading' | 'ready' | 'error'>('loading')
 const identity = ref<PlatformPlayerIdentity | null>(null)
+const accountAuthorized = ref(false)
 const authorizationBusy = ref(false)
 const errorMessage = ref('')
 
@@ -25,6 +28,12 @@ async function initialize() {
   try {
     await adapter().initialize()
     identity.value = await adapter().getPlayerIdentity()
+    await ensureYandexSession()
+    const sessionToken = readYandexSessionToken()
+    if (sessionToken) {
+      const session = await $fetch<{ authorized: boolean }>('/api/auth/yandex/session', { headers: { Authorization: `Bearer ${sessionToken}` }, retry: 0 })
+      accountAuthorized.value = session.authorized
+    }
     status.value = 'ready'
     await nextTick()
     await adapter().gameReady()
@@ -39,7 +48,17 @@ async function authorize() {
   authorizationBusy.value = true
   errorMessage.value = ''
   try {
-    identity.value = await adapter().requestAuthorization()
+    const authorized = await adapter().requestAuthorization()
+    if (!authorized?.authorized || !authorized.signature) throw new Error('Signed Yandex player data is unavailable')
+    const currentToken = readYandexSessionToken()
+    if (!currentToken) throw new Error('Guest session is unavailable')
+    const exchanged = await $fetch<{ user: AccountUser; token: string }>('/api/auth/yandex/exchange', {
+      method: 'POST', body: { signature: authorized.signature },
+      headers: { Authorization: `Bearer ${currentToken}` }, retry: 0
+    })
+    saveYandexSession(exchanged.user, exchanged.token)
+    accountAuthorized.value = true
+    identity.value = { ...authorized, signature: undefined }
   } catch {
     errorMessage.value = 'Авторизация не завершена. Можно продолжить как гость.'
   } finally {
@@ -58,8 +77,8 @@ useHead({ title: 'Pocker · Яндекс Игры' })
       <div><span class="yandex-shell__mark">P</span><div><strong>Pocker</strong><small>ONLINE poker</small></div></div>
       <div v-if="status === 'ready' && identity" class="yandex-shell__player">
         <img v-if="identity.avatarUrl" :src="identity.avatarUrl" alt="">
-        <div><strong>{{ identity.displayName || 'Гость' }}</strong><small>{{ identity.authorized ? 'Игрок Яндекса' : 'Гостевой режим' }}</small></div>
-        <button v-if="!identity.authorized" type="button" :disabled="authorizationBusy" @click="authorize">{{ authorizationBusy ? 'Входим…' : 'Войти' }}</button>
+        <div><strong>{{ identity.displayName || 'Гость' }}</strong><small>{{ accountAuthorized ? 'Игрок Яндекса' : 'Гостевой режим' }}</small></div>
+        <button v-if="!accountAuthorized" type="button" :disabled="authorizationBusy" @click="authorize">{{ authorizationBusy ? 'Входим…' : 'Войти' }}</button>
       </div>
     </header>
 
@@ -80,10 +99,8 @@ useHead({ title: 'Pocker · Яндекс Игры' })
         <div class="yandex-shell__status"><i /><strong>Сеть доступна</strong><small>Общий multiplayer Pocker</small></div>
       </section>
       <p v-if="errorMessage" class="yandex-shell__notice" role="status">{{ errorMessage }}</p>
-      <section class="yandex-shell__foundation">
-        <strong>Подключение к столам готовится</strong>
-        <p>Список работает на общем ONLINE backend. Посадка игрока будет включена после безопасной серверной привязки Yandex ID.</p>
-      </section>
+      <p class="yandex-shell__disclosure">Все выигрыши и награды в Pocker — только внутренняя виртуальная валюта. Она не выводится и не обменивается на реальные деньги или имущество.</p>
+      <NuxtLink class="yandex-shell__create" to="/online/create?platform=YANDEX_GAMES">Создать онлайн-стол</NuxtLink>
       <OnlineLobbyDirectory platform-mode="yandex" />
       <small v-if="configuredMock !== 'off'" class="yandex-shell__dev">DEV MOCK · {{ configuredMock }}</small>
     </template>
@@ -112,8 +129,8 @@ useHead({ title: 'Pocker · Яндекс Игры' })
 .yandex-shell__status { display: grid; grid-template-columns: auto 1fr; gap: .1rem .45rem; min-width: 190px; padding: .8rem; border-radius: 16px; background: #071a12a8; }
 .yandex-shell__status i { grid-row: 1 / 3; align-self: center; width: 9px; height: 9px; border-radius: 50%; background: var(--success); }
 .yandex-shell__status small { color: var(--text-muted); }
-.yandex-shell__foundation { padding: .9rem 1rem; border: 1px solid rgba(102,190,255,.22); border-radius: 16px; background: rgba(102,190,255,.07); }
-.yandex-shell__foundation p { margin-top: .25rem; font-size: .88rem; }
+.yandex-shell__disclosure { margin: 0; color: var(--text-muted); font-size: .78rem; line-height: 1.4; }
+.yandex-shell__create { justify-self: start; padding: .7rem 1rem; border-radius: 12px; color: #172116; background: var(--accent); font-weight: 800; }
 .yandex-shell__notice { padding: .7rem .9rem; border-radius: 12px; color: var(--accent); background: rgba(242,180,81,.1); }
 .yandex-shell__dev { justify-self: end; color: var(--text-muted); }
 @keyframes spin { to { transform: rotate(360deg); } }

@@ -60,6 +60,7 @@ services:
       DIRECT_DATABASE_URL: ${DIRECT_DATABASE_URL:-postgresql://poker:poker@postgres:5432/pokerdb?schema=public}
       JWT_SECRET: ${JWT_SECRET:-change-me-jwt-secret}
       ROOM_SECRET_PEPPER: ${ROOM_SECRET_PEPPER:?ROOM_SECRET_PEPPER must be set in the production environment}
+      YANDEX_GAMES_SECRET: ${YANDEX_GAMES_SECRET:-}
       NUXT_PUBLIC_APP_URL: ${NUXT_PUBLIC_APP_URL:-http://localhost:3000}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       PHONE_TRUSTED_PROXY_IPS: ${PHONE_TRUSTED_PROXY_IPS:-}

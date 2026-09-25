@@ -9,6 +9,7 @@ export type PlatformPlayerIdentity = Readonly<{
   platform: ApplicationPlatform
   platformUserId: string
   authorized: boolean
+  signature?: string
   displayName?: string
   avatarUrl?: string
 }>
@@ -29,8 +30,8 @@ export interface GamePlatformAdapter {
   gameplayStop(): void
 }
 
-export function platformFromPath(path: string): ApplicationPlatform {
-  return path === '/yandex' || path.startsWith('/yandex/')
+export function platformFromPath(path: string, platformQuery?: unknown): ApplicationPlatform {
+  return path === '/yandex' || path.startsWith('/yandex/') || platformQuery === 'YANDEX_GAMES'
     ? APPLICATION_PLATFORMS.YANDEX_GAMES
     : APPLICATION_PLATFORMS.WEB
 }

@@ -5,6 +5,7 @@ import { hashPassword, sessionHash, issueUserAuthToken, getUserProfile, getUserB
 import { acceptRegistrationLegalDocuments, assertRegistrationLegalConfirmations, ensureRegistrationLegalDocuments, type RegistrationLegalConfirmationInput } from './legalService'
 import { isolatedAuthTests, accountCookie } from '../utils/accountCookie'
 import { assertPhoneStartLimit } from '../utils/phoneStartLimit'
+import { assertWebAccount } from '../utils/platformAccount'
 
 export function normalizePhone(value: string): string {
   const digits = value.replace(/[\s()+-]/g, '')
@@ -39,7 +40,10 @@ function view(v: { id: string; phone: string; status: string; callPhone: string 
 }
 export async function startPhoneVerification(event: H3Event, input: { phone: string; purpose: 'register' | 'recover' | 'link'; requestId: string }) {
   const phone = normalizePhone(input.phone), browserHash = verificationBrowser(event)
-  if (input.purpose === 'link') await getUserByToken(accountCookie(event))
+  if (input.purpose === 'link') {
+    const user = await getUserByToken(accountCookie(event))
+    await assertWebAccount(user.id)
+  }
   const attempt = await prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${browserHash}, 0))::text`
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${phone}, 0))::text`
@@ -102,6 +106,7 @@ export async function completePhoneVerification(event: H3Event, input: { id: str
   // Only phone linking is authenticated by an existing account session. A
   // stale cookie must not prevent a new registration or password recovery.
   const linkedUser = verification?.purpose === 'link' && accountCookie(event) ? await getUserByToken(accountCookie(event)) : null
+  if (linkedUser) await assertWebAccount(linkedUser.id)
   const result = await prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT id FROM phone_verifications WHERE id = ${input.id}::uuid FOR UPDATE`
     const v = await tx.phoneVerification.findUnique({ where: { id: input.id } })

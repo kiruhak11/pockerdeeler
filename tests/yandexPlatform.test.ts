@@ -7,7 +7,7 @@ import { YANDEX_GAMES_SDK_URL, YandexGamesPlatformAdapter } from '../app/platfor
 
 function fixture(options: { authorized?: boolean; failLoad?: boolean } = {}) {
   let authorized = Boolean(options.authorized)
-  const calls = { load: 0, init: 0, player: 0, auth: 0, ready: 0, start: 0, stop: 0 }
+  const calls = { load: 0, init: 0, player: 0, signed: 0, auth: 0, ready: 0, start: 0, stop: 0 }
   const player = {
     isAuthorized: () => authorized,
     getUniqueID: () => 'yandex-user-1',
@@ -15,7 +15,7 @@ function fixture(options: { authorized?: boolean; failLoad?: boolean } = {}) {
     getPhoto: () => 'https://example.test/avatar.png'
   }
   const sdk = {
-    getPlayer: async () => { calls.player++; return player },
+    getPlayer: async (options?: { signed?: boolean }) => { calls.player++; if (options?.signed) { calls.signed++; return { ...player, signature: 'signed-profile' } } return player },
     auth: { openAuthDialog: async () => { calls.auth++; authorized = true } },
     features: {
       LoadingAPI: { ready: () => { calls.ready++ } },
@@ -46,6 +46,7 @@ test('/yandex selects YANDEX_GAMES with restricted capabilities', () => {
   const { adapter } = fixture()
   assert.equal(platformFromPath('/yandex'), 'YANDEX_GAMES')
   assert.equal(platformFromPath('/yandex/online'), 'YANDEX_GAMES')
+  assert.equal(platformFromPath('/online/ROOM1', 'YANDEX_GAMES'), 'YANDEX_GAMES')
   assert.equal(adapter.capabilities.supportsExternalPayments, false)
   assert.equal(adapter.capabilities.supportsExternalLinks, false)
 })
@@ -68,6 +69,8 @@ test('guest initialization never opens auth and authorization requires an explic
   assert.equal(calls.auth, 1)
   assert.equal(authorized?.authorized, true)
   assert.equal(authorized?.displayName, 'Player')
+  assert.equal(authorized?.signature, 'signed-profile')
+  assert.equal(calls.signed, 1)
 })
 
 test('gameplay events are stateful and initialization can be retried', async () => {
@@ -124,7 +127,7 @@ test('global web chrome and web-only bootstrap are disabled for the Yandex route
   assert.match(appShell, /<LegalFooter v-if="!isYandexGames"/)
   assert.match(appShell, /<CookieConsentManager v-if="!isYandexGames"/)
   assert.match(appShell, /<BottomNav v-if="!isOnlineTable && !isYandexGames"/)
-  assert.match(accountPlugin, /platformFromPath\(route\.path\) === 'YANDEX_GAMES'/)
-  assert.match(premiumPlugin, /platformFromPath\(route\.path\) === 'YANDEX_GAMES'/)
-  assert.match(pwaPlugin, /platformFromPath\(route\.path\) === 'YANDEX_GAMES'/)
+  assert.match(accountPlugin, /platformFromPath\(route\.path, route\.query\.platform\) === 'YANDEX_GAMES'/)
+  assert.match(premiumPlugin, /platformFromPath\(route\.path, route\.query\.platform\) === 'YANDEX_GAMES'/)
+  assert.match(pwaPlugin, /platformFromPath\(route\.path, route\.query\.platform\) === 'YANDEX_GAMES'/)
 })

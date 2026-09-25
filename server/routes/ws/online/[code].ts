@@ -1,5 +1,6 @@
 import type { Message, Peer } from 'crossws'
 import { verifyUserAuthToken } from '../../../services/userAccountService'
+import { consumeWebSocketAuthTicket } from '../../../services/yandexIdentityService'
 import {
   applyAuthenticatedOnlineRoomAction,
   cleanupDisconnectedOnlineRoomParticipant,
@@ -111,8 +112,14 @@ async function authenticate(peer: Peer): Promise<AuthenticatedSocket> {
   if (!originAllowed(peer)) {
     throw new OnlineRoomApiError('FORBIDDEN', 'Недопустимый Origin', 403)
   }
-  const auth = await verifyUserAuthToken(cookieValue(peer.request.headers, ACCOUNT_COOKIE))
-  if (!auth) {
+  const cookieToken = cookieValue(peer.request.headers, ACCOUNT_COOKIE)
+  const ticket = requestUrl(peer).searchParams.get('ticket') || ''
+  // A Yandex shell may also have an unrelated first-party cookie in the browser;
+  // when a one-time ticket is supplied, it must identify this socket instead.
+  const ticketAuth = ticket ? await consumeWebSocketAuthTicket(ticket) : null
+  const auth = !ticketAuth && cookieToken ? await verifyUserAuthToken(cookieToken) : null
+  const userId = ticketAuth?.userId || auth?.userId
+  if (!userId) {
     throw new OnlineRoomApiError('UNAUTHORIZED', 'Требуется вход', 401)
   }
   let code: string
@@ -121,20 +128,20 @@ async function authenticate(peer: Peer): Promise<AuthenticatedSocket> {
   } catch {
     throw new OnlineRoomApiError('NOT_FOUND', 'Комната не найдена', 404)
   }
-  const result = await getAuthenticatedOnlineRoom(auth.userId, code)
-  const seated = result.room.pokerTable.players.some(player => player.playerId === auth.userId)
+  const result = await getAuthenticatedOnlineRoom(userId, code)
+  const seated = result.room.pokerTable.players.some(player => player.playerId === userId)
   const spectator = !seated && result.room.visibility === 'PUBLIC'
   const presence = seated || spectator ? getOnlineRoomPresenceService() : undefined
-  const registered = presence && seated ? await presence.registerConnection(result.room.roomId, auth.userId) : undefined
+  const registered = presence && seated ? await presence.registerConnection(result.room.roomId, userId) : undefined
   const spectatorRegistration = presence && spectator
-    ? await presence.registerSpectatorConnection(result.room.roomId, auth.userId).catch(() => undefined)
+    ? await presence.registerSpectatorConnection(result.room.roomId, userId).catch(() => undefined)
     : undefined
   try {
-    if (presence && registered) await setAuthenticatedOnlineRoomPresence(auth.userId, code, true)
-    const fresh = await getAuthenticatedOnlineRoom(auth.userId, code)
-    const connection = await registerOnlineRoomPeer(code, fresh.room.roomId, auth.userId, peer)
+    if (presence && registered) await setAuthenticatedOnlineRoomPresence(userId, code, true)
+    const fresh = await getAuthenticatedOnlineRoom(userId, code)
+    const connection = await registerOnlineRoomPeer(code, fresh.room.roomId, userId, peer)
     const socket = {
-      userId: auth.userId,
+      userId,
       connection,
       ...(presence && registered ? { presence, presenceRegistration: registered.registration } : {}),
       ...(presence && spectatorRegistration ? { presence, spectatorRegistration } : {})
@@ -144,8 +151,8 @@ async function authenticate(peer: Peer): Promise<AuthenticatedSocket> {
       if (presence && registered) {
         const released = await presence.unregisterConnection(registered.registration)
         if (released.graceStarted) {
-          presence.scheduleGraceExpiry(connection.roomId, auth.userId, async () => {
-            await cleanupDisconnectedOnlineRoomParticipant(auth.userId, code)
+            presence.scheduleGraceExpiry(connection.roomId, userId, async () => {
+              await cleanupDisconnectedOnlineRoomParticipant(userId, code)
           })
         }
       }
@@ -160,8 +167,8 @@ async function authenticate(peer: Peer): Promise<AuthenticatedSocket> {
     if (presence && registered) {
       const released = await presence.unregisterConnection(registered.registration).catch(() => undefined)
       if (released?.graceStarted) {
-        presence.scheduleGraceExpiry(result.room.roomId, auth.userId, async () => {
-          await cleanupDisconnectedOnlineRoomParticipant(auth.userId, code)
+        presence.scheduleGraceExpiry(result.room.roomId, userId, async () => {
+          await cleanupDisconnectedOnlineRoomParticipant(userId, code)
         })
       }
     }

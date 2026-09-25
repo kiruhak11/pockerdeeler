@@ -2,7 +2,7 @@ import { platformFromPath } from '~/platform/types'
 
 export default defineNuxtPlugin(async () => {
   const route = useRoute()
-  if (platformFromPath(route.path) === 'YANDEX_GAMES') return
+  if (platformFromPath(route.path, route.query.platform) === 'YANDEX_GAMES') return
   delete document.documentElement.dataset.premiumTheme
   delete document.documentElement.dataset.premiumSurface
   try {
