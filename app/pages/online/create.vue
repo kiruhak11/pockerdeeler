@@ -80,6 +80,7 @@ useHead({ title: 'Создать онлайн-стол · Poker Dealer Desk' })
       </div>
       <p v-if="error" class="online-create__error" role="alert">{{ error }}</p>
       <button class="btn" type="button" :disabled="busy || (visibility === 'PRIVATE' && !privateJoinSecret)" @click="createRoom">{{ busy ? 'Создаём…' : 'Создать стол' }}</button>
+      <NuxtLink class="online-create__home-link" to="/create">Нужен стол с настоящими картами? Создать домашнюю игру</NuxtLink>
     </section>
   </main>
 </template>
@@ -95,5 +96,6 @@ useHead({ title: 'Создать онлайн-стол · Poker Dealer Desk' })
 .online-create__visibility button { min-height: 46px; border: 1px solid transparent; border-radius: 13px; color: var(--text-muted); background: transparent; cursor: pointer; }
 .online-create__visibility button.active { border-color: rgba(102,190,255,.35); color: var(--text-primary); background: rgba(102,190,255,.14); }
 .online-create__error { margin: 0; color: var(--danger); }
+.online-create__home-link { justify-self: center; color: var(--text-muted); font-size: .9rem; text-align: center; }
 @media (max-width: 620px) { .online-create__settings { grid-template-columns: 1fr; } }
 </style>

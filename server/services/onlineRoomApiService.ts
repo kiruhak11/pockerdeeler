@@ -37,7 +37,7 @@ import {
   type OnlineRoomMutationFence
 } from './onlineRoomRuntimeStore'
 import { publishOnlineRoomChanged } from './onlineRoomRealtimeService'
-import { OnlineRoomPresenceError } from './onlineRoomPresenceService'
+import { getOnlineRoomPresenceService, OnlineRoomPresenceError } from './onlineRoomPresenceService'
 import { isDatabaseUnavailableError } from '../utils/databaseErrors'
 import { resolveRoomSecretPepper } from '../utils/roomSecretPepper'
 import {
@@ -126,9 +126,11 @@ export type JoinAuthenticatedOnlineRoomInput = Partial<OnlineRoomConcurrencyInpu
 
 export type OnlineRoomLobbyEntry = Readonly<{
   code: string
+  visibility: 'PUBLIC' | 'PRIVATE'
   playerCount: number
   maxPlayers: 6
-  status: 'WAITING' | 'IN_HAND'
+  spectatorCount?: number
+  status: 'WAITING' | 'IN_HAND' | 'FULL'
   createdAt: string
   startingStack: number
   smallBlind: number
@@ -559,25 +561,33 @@ export async function resolveOnlineRoomCode(code: string): Promise<Readonly<{ ty
     : Object.freeze({ type: 'NOT_FOUND' as const, code: normalizedCode })
 }
 
-/** Lists only public lobby metadata; private rooms and runtime internals stay server-side. */
+/** Lists safe lobby metadata for open rooms; credentials and runtime internals stay server-side. */
 export async function listPublicOnlineRooms(): Promise<readonly OnlineRoomLobbyEntry[]> {
   const rows = await prisma.onlineRoom.findMany({
-    where: { visibility: 'PUBLIC', status: 'WAITING' },
-    select: { id: true, roomCode: true, createdAt: true, startingStack: true },
-    orderBy: { createdAt: 'desc' },
-    take: 100
+    where: { visibility: { in: ['PUBLIC', 'PRIVATE'] }, status: 'WAITING' },
+    select: { id: true, roomCode: true, visibility: true, createdAt: true, startingStack: true },
+    orderBy: { createdAt: 'desc' }
   })
   const runtime = new OnlineRoomRuntimeStore()
   try {
     const entries: OnlineRoomLobbyEntry[] = []
     for (const row of rows) {
       const record = await runtime.get(row.id)
-      if (!record || record.state.status === 'CLOSED' || record.state.visibility !== 'PUBLIC') continue
+      if (!record || record.state.roomId !== row.id || record.state.roomCode !== row.roomCode || record.state.status === 'CLOSED' || record.state.visibility !== row.visibility) continue
+      const playerCount = record.state.pokerTable.players.length
+      let spectatorCount: number | undefined
+      try {
+        spectatorCount = await getOnlineRoomPresenceService().spectatorCount(row.id, record.state.pokerTable.players.map(player => player.playerId))
+      } catch {
+        // Presence is display-only; keep a room listed if Redis count is unavailable.
+      }
       entries.push(Object.freeze({
         code: record.state.roomCode,
-        playerCount: record.state.pokerTable.players.length,
+        visibility: row.visibility as 'PUBLIC' | 'PRIVATE',
+        playerCount,
         maxPlayers: 6,
-        status: record.state.pokerTable.status === 'IN_HAND' ? 'IN_HAND' : 'WAITING',
+        ...(spectatorCount === undefined ? {} : { spectatorCount }),
+        status: playerCount >= 6 ? 'FULL' : record.state.pokerTable.status === 'IN_HAND' ? 'IN_HAND' : 'WAITING',
         createdAt: row.createdAt.toISOString(),
         startingStack: Number(row.startingStack),
         smallBlind: record.state.pokerTable.smallBlind,

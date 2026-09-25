@@ -4,15 +4,15 @@ import ReservedRooms from '~/components/room/ReservedRooms.vue'
 import OnlineLobbyDirectory from '~/components/room/OnlineLobbyDirectory.vue'
 useHead({ title: 'Столы | Poker Dealer Desk' })
 
-const mode = ref<'HOME' | 'ONLINE'>('HOME')
+const mode = ref<'HOME' | 'ONLINE'>('ONLINE')
 </script>
 
 <template>
   <main class="page-shell rooms-page">
     <header class="rooms-hero"><div><span class="rooms-page__eyebrow">ЖИВЫЕ КОМНАТЫ</span><h1 class="page-title">Выберите свой стол</h1><p class="page-subtitle">Вернитесь к друзьям или начните новую игру за пару минут.</p></div><NuxtLink class="rooms-hero__create" :to="mode === 'ONLINE' ? '/online/create' : '/create'"><span>＋</span><strong>{{ mode === 'ONLINE' ? 'Создать онлайн-стол' : 'Создать домашний стол' }}</strong><small>{{ mode === 'ONLINE' ? 'Пригласить игроков по коду' : 'Настроить свою игру' }}</small></NuxtLink></header>
     <nav class="rooms-mode-switch" aria-label="Тип стола">
-      <button type="button" :class="{ active: mode === 'HOME' }" :aria-pressed="mode === 'HOME'" @click="mode = 'HOME'">С реальными картами</button>
       <button type="button" :class="{ active: mode === 'ONLINE' }" :aria-pressed="mode === 'ONLINE'" @click="mode = 'ONLINE'">Онлайн</button>
+      <button type="button" :class="{ active: mode === 'HOME' }" :aria-pressed="mode === 'HOME'" @click="mode = 'HOME'">С реальными картами</button>
     </nav>
     <template v-if="mode === 'HOME'">
       <ReservedRooms />

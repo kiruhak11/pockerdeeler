@@ -3,7 +3,7 @@ const route = useRoute()
 const items = [
   { to: '/', label: 'Главная', path: 'm3 10 9-7 9 7v10H3V10m6 10v-7h6v7' },
   { to: '/rooms', label: 'Столы', path: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z' },
-  { to: '/create', label: 'Создать', path: 'M12 5v14M5 12h14' },
+  { to: '/online/create', label: 'Создать', path: 'M12 5v14M5 12h14' },
   { to: '/leaderboard', label: 'Рейтинг', path: 'M4 19V5m0 14h16M8 16v-3m4 3V8m4 8V5' },
   { to: '/minigames', label: 'Мини-игры', path: 'M7 7h10v10H7zM4 4h3m10 0h3v3M4 20h3m10 0h3v-3' },
   { to: '/profile', label: 'Профиль', path: 'M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0M4 21v-2a8 8 0 0 1 16 0v2' }
@@ -12,7 +12,7 @@ const items = [
 
 <template>
   <nav class="bottom-nav" aria-label="Основная навигация">
-    <NuxtLink v-for="item in items" :key="item.to" :to="item.to" :class="{ 'is-active': route.path === item.to || (item.to === '/minigames' && route.path === '/crash') }" :aria-current="route.path === item.to ? 'page' : undefined">
+    <NuxtLink v-for="item in items" :key="item.to" :to="item.to" :class="{ 'is-active': route.path === item.to || (item.to === '/online/create' && route.path === '/create') || (item.to === '/minigames' && route.path === '/crash') }" :aria-current="route.path === item.to ? 'page' : undefined">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path :d="item.path" /></svg>
       <span>{{ item.label }}</span>
     </NuxtLink>

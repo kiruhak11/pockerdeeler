@@ -3,13 +3,17 @@ import { getHttpErrorMessage } from '~/utils/httpError'
 
 type OnlineLobbyRoom = Readonly<{
   code: string
+  visibility: 'PUBLIC' | 'PRIVATE'
   playerCount: number
   maxPlayers: 6
-  status: 'WAITING' | 'IN_HAND'
+  spectatorCount?: number
+  status: 'WAITING' | 'IN_HAND' | 'FULL'
   createdAt: string
+  startingStack: number
+  smallBlind: number
+  bigBlind: number
 }>
 
-const tab = ref<'open' | 'closed'>('open')
 const rooms = ref<readonly OnlineLobbyRoom[]>([])
 const loading = ref(false)
 const error = ref('')
@@ -33,29 +37,27 @@ onMounted(() => { void refresh() })
 <template>
   <section class="panel online-lobby" aria-labelledby="online-lobby-title">
     <header class="online-lobby__header">
-      <div><span class="online-lobby__eyebrow">ONLINE</span><h2 id="online-lobby-title">Онлайн-столы</h2><p class="page-subtitle">Публичные столы доступны всем игрокам после входа.</p></div>
+      <div><span class="online-lobby__eyebrow">ONLINE</span><h2 id="online-lobby-title">Онлайн-столы</h2><p class="page-subtitle">Открытые публичные столы и приватные столы с входом по паролю.</p></div>
       <button class="online-lobby__refresh" type="button" aria-label="Обновить онлайн-столы" :disabled="loading" @click="refresh">↻</button>
     </header>
-    <div class="online-lobby__tabs" aria-label="Доступ к онлайн-комнатам">
-      <button type="button" :class="{ active: tab === 'open' }" :aria-pressed="tab === 'open'" @click="tab = 'open'">Открытые</button>
-      <button type="button" :class="{ active: tab === 'closed' }" :aria-pressed="tab === 'closed'" @click="tab = 'closed'">Закрытые</button>
-    </div>
     <p v-if="error" class="online-lobby__error" role="alert">{{ error }}</p>
-    <template v-else-if="tab === 'open'">
+    <template v-else>
       <p v-if="loading && !rooms.length" class="page-subtitle">Ищем онлайн-столы…</p>
-      <p v-else-if="!rooms.length" class="page-subtitle">Публичных онлайн-столов пока нет. Создайте свой и пригласите друзей.</p>
+      <div v-else-if="!rooms.length" class="online-lobby__empty"><p>Сейчас нет доступных онлайн-столов</p><NuxtLink class="btn" to="/online/create">Создать онлайн-комнату</NuxtLink></div>
       <div v-else class="online-lobby__grid">
         <article v-for="room in rooms" :key="room.code" class="online-lobby__card">
-          <div class="online-lobby__card-top"><span :class="{ live: room.status === 'IN_HAND' }"><i />{{ room.status === 'IN_HAND' ? 'Игра идёт' : 'Сбор игроков' }}</span><strong>{{ room.code }}</strong></div>
-          <p>{{ room.playerCount }}/{{ room.maxPlayers }} игроков</p>
+          <div class="online-lobby__card-top"><span :class="{ live: room.status === 'IN_HAND', full: room.status === 'FULL' }"><i />{{ room.status === 'IN_HAND' ? 'Игра идёт' : room.status === 'FULL' ? 'Стол заполнен' : 'Ожидает игроков' }}</span><strong>{{ room.code }}</strong></div>
+          <p class="online-lobby__visibility">{{ room.visibility === 'PRIVATE' ? '🔒 Приватная' : 'Публичная' }}</p>
+          <p>{{ room.playerCount }}/{{ room.maxPlayers }} игроков<span v-if="room.spectatorCount !== undefined"> · {{ room.spectatorCount }} зрителей</span></p>
+          <p class="online-lobby__settings">Стек {{ room.startingStack.toLocaleString('ru-RU') }} · Блайнды {{ room.smallBlind }}/{{ room.bigBlind }}</p>
           <div class="online-lobby__actions">
-            <NuxtLink class="btn btn--ghost" :to="`/online/${room.code}`">Наблюдать</NuxtLink>
-            <NuxtLink v-if="room.status === 'WAITING' && room.playerCount < room.maxPlayers" class="btn" :to="`/online/${room.code}?join=1`">Занять место</NuxtLink>
+            <NuxtLink v-if="room.visibility === 'PRIVATE'" class="btn" :to="`/online/${room.code}`">Ввести пароль</NuxtLink>
+            <NuxtLink v-else-if="room.status === 'WAITING'" class="btn" :to="`/online/${room.code}?join=1`">Занять место</NuxtLink>
+            <NuxtLink v-else class="btn" :to="`/online/${room.code}`">Смотреть</NuxtLink>
           </div>
         </article>
       </div>
     </template>
-    <p v-else class="page-subtitle">Закрытые онлайн-комнаты доступны по коду. Введите код на главной странице или откройте приглашение.</p>
   </section>
 </template>
 
@@ -65,18 +67,20 @@ onMounted(() => { void refresh() })
 .online-lobby__eyebrow { color: var(--accent); font-size: .7rem; font-weight: 900; letter-spacing: .16em; }
 .online-lobby h2 { margin: .25rem 0 0; }
 .online-lobby__refresh { display: grid; place-items: center; width: 44px; height: 44px; border: 1px solid rgba(255,255,255,.12); border-radius: 14px; color: var(--text-primary); background: rgba(255,255,255,.04); font-size: 1.4rem; cursor: pointer; }
-.online-lobby__tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .4rem; padding: .3rem; border-radius: 18px; background: rgba(0,0,0,.2); }
-.online-lobby__tabs button { min-height: 44px; border: 1px solid transparent; border-radius: 14px; color: var(--text-muted); background: transparent; cursor: pointer; }
-.online-lobby__tabs button.active { border-color: rgba(242,180,81,.3); color: var(--text-primary); background: rgba(242,180,81,.11); }
 .online-lobby__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: .75rem; }
 .online-lobby__card { display: grid; gap: .8rem; padding: 1rem; border: 1px solid rgba(102,190,255,.24); border-radius: 18px; background: linear-gradient(145deg, #173b46, #10252e); }
 .online-lobby__card-top { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
 .online-lobby__card-top span { display: inline-flex; align-items: center; gap: .4rem; color: var(--text-muted); font-size: .72rem; }
 .online-lobby__card-top span i { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
 .online-lobby__card-top span.live i { background: var(--accent); }
+.online-lobby__card-top span.full i { background: var(--danger); }
 .online-lobby__card-top strong { color: var(--accent); letter-spacing: .12em; }
 .online-lobby__card p { margin: 0; color: var(--text-muted); }
+.online-lobby__card .online-lobby__visibility { color: var(--text-primary); font-weight: 700; }
+.online-lobby__card .online-lobby__settings { font-size: .82rem; }
 .online-lobby__actions { display: grid; gap: .45rem; }
+.online-lobby__empty { display: grid; justify-items: start; gap: .8rem; }
+.online-lobby__empty p { margin: 0; color: var(--text-muted); }
 .online-lobby__error { margin: 0; color: var(--danger); }
 @media (max-width: 600px) { .online-lobby { padding: .8rem; } .online-lobby__header { align-items: flex-start; } .online-lobby__card .btn { width: 100%; } }
 </style>

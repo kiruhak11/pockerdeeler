@@ -6,6 +6,7 @@ import Redis from 'ioredis'
 import { PrismaClient } from '@prisma/client'
 import { createAuthenticatedOnlineRoom, joinAuthenticatedOnlineRoom, listPublicOnlineRooms } from '../server/services/onlineRoomApiService'
 import { OnlineRoomRuntimeStore } from '../server/services/onlineRoomRuntimeStore'
+import { getOnlineRoomPresenceService } from '../server/services/onlineRoomPresenceService'
 
 const dbUrl = process.env.DATABASE_URL
 const redisUrl = process.env.ONLINE_ROOM_TEST_REDIS_URL
@@ -29,6 +30,7 @@ test.afterEach(async () => {
   if (keys.length > 0) await redis!.del(...keys)
 })
 test.after(async () => {
+  if (isolated) await getOnlineRoomPresenceService().disconnect()
   if (isolated) redis!.disconnect()
   if (dbUrl && roomIds.length) {
     await db.roomCodeRegistry.deleteMany({ where: { roomType: 'ONLINE', targetId: { in: roomIds } } })
@@ -64,26 +66,41 @@ test('private creation keeps the secret out of URL and browser storage', async (
   assert.doesNotMatch(page, /navigateTo\([^\n]*privateJoinSecret/)
 })
 
-test('rooms page keeps HOME tabs below a top-level HOME/ONLINE switch', async () => {
+test('rooms page defaults to ONLINE and keeps HOME as the secondary tab', async () => {
   const page = await source('app/pages/rooms.vue')
   assert.match(page, /С реальными картами/)
   assert.match(page, />Онлайн</)
+  assert.match(page, /mode = ref<'HOME' \| 'ONLINE'>\('ONLINE'\)/)
+  assert.ok(page.indexOf('>Онлайн</button>') < page.indexOf('>С реальными картами</button>'))
   assert.match(page, /<LobbyDirectory \/>/)
   assert.match(page, /<OnlineLobbyDirectory v-else \/>/)
 })
 
-test('online lobby exposes only public lobby-safe fields', async () => {
+test('online lobby exposes safe public and private lobby fields', async () => {
   const component = await source('app/components/room/OnlineLobbyDirectory.vue')
   assert.match(component, /\/api\/online\/rooms/)
   assert.match(component, /room\.code/)
   assert.match(component, /room\.playerCount/)
-  assert.doesNotMatch(component, /privateJoinSecret|runtimeRevision|holeCards|burnCards|deck|roomId/)
+  assert.match(component, /visibility: 'PUBLIC' \| 'PRIVATE'/)
+  assert.match(component, /room\.visibility === 'PRIVATE'/)
+  assert.match(component, /Ввести пароль/)
+  assert.match(component, /Смотреть/)
+  assert.match(component, /Сейчас нет доступных онлайн-столов/)
+  assert.match(component, /Создать онлайн-комнату/)
+  assert.doesNotMatch(component, /privateJoinSecret|passwordHash|holeCards|burnCards|deck|runtimeRevision|roomId/)
 })
 
-test('closed ONLINE tab explains code-only access without listing private rooms', async () => {
+test('primary create navigation uses ONLINE and keeps HOME creation accessible', async () => {
+  const nav = await source('app/components/BottomNav.vue')
+  const create = await source('app/pages/online/create.vue')
+  assert.match(nav, /to: '\/online\/create'/)
+  assert.match(create, /to="\/create"/)
+  assert.match(create, /Создать стол/)
+})
+
+test('lobby has no closed-room tab or separate private list', async () => {
   const component = await source('app/components/room/OnlineLobbyDirectory.vue')
-  assert.match(component, /Закрытые онлайн-комнаты доступны по коду/)
-  assert.doesNotMatch(component, /privateRooms|PRIVATE.*rooms|api\/online\/rooms\/private/)
+  assert.doesNotMatch(component, /privateRooms|api\/online\/rooms\/private|Закрытые онлайн-комнаты/)
 })
 
 test('ONLINE join page uses the existing authenticated join endpoint and no password URL', async () => {
@@ -112,14 +129,16 @@ test('responsive main and rooms styles keep mobile controls inside one column', 
   assert.match(main, /home-page__choices \{ grid-template-columns: 1fr; \}/)
 })
 
-test('public ONLINE room appears in the lobby and private room does not', { skip: !isolated }, async () => {
+test('public and private ONLINE rooms appear without credential leakage', { skip: !isolated }, async () => {
   const publicRoom = await createAuthenticatedOnlineRoom(`lobby-public-${randomUUID()}`, {}, { runtime: runtime() })
   const privateRoom = await createAuthenticatedOnlineRoom(`lobby-private-${randomUUID()}`, { visibility: 'PRIVATE', privateJoinSecret: 'lobby-secret' }, { runtime: runtime() })
   roomIds.push(publicRoom.room.roomId, privateRoom.room.roomId)
   const rooms = await listPublicOnlineRooms()
   assert.equal(rooms.some(room => room.code === publicRoom.room.roomCode), true)
-  assert.equal(rooms.some(room => room.code === privateRoom.room.roomCode), false)
+  assert.equal(rooms.some(room => room.code === privateRoom.room.roomCode), true)
   assert.equal(JSON.stringify(rooms).includes('privateJoinSecret'), false)
+  assert.equal(JSON.stringify(rooms).includes('lobby-secret'), false)
+  assert.equal(rooms.find(room => room.code === privateRoom.room.roomCode)?.visibility, 'PRIVATE')
   assert.equal(JSON.stringify(rooms).includes('runtimeRevision'), false)
 })
 
@@ -128,7 +147,7 @@ test('lobby DTO contains only public room settings and display-safe fields', { s
   roomIds.push(room.room.roomId)
   const entry = (await listPublicOnlineRooms()).find(item => item.code === room.room.roomCode)
   assert.ok(entry)
-  assert.deepEqual(Object.keys(entry!).sort(), ['bigBlind', 'code', 'createdAt', 'maxPlayers', 'playerCount', 'smallBlind', 'startingStack', 'status'])
+  assert.deepEqual(Object.keys(entry!).sort(), ['bigBlind', 'code', 'createdAt', 'maxPlayers', 'playerCount', 'smallBlind', 'startingStack', 'status', 'visibility', 'spectatorCount'].sort())
 })
 
 test('private first join can use a server-selected revision without a client token', { skip: !isolated }, async () => {
@@ -160,6 +179,7 @@ test('main and rooms entry points expose ONLINE creation', async () => {
   const main = await source('app/pages/index.vue')
   const rooms = await source('app/pages/rooms.vue')
   assert.match(main, /Создать онлайн-стол/)
+  assert.match(main, /Играть онлайн/)
   assert.match(main, /\/online\/create/)
   assert.match(rooms, /\/online\/create/)
 })

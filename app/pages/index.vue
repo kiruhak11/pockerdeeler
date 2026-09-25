@@ -70,7 +70,7 @@ async function logoutAccount() {
 <template>
   <main class="page-shell home-page">
     <section class="home-page__hero">
-      <div class="home-page__copy"><p class="eyebrow">Живой покер. Цифровые фишки.</p><h1>Весь стол<br><em>в одном касании</em></h1><p>Настоящие карты остаются на столе. Pocker ведёт очередь, ставки, банк и историю без споров и пауз.</p></div>
+      <div class="home-page__copy"><p class="eyebrow">Живой покер. Цифровые фишки.</p><h1>Весь стол<br><em>в одном касании</em></h1><p>Играйте в покер онлайн с друзьями или откройте домашний стол с настоящими картами.</p><div class="home-page__primary-actions"><NuxtLink class="btn" to="/rooms">Играть онлайн</NuxtLink><NuxtLink class="home-page__secondary-link" to="/online/create">Создать онлайн-комнату</NuxtLink></div></div>
       <aside v-if="accountStore.user" class="home-page__identity"><span>{{ accountStore.user.selectedAchievementCode ? '♠' : accountStore.user.username.slice(0, 1).toUpperCase() }}</span><div><small>Вы вошли как</small><strong>{{ accountStore.user.username }}</strong><b>{{ accountStore.user.balance.toLocaleString('ru-RU') }} фишек</b></div><NuxtLink to="/profile">Профиль</NuxtLink></aside>
     </section>
 
@@ -84,8 +84,8 @@ async function logoutAccount() {
     </section>
 
     <section class="home-page__choices">
-      <NuxtLink class="home-choice home-choice--accent" to="/create"><span>02</span><div><small>Для организатора</small><h2>Домашняя игра</h2><p>Настройте блайнды, бай-ин и играйте настоящими картами.</p></div><b>＋</b></NuxtLink>
-      <NuxtLink class="home-choice home-choice--online" to="/online/create"><span>03</span><div><small>Для друзей онлайн</small><h2>Создать онлайн-стол</h2><p>Откройте цифровый стол и пригласите игроков по коду.</p></div><b>＋</b></NuxtLink>
+      <NuxtLink class="home-choice home-choice--online" to="/online/create"><span>02</span><div><small>Для друзей онлайн</small><h2>Создать онлайн-стол</h2><p>Откройте цифровый стол и пригласите игроков по коду.</p></div><b>＋</b></NuxtLink>
+      <NuxtLink class="home-choice home-choice--accent" to="/create"><span>03</span><div><small>Для организатора</small><h2>Домашняя игра</h2><p>Настройте блайнды, бай-ин и играйте настоящими картами.</p></div><b>＋</b></NuxtLink>
       <button class="home-choice" type="button" @click="startNewLocalGame"><span>04</span><div><small>Без интернета</small><h2>Локальная игра</h2><p>Калькулятор дилера на одном устройстве.</p></div><AppIcon name="arrow-right" :size="20" /></button>
     </section>
 
@@ -103,6 +103,8 @@ async function logoutAccount() {
 .home-page__copy h1 { margin: .35rem 0 .8rem; font: 700 clamp(2.7rem, 8vw, 5.8rem)/.9 'Space Grotesk', sans-serif; letter-spacing: -.07em; max-width: 760px; }
 .home-page__copy h1 em { color: var(--accent); font-style: normal; }
 .home-page__copy > p:last-child { max-width: 620px; margin: 0; color: var(--text-muted); font-size: clamp(1rem, 2vw, 1.2rem); }
+.home-page__primary-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .8rem; margin-top: 1.2rem; }
+.home-page__secondary-link { color: var(--text-muted); font-size: .9rem; }
 .home-page__identity { display: grid; grid-template-columns: auto 1fr; gap: .7rem; min-width: 210px; padding: .8rem; border: 1px solid #ffffff14; border-radius: 18px; background: #101f18b8; > span { grid-row: 1 / 3; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; color: #142119; background: var(--accent); font-weight: 900; } small, strong, b { display: block; } small { color: var(--text-muted); } b { color: var(--accent); font-size: .78rem; } a { grid-column: 2; color: var(--text-muted); font-size: .8rem; } }
 .home-page__join { position: relative; display: grid; grid-template-columns: minmax(170px, .7fr) 1fr; gap: 1rem 1.5rem; overflow: hidden; padding: 1.35rem; border-color: rgba(242,180,81,.4); background: linear-gradient(120deg, rgba(43,75,55,.96), rgba(16,31,24,.97)); h2 { margin: .2rem 0 0; font-size: 1.45rem; } .eyebrow { margin: 0; } }
 .home-page__number { position: absolute; right: 1rem; top: -.7rem; color: #ffffff08; font: 800 6rem 'Space Grotesk'; }
@@ -117,5 +119,5 @@ async function logoutAccount() {
 .home-page__session { text-align: right; button { border: 0; color: var(--text-muted); background: none; text-decoration: underline; cursor: pointer; } }
 .home-page__error { color: var(--danger); }
 @media (max-width: 900px) { .home-page__choices { grid-template-columns: 1fr 1fr; } }
-@media (max-width: 700px) { .home-page { padding-top: 1rem; } .home-page__hero { grid-template-columns: 1fr; gap: 1rem; } .home-page__copy h1 { font-size: clamp(2.7rem, 14vw, 4.2rem); } .home-page__identity { grid-template-columns: auto 1fr auto; min-width: 0; } .home-page__identity a { grid-column: 3; grid-row: 1 / 3; align-self: center; } .home-page__join, .home-page__choices { grid-template-columns: 1fr; } .home-page__join-row { grid-template-columns: 1fr; } .home-page__text-link { grid-column: 1; } .home-choice { min-height: 128px; padding: 1rem; } .home-page__account { align-items: stretch; flex-direction: column; } }
+@media (max-width: 700px) { .home-page { padding-top: 1rem; } .home-page__hero { grid-template-columns: 1fr; gap: 1rem; } .home-page__copy h1 { font-size: clamp(2.7rem, 14vw, 4.2rem); } .home-page__identity { grid-template-columns: auto 1fr auto; min-width: 0; } .home-page__identity a { grid-column: 3; grid-row: 1 / 3; align-self: center; } .home-page__join, .home-page__choices { grid-template-columns: 1fr; } .home-page__join-row { grid-template-columns: 1fr; } .home-page__text-link { grid-column: 1; } .home-page__primary-actions { display: grid; grid-template-columns: 1fr; } .home-page__primary-actions .btn { width: 100%; } .home-choice { min-height: 128px; padding: 1rem; } .home-page__account { align-items: stretch; flex-direction: column; } }
 </style>
