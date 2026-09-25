@@ -5,7 +5,7 @@ import { platformFromPath } from '../app/platform/types'
 import { webPlatformAdapter } from '../app/platform/web'
 import { YANDEX_GAMES_SDK_URL, YandexGamesPlatformAdapter } from '../app/platform/yandexGames'
 
-function fixture(options: { authorized?: boolean; failLoad?: boolean } = {}) {
+function fixture(options: { authorized?: boolean; failLoad?: boolean; rewardedVideo?: (callbacks: { onOpen(): void; onRewarded(): void; onClose(wasShown: boolean): void; onError(error: unknown): void }) => void } = {}) {
   let authorized = Boolean(options.authorized)
   const calls = { load: 0, init: 0, player: 0, signed: 0, auth: 0, ready: 0, start: 0, stop: 0 }
   const player = {
@@ -17,6 +17,10 @@ function fixture(options: { authorized?: boolean; failLoad?: boolean } = {}) {
   const sdk = {
     getPlayer: async (options?: { signed?: boolean }) => { calls.player++; if (options?.signed) { calls.signed++; return { ...player, signature: 'signed-profile' } } return player },
     auth: { openAuthDialog: async () => { calls.auth++; authorized = true } },
+    adv: { showRewardedVideo: ({ callbacks }: { callbacks: Parameters<NonNullable<typeof options.rewardedVideo>>[0] }) => {
+      if (options.rewardedVideo) options.rewardedVideo(callbacks)
+      else { callbacks.onOpen(); callbacks.onRewarded(); callbacks.onClose(true) }
+    } },
     features: {
       LoadingAPI: { ready: () => { calls.ready++ } },
       GameplayAPI: { start: () => { calls.start++ }, stop: () => { calls.stop++ } }
@@ -106,6 +110,58 @@ test('production never enables the development mock', async () => {
   })
   await assert.rejects(adapter.initialize())
   assert.equal(loads, 1)
+})
+
+test('rewarded progress outcome requires onRewarded; onOpen/onClose wasShown alone do not count', async () => {
+  const closed = fixture({ rewardedVideo: callbacks => { callbacks.onOpen(); callbacks.onClose(true) } })
+  await closed.adapter.initialize()
+  let closedRewardCallbacks = 0
+  assert.equal(await closed.adapter.showRewardedVideo(async () => { closedRewardCallbacks += 1 }), 'closed')
+  assert.equal(closedRewardCallbacks, 0)
+
+  const rewarded = fixture({ rewardedVideo: callbacks => { callbacks.onOpen(); callbacks.onRewarded(); callbacks.onClose(false) } })
+  await rewarded.adapter.initialize()
+  let rewardCallbacks = 0
+  assert.equal(await rewarded.adapter.showRewardedVideo(async () => { rewardCallbacks += 1 }), 'rewarded')
+  assert.equal(rewardCallbacks, 1)
+
+  const errored = fixture({ rewardedVideo: callbacks => callbacks.onError(new Error('no ad')) })
+  await errored.adapter.initialize()
+  let errorRewardCallbacks = 0
+  assert.equal(await errored.adapter.showRewardedVideo(async () => { errorRewardCallbacks += 1 }), 'error')
+  assert.equal(errorRewardCallbacks, 0)
+})
+
+test('rewarded video suspends active GameplayAPI state and restores it on close', async () => {
+  const { adapter, calls } = fixture()
+  await adapter.initialize()
+  adapter.gameplayStart()
+  assert.equal(await adapter.showRewardedVideo(async () => {}), 'rewarded')
+  assert.deepEqual({ start: calls.start, stop: calls.stop }, { start: 2, stop: 1 })
+})
+
+test('rewarded endpoints are Yandex-session-only, rate-limited, and accept no client reward amount', async () => {
+  const startRoute = await readFile(new URL('../server/api/yandex/rewarded/start.post.ts', import.meta.url), 'utf8')
+  const completeRoute = await readFile(new URL('../server/api/yandex/rewarded/[attemptId]/complete.post.ts', import.meta.url), 'utf8')
+  const service = await readFile(new URL('../server/services/yandexRewardedService.ts', import.meta.url), 'utf8')
+  const page = await readFile(new URL('../app/pages/yandex.vue', import.meta.url), 'utf8')
+  assert.match(startRoute, /assertSameOrigin/)
+  assert.match(startRoute, /assertYandexAuthLimit/)
+  assert.match(startRoute, /requireYandexBearer/)
+  assert.match(startRoute, /z\.object\(\{ requestId: z\.string\(\)\.uuid\(\) \}\)\.strict\(\)/)
+  assert.doesNotMatch(startRoute, /amount|userId/)
+  assert.match(completeRoute, /assertYandexAuthLimit/)
+  assert.doesNotMatch(completeRoute, /readBody|amount|userId/)
+  assert.match(service, /accountOrigin !== 'YANDEX_GAMES'/)
+  assert.match(service, /YANDEX_REWARDED_GRANT_AMOUNT = 10_000n/)
+  assert.match(service, /lockUserWallet\(tx, user\.id\)/)
+  assert.match(service, /YANDEX_REWARDED_AD_REWARD/)
+  assert.match(page, /route\.path !== '\/yandex'/)
+  assert.match(page, /rewardedBusy \|\| route\.path !== '\/yandex'/)
+  assert.match(page, /onRewarded|showRewardedVideo/)
+  assert.match(page, /Награда — внутренняя виртуальная валюта Pocker/)
+  assert.match(page, /body: \{ requestId: crypto\.randomUUID\(\) \}/)
+  assert.doesNotMatch(page, /wallet\.balance\s*\+\s*10_?000|body:.*(?:amount|chips)/)
 })
 
 test('Yandex shell has no web auth, RUB payments, or external navigation', async () => {

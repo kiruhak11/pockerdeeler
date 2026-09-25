@@ -17,6 +17,14 @@ type YandexPlayer = {
 type YandexGamesSdk = {
   getPlayer(options?: { signed?: boolean }): Promise<YandexPlayer>
   auth: { openAuthDialog(): Promise<void> }
+  adv?: {
+    showRewardedVideo(options: { callbacks: {
+      onOpen(): void
+      onRewarded(): void
+      onClose(wasShown: boolean): void
+      onError(error: unknown): void
+    } }): void
+  }
   features?: {
     LoadingAPI?: { ready(): void | Promise<void> }
     GameplayAPI?: { start(): void; stop(): void }
@@ -62,6 +70,11 @@ function createMockSdk(mode: Exclude<YandexMockMode, 'off'>): YandexGamesSdk {
   return {
     getPlayer: async options => options?.signed ? { ...player, signature: 'dev-mock-authorized-player' } : player,
     auth: { openAuthDialog: async () => { authorized = true } },
+    adv: { showRewardedVideo: ({ callbacks }) => {
+      callbacks.onOpen()
+      callbacks.onRewarded()
+      callbacks.onClose(true)
+    } },
     features: {
       LoadingAPI: { ready() {} },
       GameplayAPI: { start() {}, stop() {} }
@@ -129,6 +142,51 @@ export class YandexGamesPlatformAdapter implements GamePlatformAdapter {
     if (this.readySent) return
     this.readySent = true
     await this.sdk?.features?.LoadingAPI?.ready()
+  }
+
+  async showRewardedVideo(onRewarded: () => Promise<void>): Promise<'rewarded' | 'closed' | 'error'> {
+    await this.initialize()
+    const show = this.sdk?.adv?.showRewardedVideo
+    if (!show) return 'error'
+    return new Promise(resolve => {
+      let settled = false
+      let rewarded = false
+      let rewardHandlerFailed = false
+      let rewardHandling: Promise<void> | undefined
+      let resumeGameplay = false
+      const finish = (result: 'rewarded' | 'closed' | 'error') => {
+        if (settled) return
+        settled = true
+        if (resumeGameplay) this.gameplayStart()
+        resolve(result)
+      }
+      try {
+        show.call(this.sdk?.adv, { callbacks: {
+          onOpen: () => {
+            if (this.gameplayActive) {
+              resumeGameplay = true
+              this.gameplayStop()
+            }
+          },
+          onRewarded: () => {
+            if (settled || rewarded) return
+            rewarded = true
+            rewardHandling = Promise.resolve().then(onRewarded).catch(() => { rewardHandlerFailed = true })
+          },
+          onClose: () => {
+            void (async () => {
+              await rewardHandling
+              finish(rewarded ? rewardHandlerFailed ? 'error' : 'rewarded' : 'closed')
+            })()
+          },
+          onError: () => {
+            void (async () => { await rewardHandling; finish('error') })()
+          }
+        } })
+      } catch {
+        finish('error')
+      }
+    })
   }
 
   gameplayStart(): void {

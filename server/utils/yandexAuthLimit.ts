@@ -12,7 +12,7 @@ let redis: Redis | undefined
 let connecting: Promise<void> | undefined
 
 /** Use the shared Redis counter in deployed environments; retain the existing local limiter for dev. */
-export async function assertYandexAuthLimit(event: H3Event, scope: 'guest' | 'exchange', limit: number, windowMs: number): Promise<void> {
+export async function assertYandexAuthLimit(event: H3Event, scope: 'guest' | 'exchange' | 'rewarded-start' | 'rewarded-complete' | 'rewarded-cancel' | 'rewarded-state', limit: number, windowMs: number): Promise<void> {
   if (!process.env.REDIS_URL) {
     assertRateLimit(event, `yandex-${scope}`, { limit, windowMs })
     return

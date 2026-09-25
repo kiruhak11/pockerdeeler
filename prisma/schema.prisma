@@ -147,6 +147,8 @@ model User {
   websocketAuthTickets    WebSocketAuthTicket[]
   accountOrigin           String           @default("WEB") @map("account_origin") @db.VarChar(32)
   rewardSessions          RewardSession[]
+  yandexRewardedAttempts  YandexRewardedAdAttempt[]
+  yandexRewardedProgress  YandexRewardedProgress?
   balance                 Int              @default(5000)
   predictionRating        Int              @default(1000) @map("prediction_rating")
   tableRating             Int              @default(1000) @map("table_rating")
@@ -543,6 +545,32 @@ model RewardSession {
 
   @@index([userId, createdAt])
   @@map("reward_sessions")
+}
+
+model YandexRewardedAdAttempt {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  requestId  String    @map("request_id") @db.Uuid
+  status     String    @default("STARTED") @db.VarChar(16)
+  grantedAmount Int       @default(0) @map("granted_amount")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
+  rewardedAt DateTime? @map("rewarded_at") @db.Timestamptz(6)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, requestId])
+  @@index([userId, status, expiresAt])
+  @@map("yandex_rewarded_ad_attempts")
+}
+
+model YandexRewardedProgress {
+  userId          String   @id @map("user_id") @db.Uuid
+  viewsSinceGrant Int      @default(0) @map("views_since_grant")
+  completedGrants Int      @default(0) @map("completed_grants")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("yandex_rewarded_progress")
 }
 
 model AdminAudit {
