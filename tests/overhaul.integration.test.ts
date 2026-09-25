@@ -67,6 +67,15 @@ test('Mines start reserve, restore, concurrent safe open and double cashout cons
 })
 test('Mines accepts a full-wallet stake once and rejects a stake above the current wallet',async()=>{
   if(!house) house=await account('SUPERADMIN',5_000_000)
+  const tenChipUser = await account('USER',15_000)
+  const tenChip = await start(tenChipUser,{stake:10,clientSeed:'ten-chip-stake'})
+  assert.equal(tenChip.session.stake,10)
+  assert.equal(tenChip.session.balance,14_990)
+  assert.equal((await db.userWallet.findUniqueOrThrow({where:{userId:tenChipUser.id}})).balance,14_990n)
+  assert.equal((await req('/api/mines/start',tenChip.input,tenChipUser.token)).session.id,tenChip.session.id)
+  assert.equal(await db.walletLedgerEntry.count({where:{idempotencyKey:'mines:stake:'+tenChip.session.id}}),1)
+  await req('/api/mines/open',{sessionId:tenChip.session.id,cell:(await cells(tenChip.session.id)).mine},tenChipUser.token)
+
   const user=await account('USER',12_347)
   const minesState=await req('/api/mines/state',undefined,user.token)
   assert.equal(minesState.minStake,1)
@@ -82,14 +91,15 @@ test('Mines accepts a full-wallet stake once and rejects a stake above the curre
 
   const commitment=await req('/api/mines/prepare',{},user.token)
   const response=await req('/api/mines/start',{...input,stake:12_348,commitmentId:commitment.commitmentId,idempotencyKey:randomUUID()},user.token,409)
-  assert.match(response.statusMessage,/Недостаточно фишек|баланс/)
+  assert.equal(response.statusMessage,'Недостаточно фишек на балансе')
   assert.equal((await db.userWallet.findUniqueOrThrow({where:{userId:user.id}})).balance,0n)
 
-  const lowStakeUser=await account('USER',10_000)
+  const lowStakeUser=await account('USER',1)
   const lowStake=await start(lowStakeUser,{stake:1,clientSeed:'minimum-positive-stake'})
   assert.equal(lowStake.session.stake,1)
-  assert.equal(lowStake.session.balance,9_999)
+  assert.equal(lowStake.session.balance,0)
   assert.equal((await db.walletLedgerEntry.findUniqueOrThrow({where:{idempotencyKey:'mines:stake:'+lowStake.session.id}})).amount,-1n)
+  assert.equal((await db.userWallet.findUniqueOrThrow({where:{userId:lowStakeUser.id}})).balance,0n)
   await req('/api/mines/open',{sessionId:lowStake.session.id,cell:(await cells(lowStake.session.id)).mine},lowStakeUser.token)
 })
 test('concurrent Mines bets serialize against the latest wallet and preserve active-round protection',async()=>{
@@ -149,12 +159,18 @@ test('concurrent distinct starts allow one active session; cashout racing mine i
   assert.equal(await total(),parallelBefore)
 })
 test('bank cannot promise uncovered payout and max payout automatically cashes out',async()=>{
+  if(!house) house=await account('SUPERADMIN',5_000_000)
   const user=await account()
   const original=await db.userWallet.findUniqueOrThrow({where:{userId:house.id}})
   await db.userWallet.update({where:{userId:house.id},data:{balance:1n}})
   const commit=await req('/api/mines/prepare',{},user.token),input={stake:100,mines:10,clientSeed:'cap',commitmentId:commit.commitmentId,idempotencyKey:randomUUID()}
   const before=await total()
-  await req('/api/mines/start',input,user.token,409);assert.equal(await total(),before)
+  const rejected=await req('/api/mines/start',input,user.token,409)
+  assert.match(rejected.statusMessage,/Игра временно недоступна/)
+  assert.equal((await db.userWallet.findUniqueOrThrow({where:{userId:user.id}})).balance,5_000n)
+  assert.equal(await db.miniGameSession.count({where:{userId:user.id,game:'mines',status:'ACTIVE'}}),0)
+  assert.equal(await db.walletLedgerEntry.count({where:{entryType:'MINES_STAKE',wallet:{userId:user.id}}}),0)
+  assert.equal(await total(),before)
   await db.userWallet.update({where:{userId:house.id},data:{balance:original.balance}})
   const baseline=await total(),{session}=await req('/api/mines/start',input,user.token),{safe}=await cells(session.id)
   let current=session

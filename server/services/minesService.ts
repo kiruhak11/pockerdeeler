@@ -125,7 +125,7 @@ export async function startMines(token: string | null | undefined, input: MinesS
     }
     const stake = BigInt(input.stake)
     const playerWallet = await tx.userWallet.findUniqueOrThrow({ where: { userId: id } })
-    if (playerWallet.balance < stake) throw createError({ statusCode: 409, statusMessage: 'Недостаточно фишек' })
+    if (playerWallet.balance < stake) throw createError({ statusCode: 409, statusMessage: 'Недостаточно фишек на балансе' })
     if (await tx.miniGameSession.count({ where: { userId: id, game: 'mines', status: 'ACTIVE' } })) throw createError({ statusCode: 409, statusMessage: 'Сначала завершите текущую игру' })
     const commitment = await tx.minesCommitment.findFirst({ where: { id: input.commitmentId, userId: id, consumedAt: null, expiresAt: { gt: new Date() } } })
     if (!commitment) throw createError({ statusCode: 409, statusMessage: 'Подготовьте новое поле: срок проверки истёк' })
@@ -135,6 +135,15 @@ export async function startMines(token: string | null | undefined, input: MinesS
     // session becomes active. This preserves the wallet/ledger total and
     // rejects insufficient coverage before the player's stake is debited.
     const reserve = maxPayout
+    const bankWallet = bankId === id
+      ? playerWallet
+      : await tx.userWallet.findUniqueOrThrow({ where: { userId: bankId } })
+    // ONLINE/table reservations are already reflected in canonical wallet
+    // balances when chips leave the wallet. Mines must not subtract them a
+    // second time. Existing Mines reserves are also already debited from the
+    // bank wallet, so its current balance is the spendable reserve.
+    const bankAvailable = bankWallet.balance - (bankId === id ? stake : 0n)
+    if (bankAvailable < reserve) throw createError({ statusCode: 409, statusMessage: 'Игра временно недоступна' })
     await tx.minesCommitment.update({ where: { id: commitment.id }, data: { consumedAt: new Date() } })
     const session = await tx.miniGameSession.create({ data: { userId: id, game: 'mines', status: 'ACTIVE', stake, mines: input.mines, serverSeed: commitment.serverSeed, serverSeedHash: commitment.seedHash, clientSeed: input.clientSeed, idempotencyKey: key, openedCells: [], multiplier: 1, bankUserId: bankId, bankReserve: reserve, maxPayout } })
     await adjustUserWallet(tx, { userId: id, delta: -stake, entryType: 'MINES_STAKE', transferId: session.id, idempotencyKey: `mines:stake:${session.id}`, metadata: { sessionId: session.id, mines: input.mines } })
