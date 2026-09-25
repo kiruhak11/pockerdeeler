@@ -7,6 +7,7 @@ import { platformFromPath } from '~/platform/types'
 import type { OnlineApiResult, OnlineRoomState } from '~/types/online'
 
 const route = useRoute()
+definePageMeta({ alias: ['/yandex/online/:code'] })
 const account = useAccountStore()
 const isYandex = computed(() => platformFromPath(route.path, route.query.platform) === 'YANDEX_GAMES')
 const code = computed(() => String(route.params.code || '').trim().toUpperCase())

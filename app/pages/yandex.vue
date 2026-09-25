@@ -11,6 +11,7 @@ const identity = ref<PlatformPlayerIdentity | null>(null)
 const accountAuthorized = ref(false)
 const authorizationBusy = ref(false)
 const errorMessage = ref('')
+const playerInitials = computed(() => (identity.value?.displayName || 'Г').trim().slice(0, 1).toLocaleUpperCase('ru-RU'))
 
 const configuredMock = computed<YandexMockMode>(() => {
   if (!import.meta.dev) return 'off'
@@ -76,7 +77,7 @@ useHead({ title: 'Pocker · Яндекс Игры' })
     <header class="yandex-shell__header">
       <div><span class="yandex-shell__mark">P</span><div><strong>Pocker</strong><small>ONLINE poker</small></div></div>
       <div v-if="status === 'ready' && identity" class="yandex-shell__player">
-        <img v-if="identity.avatarUrl" :src="identity.avatarUrl" alt="">
+        <span class="yandex-shell__avatar" aria-hidden="true">{{ playerInitials }}</span>
         <div><strong>{{ identity.displayName || 'Гость' }}</strong><small>{{ accountAuthorized ? 'Игрок Яндекса' : 'Гостевой режим' }}</small></div>
         <button v-if="!accountAuthorized" type="button" :disabled="authorizationBusy" @click="authorize">{{ authorizationBusy ? 'Входим…' : 'Войти' }}</button>
       </div>
@@ -100,7 +101,7 @@ useHead({ title: 'Pocker · Яндекс Игры' })
       </section>
       <p v-if="errorMessage" class="yandex-shell__notice" role="status">{{ errorMessage }}</p>
       <p class="yandex-shell__disclosure">Все выигрыши и награды в Pocker — только внутренняя виртуальная валюта. Она не выводится и не обменивается на реальные деньги или имущество.</p>
-      <NuxtLink class="yandex-shell__create" to="/online/create?platform=YANDEX_GAMES">Создать онлайн-стол</NuxtLink>
+      <NuxtLink class="yandex-shell__create" to="/yandex/online/create">Создать онлайн-стол</NuxtLink>
       <OnlineLobbyDirectory platform-mode="yandex" />
       <small v-if="configuredMock !== 'off'" class="yandex-shell__dev">DEV MOCK · {{ configuredMock }}</small>
     </template>
@@ -115,7 +116,7 @@ useHead({ title: 'Pocker · Яндекс Игры' })
 .yandex-shell__header small { color: var(--text-muted); }
 .yandex-shell__mark { display: grid; place-items: center; width: 42px; height: 42px; flex: 0 0 auto; border-radius: 14px; color: #162218; background: var(--accent); font: 900 1.35rem 'Space Grotesk', sans-serif; }
 .yandex-shell__player { margin-left: auto; padding: .4rem .5rem .4rem .7rem; border: 1px solid #ffffff1a; border-radius: 16px; background: #ffffff08; }
-.yandex-shell__player img { width: 34px; height: 34px; border-radius: 50%; object-fit: cover; }
+.yandex-shell__avatar { display: grid; place-items: center; width: 34px; height: 34px; flex: 0 0 auto; border-radius: 50%; color: #172116; background: var(--accent); font-weight: 900; }
 .yandex-shell__player button { min-height: 36px; padding: 0 .8rem; border: 0; border-radius: 11px; color: #172116; background: var(--accent); font-weight: 800; cursor: pointer; }
 .yandex-shell__state { min-height: min(72dvh, 620px); display: grid; place-items: center; align-content: center; gap: .7rem; text-align: center; }
 .yandex-shell__state h1, .yandex-shell__state p { margin: 0; }

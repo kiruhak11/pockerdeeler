@@ -45,6 +45,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret}
       ROOM_SECRET_PEPPER: ${ROOM_SECRET_PEPPER:-dev-room-pepper}
       NUXT_PUBLIC_APP_URL: ${NUXT_PUBLIC_APP_URL:-http://localhost:3000}
+      YANDEX_GAMES_FRAME_ANCESTORS: ${YANDEX_GAMES_FRAME_ANCESTORS:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
     ports:
       - '${APP_PORT:-3000}:3000'

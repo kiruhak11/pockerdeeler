@@ -6,7 +6,7 @@ const gameStore = useGameStore()
 const account = useAccountStore()
 const route = useRoute()
 const { isYandexGames } = useGamePlatform()
-const isOnlineTable = computed(() => route.path.startsWith('/online/') && route.path !== '/online/create')
+const isOnlineTable = computed(() => (route.path.startsWith('/online/') || route.path.startsWith('/yandex/online/')) && !['/online/create', '/yandex/online/create'].includes(route.path))
 const seasonSummary = ref<any>(null)
 const seasonModalOpen = ref(false)
 async function checkSeasonResults() { if (!account.user) return; try { const response = await $fetch<any>('/api/season/me'); if (response.pendingResult) { seasonSummary.value = response.pendingResult; seasonModalOpen.value = true } } catch {} }

@@ -11,7 +11,6 @@ type YandexPlayer = {
   isAuthorized(): boolean
   getUniqueID(): string
   getName?(): string
-  getPhoto?(size?: 'small' | 'medium' | 'large'): string
   signature?: string
 }
 
@@ -44,14 +43,12 @@ function optionalText(value: unknown): string | undefined {
 function identityFromPlayer(player: YandexPlayer, signature?: string): PlatformPlayerIdentity {
   const authorized = player.isAuthorized()
   const displayName = authorized ? optionalText(player.getName?.()) : undefined
-  const avatarUrl = authorized ? optionalText(player.getPhoto?.('medium')) : undefined
   return {
     platform: APPLICATION_PLATFORMS.YANDEX_GAMES,
     platformUserId: player.getUniqueID(),
     authorized,
     ...(signature ? { signature } : {}),
-    ...(displayName ? { displayName } : {}),
-    ...(avatarUrl ? { avatarUrl } : {})
+    ...(displayName ? { displayName } : {})
   }
 }
 
@@ -60,8 +57,7 @@ function createMockSdk(mode: Exclude<YandexMockMode, 'off'>): YandexGamesSdk {
   const player: YandexPlayer = {
     isAuthorized: () => authorized,
     getUniqueID: () => authorized ? 'dev-yandex-authorized' : 'dev-yandex-guest',
-    getName: () => authorized ? 'Yandex Dev Player' : '',
-    getPhoto: () => ''
+    getName: () => authorized ? 'Yandex Dev Player' : ''
   }
   return {
     getPlayer: async options => options?.signed ? { ...player, signature: 'dev-mock-authorized-player' } : player,

@@ -6,6 +6,7 @@ import { ensureYandexSession, yandexAuthHeaders } from '~/platform/yandexSession
 import { platformFromPath } from '~/platform/types'
 
 const route = useRoute()
+definePageMeta({ alias: ['/yandex/online/create'] })
 const account = useAccountStore()
 const { loadMe } = useAccountAuth()
 const visibility = ref<'PUBLIC' | 'PRIVATE'>('PUBLIC')
@@ -40,7 +41,7 @@ async function createRoom() {
       headers: yandexAuthHeaders(isYandex.value), retry: 0
     })
     privateJoinSecret.value = ''
-    await navigateTo(`/online/${result.room.roomCode}${isYandex.value ? '?platform=YANDEX_GAMES' : ''}`)
+    await navigateTo(isYandex.value ? `/yandex/online/${result.room.roomCode}` : `/online/${result.room.roomCode}`)
   } catch (cause) {
     const status = (cause as { statusCode?: number; status?: number }).statusCode ?? (cause as { statusCode?: number; status?: number }).status
     if (status === 401) {
