@@ -55,7 +55,7 @@ export function readOnlinePokerBotOrchestratorConfig(env: NodeJS.ProcessEnv = pr
     bigBlind,
     quickJoinProbability: probability('BOT_ORCHESTRATOR_QUICK_JOIN_CHANCE', 0.02),
     createRoomProbability: probability('BOT_ORCHESTRATOR_CREATE_CHANCE', 0.01),
-    rocketPlayProbability: probability('BOT_ORCHESTRATOR_ROCKET_CHANCE', 0.15),
+    rocketPlayProbability: probability('BOT_ORCHESTRATOR_ROCKET_CHANCE', 0.25),
     rocketAllInChance: probability('BOT_ORCHESTRATOR_ROCKET_ALL_IN_CHANCE', 0.08)
   })
 }

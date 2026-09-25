@@ -99,6 +99,7 @@ function harness(options: {
   currentRoom?: unknown
   enabled?: boolean
   random?: () => number
+  config?: Partial<ReturnType<typeof readOnlinePokerBotOrchestratorConfig>>
 } = {}) {
   const identity = options.identity ?? bot('test-bot')
   const events: Array<{ method: string; input?: any }> = []
@@ -139,7 +140,7 @@ function harness(options: {
     release: async () => true
   }
   const orchestrator = new OnlinePokerBotOrchestrator({
-    config: baseConfig({ enabled: options.enabled ?? true }),
+    config: baseConfig({ enabled: options.enabled ?? true, ...options.config }),
     adapter,
     lease,
     now: () => now,
@@ -150,11 +151,38 @@ function harness(options: {
 
 test('Rocket automation shares the orchestrator feature flag and defaults to a bounded chance', async () => {
   assert.equal(readOnlinePokerBotOrchestratorConfig({}).enabled, false)
-  assert.equal(readOnlinePokerBotOrchestratorConfig({ BOT_ORCHESTRATOR_ENABLED: 'true' }).rocketPlayProbability, 0.15)
-  assert.equal(readOnlinePokerBotOrchestratorConfig({ BOT_ORCHESTRATOR_ENABLED: 'true', BOT_ORCHESTRATOR_ROCKET_CHANCE: '2' }).rocketPlayProbability, 0.15)
+  assert.equal(readOnlinePokerBotOrchestratorConfig({ BOT_ORCHESTRATOR_ENABLED: 'true' }).rocketPlayProbability, 0.25)
+  assert.equal(readOnlinePokerBotOrchestratorConfig({ BOT_ORCHESTRATOR_ENABLED: 'true', BOT_ORCHESTRATOR_ROCKET_CHANCE: '2' }).rocketPlayProbability, 0.25)
+  assert.equal(readOnlinePokerBotOrchestratorConfig({ BOT_ORCHESTRATOR_ENABLED: 'true', BOT_ORCHESTRATOR_ROCKET_CHANCE: '0.15' }).rocketPlayProbability, 0.15)
   const h = harness({ enabled: false })
   await h.orchestrator.tick()
   assert.equal(h.events.length, 0)
+})
+
+test('default Rocket activity increases about 1.5-2x over the same deterministic 100 rounds', async () => {
+  async function simulate(chance: number) {
+    let draw = 0
+    let opportunity = 0
+    let completedBets = 0
+    const random = () => {
+      const slot = draw++ % 5
+      return slot === 0 ? opportunity++ / 100 : 0.5
+    }
+    for (let index = 0; index < 100; index += 1) {
+      const h = harness({ random, config: { rocketPlayProbability: chance } })
+      await h.orchestrator.tick()
+      h.setNow(1_005_000)
+      await h.orchestrator.tick()
+      completedBets += h.events.filter(event => event.method === 'bet').length
+    }
+    return completedBets
+  }
+
+  const before = await simulate(0.15)
+  const after = await simulate(readOnlinePokerBotOrchestratorConfig({ BOT_ORCHESTRATOR_ENABLED: 'true' }).rocketPlayProbability!)
+  assert.equal(before, 15)
+  assert.equal(after, 25)
+  assert.ok(after / before >= 1.5 && after / before <= 2)
 })
 
 test('an idle bot places one delayed account-backed Rocket bet with legal limits', async () => {
