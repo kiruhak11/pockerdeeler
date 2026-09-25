@@ -6,6 +6,7 @@ const props = defineProps<{
   state: OnlineRoomState
   viewerId: string | null
   spectating?: boolean
+  spectatorCount?: number
   joinBusy?: boolean
   connectionStatus: OnlineConnectionStatus
   pendingActionId?: string | null
@@ -141,11 +142,11 @@ function finalizedDisplayName(player: OnlineFinalizedShowdownPlayer): string {
       <div>
         <NuxtLink class="back-link" to="/rooms">← Столы</NuxtLink>
         <h1>ONLINE · {{ state.roomCode }}</h1>
-        <p>{{ state.visibility === 'PRIVATE' ? 'Приватный стол' : 'Публичный стол' }} · {{ state.pokerTable.players.length }}/{{ state.maxPlayers }}</p>
+        <p>{{ state.visibility === 'PRIVATE' ? 'Приватный стол' : 'Публичный стол' }} · Игроки {{ state.pokerTable.players.length }}/{{ state.maxPlayers }}<span v-if="state.visibility === 'PUBLIC'"> · Зрители {{ spectatorCount ?? 0 }}</span></p>
       </div>
       <div class="header-actions">
         <span class="connection" :class="`connection--${connectionStatus}`" role="status">● {{ spectating ? 'Наблюдение' : connectionLabel(connectionStatus) }}</span>
-        <button v-if="spectating && state.pokerTable.status === 'WAITING' && state.pokerTable.players.length < state.maxPlayers" class="icon-button" type="button" :disabled="joinBusy" @click="emit('join')">{{ joinBusy ? 'Подключаем…' : 'Зайти за стол' }}</button>
+        <button v-if="spectating && isWaiting && state.pokerTable.players.length < state.maxPlayers" class="btn" type="button" :disabled="joinBusy" @click="emit('join')">{{ joinBusy ? 'Подключаем…' : 'Готов' }}</button>
         <button v-else-if="!spectating" class="icon-button" type="button" aria-label="Выйти из комнаты" @click="emit('leave')">Выйти</button>
       </div>
     </header>
@@ -241,7 +242,9 @@ function finalizedDisplayName(player: OnlineFinalizedShowdownPlayer): string {
       </div>
 
       <div v-if="spectating" class="waiting-controls">
-        <p>Вы наблюдаете за публичным столом. В закрытые карты игроков не попасть.</p>
+        <p v-if="visibleHand">Вы наблюдаете за раздачей. Присоединиться можно после её завершения.</p>
+        <p v-else-if="state.pokerTable.players.length >= state.maxPlayers">Вы наблюдаете за полным столом. Место появится, когда кто-то выйдет.</p>
+        <p v-else>Вы наблюдаете за публичным столом. Нажмите «Готов», чтобы занять место между раздачами.</p>
       </div>
       <div v-else-if="isWaiting && tableViewer" class="waiting-controls">
         <button v-if="canStart" class="btn" type="button" @click="emit('start')">Начать раздачу</button>

@@ -90,6 +90,7 @@ export type OnlineRoomErrorCode =
   | 'ROOM_CLOSED'
   | 'PRIVATE_ROOM_AUTH_REQUIRED'
   | 'TABLE_FULL'
+  | 'HAND_IN_PROGRESS'
   | 'PLAYER_ALREADY_IN_ROOM'
   | 'PLAYER_NOT_IN_ROOM'
   | 'INVALID_ROOM_VERSION'
@@ -309,6 +310,9 @@ export function joinOnlineRoom(room: OnlineRoomState, options: JoinOnlineRoomOpt
   assertPrivateJoin(room, options.joinSecret)
   if (tablePlayerIds(room.pokerTable).has(options.playerId)) {
     fail('PLAYER_ALREADY_IN_ROOM', `Player ${options.playerId} is already in this online room.`)
+  }
+  if (hasRunningHand(room.pokerTable)) {
+    fail('HAND_IN_PROGRESS', 'A spectator can join as a player only after the current hand is finalized.')
   }
 
   const seat = options.seat ?? firstFreeSeat(room.pokerTable)

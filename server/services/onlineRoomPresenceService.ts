@@ -91,6 +91,69 @@ end
 return 0
 `
 
+const REGISTER_SPECTATOR_SCRIPT = `
+local connections = KEYS[1]
+local roomSpectators = KEYS[2]
+local now = tonumber(ARGV[1])
+local expiresAt = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local connectionId = ARGV[4]
+local spectatorId = ARGV[5]
+redis.call('ZREMRANGEBYSCORE', connections, '-inf', now)
+redis.call('ZREMRANGEBYSCORE', roomSpectators, '-inf', now)
+redis.call('ZADD', connections, expiresAt, connectionId)
+redis.call('ZADD', roomSpectators, expiresAt, spectatorId)
+redis.call('EXPIRE', connections, ttl)
+redis.call('EXPIRE', roomSpectators, ttl)
+return redis.call('ZCARD', roomSpectators)
+`
+
+const REFRESH_SPECTATOR_SCRIPT = `
+local connections = KEYS[1]
+local roomSpectators = KEYS[2]
+local now = tonumber(ARGV[1])
+local expiresAt = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local connectionId = ARGV[4]
+local spectatorId = ARGV[5]
+redis.call('ZREMRANGEBYSCORE', connections, '-inf', now)
+redis.call('ZREMRANGEBYSCORE', roomSpectators, '-inf', now)
+if redis.call('ZSCORE', connections, connectionId) == false then return 0 end
+redis.call('ZADD', connections, expiresAt, connectionId)
+redis.call('ZADD', roomSpectators, expiresAt, spectatorId)
+redis.call('EXPIRE', connections, ttl)
+redis.call('EXPIRE', roomSpectators, ttl)
+return 1
+`
+
+const UNREGISTER_SPECTATOR_SCRIPT = `
+local connections = KEYS[1]
+local roomSpectators = KEYS[2]
+local now = tonumber(ARGV[1])
+local connectionId = ARGV[2]
+local spectatorId = ARGV[3]
+redis.call('ZREMRANGEBYSCORE', connections, '-inf', now)
+redis.call('ZREMRANGEBYSCORE', roomSpectators, '-inf', now)
+local removed = redis.call('ZREM', connections, connectionId)
+local remaining = redis.call('ZCARD', connections)
+if remaining == 0 then
+  redis.call('DEL', connections)
+  redis.call('ZREM', roomSpectators, spectatorId)
+else
+  local latest = redis.call('ZREVRANGE', connections, 0, 0, 'WITHSCORES')
+  if latest[2] then redis.call('ZADD', roomSpectators, latest[2], spectatorId) end
+end
+return { removed, redis.call('ZCARD', roomSpectators) }
+`
+
+const COUNT_SPECTATORS_SCRIPT = `
+local roomSpectators = KEYS[1]
+local now = tonumber(ARGV[1])
+redis.call('ZREMRANGEBYSCORE', roomSpectators, '-inf', now)
+for index = 2, #ARGV do redis.call('ZREM', roomSpectators, ARGV[index]) end
+return redis.call('ZCARD', roomSpectators)
+`
+
 const RELEASE_GRACE_SCRIPT = `
 local graceKey = KEYS[1]
 local token = ARGV[1]
@@ -142,6 +205,12 @@ export class OnlineRoomPresenceError extends Error {
 }
 
 export type OnlineRoomPresenceRegistration = Readonly<{
+  roomId: string
+  userId: string
+  connectionId: string
+}>
+
+export type OnlineRoomSpectatorRegistration = Readonly<{
   roomId: string
   userId: string
   connectionId: string
@@ -252,6 +321,74 @@ export class OnlineRoomPresenceService {
 
   private fenceKey(roomId: string, userId: string): string {
     return `${this.graceKey(roomId, userId)}:fence`
+  }
+
+  private spectatorConnectionsKey(roomId: string, userId: string): string {
+    assertId(roomId, 'Room id')
+    assertId(userId, 'User id')
+    return `${this.keyPrefix}spectator:${hashPart(roomId)}:${hashPart(userId)}`
+  }
+
+  private roomSpectatorsKey(roomId: string): string {
+    assertId(roomId, 'Room id')
+    return `${this.keyPrefix}room-spectators:${hashPart(roomId)}`
+  }
+
+  private spectatorId(userId: string): string {
+    return hashPart(userId)
+  }
+
+  async registerSpectatorConnection(roomId: string, userId: string): Promise<OnlineRoomSpectatorRegistration> {
+    const registration = Object.freeze({ roomId, userId, connectionId: randomUUID() })
+    try {
+      await this.connect()
+      await this.redis.eval(REGISTER_SPECTATOR_SCRIPT, 2,
+        this.spectatorConnectionsKey(roomId, userId), this.roomSpectatorsKey(roomId),
+        Date.now(), Date.now() + this.ttlSeconds * 1000, this.ttlSeconds + this.graceSeconds + 60,
+        registration.connectionId, this.spectatorId(userId))
+      return registration
+    } catch (error) {
+      if (error instanceof OnlineRoomPresenceError) throw error
+      throw new OnlineRoomPresenceError('REDIS_UNAVAILABLE', error instanceof Error ? error.message : 'Spectator registration failed.')
+    }
+  }
+
+  async refreshSpectatorConnection(registration: OnlineRoomSpectatorRegistration): Promise<void> {
+    try {
+      await this.connect()
+      const refreshed = await this.redis.eval(REFRESH_SPECTATOR_SCRIPT, 2,
+        this.spectatorConnectionsKey(registration.roomId, registration.userId), this.roomSpectatorsKey(registration.roomId),
+        Date.now(), Date.now() + this.ttlSeconds * 1000, this.ttlSeconds + this.graceSeconds + 60,
+        registration.connectionId, this.spectatorId(registration.userId))
+      if (integerResult(refreshed, 'Spectator refresh') !== 1) throw new OnlineRoomPresenceError('CONNECTION_NOT_FOUND', 'The spectator connection is no longer registered.')
+    } catch (error) {
+      if (error instanceof OnlineRoomPresenceError) throw error
+      throw new OnlineRoomPresenceError('REDIS_UNAVAILABLE', error instanceof Error ? error.message : 'Spectator refresh failed.')
+    }
+  }
+
+  async unregisterSpectatorConnection(registration: OnlineRoomSpectatorRegistration): Promise<{ removed: boolean; spectatorCount: number }> {
+    try {
+      await this.connect()
+      const result = await this.redis.eval(UNREGISTER_SPECTATOR_SCRIPT, 2,
+        this.spectatorConnectionsKey(registration.roomId, registration.userId), this.roomSpectatorsKey(registration.roomId),
+        Date.now(), registration.connectionId, this.spectatorId(registration.userId)) as unknown[]
+      return Object.freeze({ removed: integerResult(result[0], 'Spectator unregister') === 1, spectatorCount: integerResult(result[1], 'Spectator unregister') })
+    } catch (error) {
+      if (error instanceof OnlineRoomPresenceError) throw error
+      throw new OnlineRoomPresenceError('REDIS_UNAVAILABLE', error instanceof Error ? error.message : 'Spectator unregister failed.')
+    }
+  }
+
+  async spectatorCount(roomId: string, seatedUserIds: readonly string[] = []): Promise<number> {
+    try {
+      await this.connect()
+      const count = await this.redis.eval(COUNT_SPECTATORS_SCRIPT, 1, this.roomSpectatorsKey(roomId), Date.now(), ...seatedUserIds.map(userId => this.spectatorId(userId)))
+      return integerResult(count, 'Spectator count')
+    } catch (error) {
+      if (error instanceof OnlineRoomPresenceError) throw error
+      throw new OnlineRoomPresenceError('REDIS_UNAVAILABLE', error instanceof Error ? error.message : 'Spectator count failed.')
+    }
   }
 
   keyFor(roomId: string, userId: string): string {

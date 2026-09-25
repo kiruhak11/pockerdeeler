@@ -7,7 +7,7 @@ import {
   setAuthenticatedOnlineRoomPresence,
   startAuthenticatedOnlineRoomHand
 } from '../../../services/onlineRoomApiService'
-import { getOnlineRoomPresenceService, type OnlineRoomPresenceRegistration, type OnlineRoomPresenceService } from '../../../services/onlineRoomPresenceService'
+import { getOnlineRoomPresenceService, type OnlineRoomPresenceRegistration, type OnlineRoomPresenceService, type OnlineRoomSpectatorRegistration } from '../../../services/onlineRoomPresenceService'
 import { normalizeGlobalRoomCode } from '../../../services/roomCodeRegistryService'
 import {
   registerOnlineRoomPeer,
@@ -23,12 +23,13 @@ import { ONLINE_ROOM_PROTOCOL_VERSION } from '../../../ws/onlineRoomProtocol'
 
 const ACCOUNT_COOKIE = 'poker_account'
 
-type AuthenticatedSocket = Readonly<{
+type AuthenticatedSocket = {
   userId: string
   connection: OnlineRoomPeerConnection
   presence?: OnlineRoomPresenceService
   presenceRegistration?: OnlineRoomPresenceRegistration
-}>
+  spectatorRegistration?: OnlineRoomSpectatorRegistration
+}
 
 const sockets = new WeakMap<Peer, AuthenticatedSocket>()
 const authenticating = new WeakSet<Peer>()
@@ -121,8 +122,12 @@ async function authenticate(peer: Peer): Promise<AuthenticatedSocket> {
   }
   const result = await getAuthenticatedOnlineRoom(auth.userId, code)
   const seated = result.room.pokerTable.players.some(player => player.playerId === auth.userId)
-  const presence = seated ? getOnlineRoomPresenceService() : undefined
-  const registered = presence ? await presence.registerConnection(result.room.roomId, auth.userId) : undefined
+  const spectator = !seated && result.room.visibility === 'PUBLIC'
+  const presence = seated || spectator ? getOnlineRoomPresenceService() : undefined
+  const registered = presence && seated ? await presence.registerConnection(result.room.roomId, auth.userId) : undefined
+  const spectatorRegistration = presence && spectator
+    ? await presence.registerSpectatorConnection(result.room.roomId, auth.userId).catch(() => undefined)
+    : undefined
   try {
     if (presence && registered) await setAuthenticatedOnlineRoomPresence(auth.userId, code, true)
     const fresh = await getAuthenticatedOnlineRoom(auth.userId, code)
@@ -130,7 +135,8 @@ async function authenticate(peer: Peer): Promise<AuthenticatedSocket> {
     const socket = {
       userId: auth.userId,
       connection,
-      ...(presence && registered ? { presence, presenceRegistration: registered.registration } : {})
+      ...(presence && registered ? { presence, presenceRegistration: registered.registration } : {}),
+      ...(presence && spectatorRegistration ? { presence, spectatorRegistration } : {})
     } satisfies AuthenticatedSocket
     if (closed.has(peer)) {
       unregisterOnlineRoomPeer(connection)
@@ -142,6 +148,7 @@ async function authenticate(peer: Peer): Promise<AuthenticatedSocket> {
           })
         }
       }
+      if (presence && spectatorRegistration) await presence.unregisterSpectatorConnection(spectatorRegistration).catch(() => undefined)
       throw new Error('WebSocket closed during authentication.')
     }
     sockets.set(peer, socket)
@@ -157,6 +164,7 @@ async function authenticate(peer: Peer): Promise<AuthenticatedSocket> {
         })
       }
     }
+    if (presence && spectatorRegistration) await presence.unregisterSpectatorConnection(spectatorRegistration).catch(() => undefined)
     throw error
   }
 }
@@ -188,7 +196,22 @@ async function handleMessage(peer: Peer, message: Message, socket: Authenticated
   }
   if (parsed.type === 'PING') {
     try {
-      if (socket.presence && socket.presenceRegistration) await socket.presence.refreshConnection(socket.presenceRegistration)
+      if (socket.presence && socket.spectatorRegistration) {
+        const fresh = await getAuthenticatedOnlineRoom(socket.userId, socket.connection.roomCode)
+        const seated = fresh.room.pokerTable.players.some(player => player.playerId === socket.userId)
+        if (seated) {
+          await socket.presence.unregisterSpectatorConnection(socket.spectatorRegistration)
+          socket.spectatorRegistration = undefined
+          const registered = await socket.presence.registerConnection(fresh.room.roomId, socket.userId)
+          await setAuthenticatedOnlineRoomPresence(socket.userId, socket.connection.roomCode, true)
+          socket.presenceRegistration = registered.registration
+          monitorPresenceLease(socket.presence, registered.registration, socket.connection.roomCode)
+        } else {
+          await socket.presence.refreshSpectatorConnection(socket.spectatorRegistration)
+        }
+      } else if (socket.presence && socket.presenceRegistration) {
+        await socket.presence.refreshConnection(socket.presenceRegistration)
+      }
       peer.send(JSON.stringify({ version: ONLINE_ROOM_PROTOCOL_VERSION, type: 'PONG' }))
     } catch (error) {
       sendOnlineRoomError(socket.connection, errorCode(error), errorMessage(error))
@@ -268,6 +291,9 @@ export default defineWebSocketHandler({
             await setAuthenticatedOnlineRoomPresence(socket.userId, socket.connection.roomCode, false)
           })
         }).catch(() => undefined)
+      }
+      if (socket.presence && socket.spectatorRegistration) {
+        void socket.presence.unregisterSpectatorConnection(socket.spectatorRegistration).catch(() => undefined)
       }
     }
     authenticating.delete(peer)

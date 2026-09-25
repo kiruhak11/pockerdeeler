@@ -390,7 +390,7 @@ function mapRuntimeError(error: unknown): OnlineRoomApiError {
     if (error.code === 'STALE_ROOM_VERSION') return new OnlineRoomApiError('CONFLICT', 'The room changed. Refresh and retry the action.', 409)
     if (error.code === 'ROOM_CLOSED') return new OnlineRoomApiError('CLOSED', 'This online room is closed.', 410)
     if (error.code === 'PLAYER_NOT_IN_ROOM') return new OnlineRoomApiError('NOT_FOUND', 'The authenticated user is not in this online room.', 404)
-    if (error.code === 'PLAYER_ALREADY_IN_ROOM' || error.code === 'TABLE_FULL') {
+    if (error.code === 'PLAYER_ALREADY_IN_ROOM' || error.code === 'TABLE_FULL' || error.code === 'HAND_IN_PROGRESS') {
       return new OnlineRoomApiError('CONFLICT', 'The requested room operation conflicts with its current state.', 409)
     }
     return new OnlineRoomApiError('INVALID_ACTION', error.message, 400)
@@ -915,6 +915,9 @@ export async function joinAuthenticatedOnlineRoom(userId: string, code: string, 
     // A retry/reconnect never buys in again. Keep the historical conflict
     // semantics for a second seat attempt while returning no new mutation.
     fail('CONFLICT', 'The authenticated user is already seated in this room.', 409)
+  }
+  if (currentRecord.state.pokerTable.currentHand && currentRecord.state.pokerTable.currentHand.street !== 'FINISHED') {
+    fail('CONFLICT', 'Нельзя занять место во время раздачи. Попробуйте после её завершения.', 409)
   }
   const targetSeat = firstAvailableOnlineSeat(currentRecord.state, seat)
   let reservation: OnlineBuyInReservation

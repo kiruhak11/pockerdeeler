@@ -18,6 +18,8 @@ const joinPrompt = ref(false)
 const privateRoom = ref(false)
 const joinSecret = ref('')
 const joinBusy = ref(false)
+const spectatorCount = ref(0)
+let spectatorPoll: ReturnType<typeof setInterval> | undefined
 
 function applyAuthoritativeState(next: OnlineRoomState, token?: string): boolean {
   if (state.value && (next.roomVersion < state.value.roomVersion || (next.roomVersion === state.value.roomVersion && next.pokerTable.stateVersion < state.value.pokerTable.stateVersion))) return false
@@ -25,7 +27,7 @@ function applyAuthoritativeState(next: OnlineRoomState, token?: string): boolean
   if (token) concurrencyToken.value = token
   const player = next.pokerTable.players.find(candidate => candidate.playerId === account.user?.id)
   privateRoom.value = next.visibility === 'PRIVATE'
-  joinPrompt.value = !player && (next.visibility === 'PRIVATE' || route.query.join === '1')
+  joinPrompt.value = !player && (next.visibility === 'PRIVATE' || (route.query.join === '1' && next.pokerTable.status === 'WAITING' && (!next.pokerTable.currentHand || next.pokerTable.currentHand.street === 'FINISHED') && next.pokerTable.players.length < next.maxPlayers))
   ready.value = player?.ready ?? false
   sittingOut.value = player?.sittingOut ?? false
   return true
@@ -52,6 +54,7 @@ function friendlyError(error: unknown): string {
   const status = statusCode(error)
   const message = String((error as { statusMessage?: string; data?: { statusMessage?: string; message?: string } }).statusMessage ?? (error as { data?: { statusMessage?: string; message?: string } }).data?.statusMessage ?? (error as { data?: { message?: string } }).data?.message ?? '')
   if (status === 409 && /недостаточно|insufficient/i.test(message)) return 'Недостаточно фишек для входа за стол.'
+  if (status === 409) return 'Место уже занято или стол изменился. Вы остались зрителем — обновите стол и попробуйте снова.'
   if (status === 401 || status === 403) return 'Войдите в аккаунт, чтобы открыть этот стол.'
   if (status === 404 || status === 410) return 'Стол не найден или уже закрыт.'
   if (status === 503) return 'Сервис стола временно недоступен. Попробуйте ещё раз.'
@@ -67,7 +70,7 @@ async function loadState() {
     applyAuthoritativeState(result.room, result.concurrencyToken)
     const player = result.room.pokerTable.players.find(candidate => candidate.playerId === account.user?.id)
     privateRoom.value = result.room.visibility === 'PRIVATE'
-    joinPrompt.value = !player && (result.room.visibility === 'PRIVATE' || route.query.join === '1')
+    joinPrompt.value = !player && (result.room.visibility === 'PRIVATE' || (route.query.join === '1' && result.room.pokerTable.status === 'WAITING' && (!result.room.pokerTable.currentHand || result.room.pokerTable.currentHand.street === 'FINISHED') && result.room.pokerTable.players.length < result.room.maxPlayers))
     ready.value = player?.ready ?? false
     sittingOut.value = player?.sittingOut ?? false
     loading.value = false
@@ -83,6 +86,19 @@ async function loadState() {
   }
 }
 
+async function loadSpectatorCount() {
+  if (state.value?.visibility !== 'PUBLIC' || errorStatus.value) {
+    spectatorCount.value = 0
+    return
+  }
+  try {
+    const result = await $fetch<{ count: number }>(`/api/online/rooms/${encodeURIComponent(code.value)}/spectators`, { retry: 0 })
+    spectatorCount.value = Number.isSafeInteger(result.count) && result.count >= 0 ? result.count : 0
+  } catch {
+    // The game state remains available if the optional live spectator count is temporarily unavailable.
+  }
+}
+
 async function joinRoom() {
   if (joinBusy.value || !account.user) {
     if (!account.user) await navigateTo(`/login?redirect=${encodeURIComponent(`/online/${code.value}`)}`)
@@ -90,6 +106,7 @@ async function joinRoom() {
   }
   joinBusy.value = true
   notice.value = ''
+  let seatingSucceeded = false
   try {
     const result = await $fetch<OnlineApiResult>(`/api/online/rooms/${encodeURIComponent(code.value)}/join`, {
       method: 'POST',
@@ -100,12 +117,20 @@ async function joinRoom() {
       },
       retry: 0
     })
+    seatingSucceeded = true
     applyAuthoritativeState(result.room, result.concurrencyToken)
+    const readyResult = await $fetch<OnlineApiResult>(`/api/online/rooms/${encodeURIComponent(code.value)}/ready`, {
+      method: 'POST',
+      body: { ready: true, concurrencyToken: result.concurrencyToken, expectedRoomVersion: result.room.roomVersion },
+      retry: 0
+    })
+    applyAuthoritativeState(readyResult.room, readyResult.concurrencyToken)
     joinSecret.value = ''
     joinPrompt.value = false
     socket.reconnect()
   } catch (error) {
     notice.value = friendlyError(error)
+    if (seatingSucceeded) socket.reconnect()
   } finally {
     joinBusy.value = false
   }
@@ -142,7 +167,11 @@ onMounted(async () => {
   await account.loadSession()
   try { await $fetch('/api/auth/session').then((response: any) => account.setUser(response.user)) } catch { /* room endpoint reports auth state */ }
   await loadState()
+  await loadSpectatorCount()
+  spectatorPoll = setInterval(() => { void loadSpectatorCount() }, 5_000)
 })
+
+onBeforeUnmount(() => { if (spectatorPoll) clearInterval(spectatorPoll) })
 
 useHead(() => ({ title: state.value ? `ONLINE ${state.value.roomCode} · Poker` : 'ONLINE · Poker' }))
 </script>
@@ -176,6 +205,7 @@ useHead(() => ({ title: state.value ? `ONLINE ${state.value.roomCode} · Poker` 
     :state="state"
     :viewer-id="account.user?.id || null"
     :spectating="!viewerIsMember"
+    :spectator-count="spectatorCount"
     :join-busy="joinBusy"
     :connection-status="connectionStatus"
     :pending-action-id="pendingActionId"

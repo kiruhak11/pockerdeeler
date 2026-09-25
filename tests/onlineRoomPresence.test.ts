@@ -156,6 +156,24 @@ test('missing heartbeat connection is rejected without local fallback', { skip: 
   await service.disconnect()
 })
 
+test('spectator tabs share one count and transition cleanly to player presence', { skip: !redisIsolated }, async () => {
+  const service = presence()
+  const firstTab = await service.registerSpectatorConnection('spectator-room', 'spectator-user')
+  const secondTab = await service.registerSpectatorConnection('spectator-room', 'spectator-user')
+  assert.equal(await service.spectatorCount('spectator-room'), 1)
+  await service.refreshSpectatorConnection(secondTab)
+  await service.unregisterSpectatorConnection(firstTab)
+  assert.equal(await service.spectatorCount('spectator-room'), 1)
+
+  const player = await service.registerConnection('spectator-room', 'spectator-user')
+  assert.equal(await service.spectatorCount('spectator-room', ['spectator-user']), 0)
+  await service.unregisterSpectatorConnection(secondTab)
+  assert.equal(await service.spectatorCount('spectator-room'), 0)
+  assert.equal(await service.liveConnectionCount('spectator-room', 'spectator-user'), 1)
+  await service.unregisterConnection(player.registration)
+  await service.disconnect()
+})
+
 test('Redis failure returns controlled presence error', { skip: !redisIsolated }, async () => {
   const broken = new OnlineRoomPresenceService({ redisUrl: 'redis://127.0.0.1:1/15', keyPrefix: `pocker:test:presence-broken:${randomUUID()}:` })
   await assert.rejects(broken.registerConnection('room-8', 'user-8'), (error: unknown) => error instanceof OnlineRoomPresenceError && error.code === 'REDIS_UNAVAILABLE')
