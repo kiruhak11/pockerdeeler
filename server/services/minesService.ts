@@ -4,8 +4,8 @@ import { createError } from 'h3'
 import { prisma } from '../db/client'
 import { verifyUserAuthToken } from './userAccountService'
 import { adjustUserWallet, lockUserWallet } from './walletService'
-import { getEconomySnapshot, recentMiniGameThrottle, settleMiniGameEconomy } from './miniGameEconomyService'
-import { MINES_COLUMNS, MINES_COUNT, legacyMinesField, legacyMinesTerms, minesBackedPayoutLimit, minesBankReserveDebit, minesField, minesLimit, minesTerms, seedHash } from '../utils/minesMath'
+import { ensureMiniGameEconomy, getEconomySnapshot, recentMiniGameThrottle, settleMiniGameEconomy } from './miniGameEconomyService'
+import { MINES_COLUMNS, MINES_COUNT, legacyMinesField, legacyMinesTerms, minesAvailableBankReserve, minesBackedPayoutLimit, minesField, minesLimit, minesTerms, seedHash } from '../utils/minesMath'
 import { minesStartInputSchema, type MinesStartInput } from '../utils/minesValidation'
 
 type Tx = Prisma.TransactionClient
@@ -67,14 +67,18 @@ async function finish(tx: Tx, session: MiniGameSession, status: 'LOST' | 'CASHED
   const throttled = await recentMiniGameThrottle(tx, { game: 'mines', userId: session.userId, payout: rawPayout })
   const payout = throttled.payout
   const modernEconomy = session.createdAt >= ECONOMY_CUTOFF
+  const stakeEntry = await tx.walletLedgerEntry.findUniqueOrThrow({ where: { idempotencyKey: `mines:stake:${session.id}` }, select: { metadata: true } })
+  const metadata = stakeEntry.metadata
+  const economyBackedReserve = metadata !== null && typeof metadata === 'object' && !Array.isArray(metadata)
+    && metadata.reserveSource === 'MINES_ECONOMY'
   await lockUsers(tx, [session.userId, session.bankUserId])
   const sameAsBank = session.userId === session.bankUserId
   const returned = session.stake + session.bankReserve - payout
-  if (!sameAsBank && returned < 0n) throw new Error('Mines reserve invariant violated')
+  if (!economyBackedReserve && !sameAsBank && returned < 0n) throw new Error('Mines reserve invariant violated')
   await tx.walletLedgerEntry.update({ where: { idempotencyKey: `mines:stake:${session.id}` }, data: { metadata: { sessionId: session.id, mines: session.mines, outcome: status, payout: Number(payout), stake: Number(session.stake), recentNet: Number(throttled.recentNet), throttleBps: throttled.factorBps } } })
   if (modernEconomy) await settleMiniGameEconomy(tx, { game: 'mines', userId: session.userId, stake: session.stake, payout, referenceId: session.id })
   if (payout) await adjustUserWallet(tx, { userId: session.userId, delta: payout, entryType: 'MINES_PAYOUT', transferId: session.id, idempotencyKey: `mines:payout:${session.id}`, metadata: { sessionId: session.id, mines: session.mines, safeOpened: opened.length } })
-  if (returned && !sameAsBank) await adjustUserWallet(tx, { userId: session.bankUserId, delta: returned, entryType: 'MINES_BANK_SETTLEMENT', transferId: session.id, idempotencyKey: `mines:bank-return:${session.id}`, metadata: { sessionId: session.id, outcome: status, reserveReturned: Number(session.bankReserve), playerPayout: Number(payout), netProfit: Number(session.stake - payout) } })
+  if (returned && !sameAsBank && !economyBackedReserve) await adjustUserWallet(tx, { userId: session.bankUserId, delta: returned, entryType: 'MINES_BANK_SETTLEMENT', transferId: session.id, idempotencyKey: `mines:bank-return:${session.id}`, metadata: { sessionId: session.id, outcome: status, reserveReturned: Number(session.bankReserve), playerPayout: Number(payout), netProfit: Number(session.stake - payout) } })
   const updated = await tx.miniGameSession.update({ where: { id: session.id }, data: { status, multiplier: status === 'LOST' ? sessionTerms(session, Math.max(0, opened.length - 1)).multiplier : sessionTerms(session, opened.length).multiplier, openedCells: opened, mineCells: minesField(session.serverSeed!, session.clientSeed!, session.nonce, session.mines!), payout, finishedAt: new Date() } })
   const wallet = await tx.userWallet.findUniqueOrThrow({ where: { userId: session.userId }, select: { balance: true } })
   return { ...view(updated), balance: Number(wallet.balance) }
@@ -130,14 +134,17 @@ export async function startMines(token: string | null | undefined, input: MinesS
     const commitment = await tx.minesCommitment.findFirst({ where: { id: input.commitmentId, userId: id, consumedAt: null, expiresAt: { gt: new Date() } } })
     if (!commitment) throw createError({ statusCode: 409, statusMessage: 'Подготовьте новое поле: срок проверки истёк' })
     const theoreticalMaxPayout = minesLimit(stake, input.mines)
-    const bankWallet = bankId === id
-      ? playerWallet
-      : await tx.userWallet.findUniqueOrThrow({ where: { userId: bankId } })
-    // ONLINE/table reservations are already reflected in canonical wallet
-    // balances when chips leave the wallet. Mines must not subtract them a
-    // second time. Existing Mines reserves are also already debited from the
-    // bank wallet, so its current balance is the spendable reserve.
-    const bankAvailable = bankWallet.balance - (bankId === id ? stake : 0n)
+    // Reserve from the existing daily Mines payout pool, not the owner/admin
+    // player wallet shown separately in the user ledger. The economy row lock
+    // serializes starts and active session bankReserve values hold liabilities.
+    await ensureMiniGameEconomy(tx)
+    await tx.$queryRaw`SELECT id FROM mini_game_economy WHERE id='global' FOR UPDATE`
+    const economy = await tx.miniGameEconomy.findUniqueOrThrow({ where: { id: 'global' }, select: { minesBank: true } })
+    const activeReserves = await tx.miniGameSession.aggregate({
+      where: { game: 'mines', status: 'ACTIVE' },
+      _sum: { bankReserve: true }
+    })
+    const bankAvailable = minesAvailableBankReserve(economy.minesBank, activeReserves._sum.bankReserve ?? 0n)
     const maxPayout = minesBackedPayoutLimit(theoreticalMaxPayout, bankAvailable, stake)
     if (maxPayout === null) throw createError({ statusCode: 409, statusMessage: 'Игра временно недоступна' })
     // Use the actual funded reserve as this session's payout ceiling when the
@@ -146,9 +153,7 @@ export async function startMines(token: string | null | undefined, input: MinesS
     const reserve = maxPayout
     await tx.minesCommitment.update({ where: { id: commitment.id }, data: { consumedAt: new Date() } })
     const session = await tx.miniGameSession.create({ data: { userId: id, game: 'mines', status: 'ACTIVE', stake, mines: input.mines, serverSeed: commitment.serverSeed, serverSeedHash: commitment.seedHash, clientSeed: input.clientSeed, idempotencyKey: key, openedCells: [], multiplier: 1, bankUserId: bankId, bankReserve: reserve, maxPayout } })
-    await adjustUserWallet(tx, { userId: id, delta: -stake, entryType: 'MINES_STAKE', transferId: session.id, idempotencyKey: `mines:stake:${session.id}`, metadata: { sessionId: session.id, mines: input.mines } })
-    const bankReserveDebit = minesBankReserveDebit(reserve, bankId === id)
-    if (bankReserveDebit > 0n) await adjustUserWallet(tx, { userId: bankId, delta: -bankReserveDebit, entryType: 'MINES_BANK_RESERVE', transferId: session.id, idempotencyKey: `mines:bank-reserve:${session.id}`, metadata: { sessionId: session.id, maxPayout: Number(maxPayout) } })
+    await adjustUserWallet(tx, { userId: id, delta: -stake, entryType: 'MINES_STAKE', transferId: session.id, idempotencyKey: `mines:stake:${session.id}`, metadata: { sessionId: session.id, mines: input.mines, reserveSource: 'MINES_ECONOMY' } })
     const wallet = await tx.userWallet.findUniqueOrThrow({ where: { userId: id }, select: { balance: true } })
     return { session: { ...view(session), balance: Number(wallet.balance) } }
   }, { timeout: 15_000 })

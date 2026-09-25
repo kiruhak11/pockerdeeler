@@ -22,10 +22,12 @@ async function account(role='USER',balance=5000){
 async function total(){
   const wallets=await db.userWallet.aggregate({_sum:{balance:true}})
   const achievements=await db.walletLedgerEntry.aggregate({where:{entryType:'ACHIEVEMENT_REWARD'},_sum:{amount:true}})
-  const active=await db.miniGameSession.findMany({where:{status:'ACTIVE'}})
-  // Achievement rewards are an independent, intentional emission. Exclude
-  // them so this helper checks only the Mines wallet/reserve conservation.
-  return (wallets._sum.balance || 0n)-(achievements._sum.amount || 0n)+active.reduce((sum,s)=>sum+s.stake+s.bankReserve,0n)
+  const active=await db.miniGameSession.findMany({where:{game:'mines',status:'ACTIVE'},select:{stake:true}})
+  const economy=await db.miniGameEconomy.findUnique({where:{id:'global'}})
+  // Mines' daily pool is the payout bank; active stakes remain in-flight.
+  // Achievement rewards are independent intentional emissions.
+  const walletTotal=(wallets._sum.balance || 0n)-(achievements._sum.amount || 0n)
+  return walletTotal*10n+(economy?.minesBank ?? 2_000_000n)*10n+(economy?.jackpotTenths ?? 0n)+active.reduce((sum,s)=>sum+s.stake*10n,0n)
 }
 async function start(user:{token:string},extra:Record<string,unknown>={}){
   const commit=await req('/api/mines/prepare',{},user.token)
@@ -49,7 +51,8 @@ test('Mines start reserve, restore, concurrent safe open and double cashout cons
   assert.equal(await total(),before)
   const stored=await db.miniGameSession.findUniqueOrThrow({where:{id:session.id}})
   assert.equal(stored.bankReserve,stored.maxPayout)
-  assert.equal((await db.walletLedgerEntry.findUniqueOrThrow({where:{idempotencyKey:'mines:bank-reserve:'+session.id}})).amount,-stored.bankReserve)
+  assert.equal(await db.walletLedgerEntry.count({where:{idempotencyKey:'mines:bank-reserve:'+session.id}}),0)
+  assert.equal(((await db.walletLedgerEntry.findUniqueOrThrow({where:{idempotencyKey:'mines:stake:'+session.id}})).metadata as any).reserveSource,'MINES_ECONOMY')
   assert.ok(!('serverSeed' in session) && !('mineCells' in session))
   assert.equal((await req('/api/mines/state',undefined,user.token)).active.id,session.id)
   await req('/api/mines/cashout',{sessionId:session.id},user.token,409)

@@ -46,10 +46,10 @@ export function minesBackedPayoutLimit(theoreticalMaxPayout: bigint, bankAvailab
   return theoreticalMaxPayout < bankAvailable ? theoreticalMaxPayout : bankAvailable
 }
 
-/** A player who is also the bank has one canonical wallet: reserve is a
- * solvency check, not a second debit from that same wallet. */
-export function minesBankReserveDebit(reserve: bigint, playerIsBank: boolean): bigint {
-  return playerIsBank ? 0n : reserve
+/** Active round reserves reduce the spendable part of the shared Mines pool. */
+export function minesAvailableBankReserve(bankBalance: bigint, activeReserves: bigint): bigint {
+  const available = bankBalance - activeReserves
+  return available > 0n ? available : 0n
 }
 export function legacyMinesTerms(stake: bigint, mines: number, opened: number, limit: bigint) {
   // Older releases exposed several presets (including 15 and 20 mines).
