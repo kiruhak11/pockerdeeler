@@ -5,7 +5,7 @@ import { prisma } from '../db/client'
 import { verifyUserAuthToken } from './userAccountService'
 import { adjustUserWallet, lockUserWallet } from './walletService'
 import { getEconomySnapshot, recentMiniGameThrottle, settleMiniGameEconomy } from './miniGameEconomyService'
-import { MINES_COLUMNS, MINES_COUNT, legacyMinesField, legacyMinesTerms, minesBackedPayoutLimit, minesField, minesLimit, minesTerms, seedHash } from '../utils/minesMath'
+import { MINES_COLUMNS, MINES_COUNT, legacyMinesField, legacyMinesTerms, minesBackedPayoutLimit, minesBankReserveDebit, minesField, minesLimit, minesTerms, seedHash } from '../utils/minesMath'
 import { minesStartInputSchema, type MinesStartInput } from '../utils/minesValidation'
 
 type Tx = Prisma.TransactionClient
@@ -147,7 +147,8 @@ export async function startMines(token: string | null | undefined, input: MinesS
     await tx.minesCommitment.update({ where: { id: commitment.id }, data: { consumedAt: new Date() } })
     const session = await tx.miniGameSession.create({ data: { userId: id, game: 'mines', status: 'ACTIVE', stake, mines: input.mines, serverSeed: commitment.serverSeed, serverSeedHash: commitment.seedHash, clientSeed: input.clientSeed, idempotencyKey: key, openedCells: [], multiplier: 1, bankUserId: bankId, bankReserve: reserve, maxPayout } })
     await adjustUserWallet(tx, { userId: id, delta: -stake, entryType: 'MINES_STAKE', transferId: session.id, idempotencyKey: `mines:stake:${session.id}`, metadata: { sessionId: session.id, mines: input.mines } })
-    if (reserve > 0n) await adjustUserWallet(tx, { userId: bankId, delta: -reserve, entryType: 'MINES_BANK_RESERVE', transferId: session.id, idempotencyKey: `mines:bank-reserve:${session.id}`, metadata: { sessionId: session.id, maxPayout: Number(maxPayout) } })
+    const bankReserveDebit = minesBankReserveDebit(reserve, bankId === id)
+    if (bankReserveDebit > 0n) await adjustUserWallet(tx, { userId: bankId, delta: -bankReserveDebit, entryType: 'MINES_BANK_RESERVE', transferId: session.id, idempotencyKey: `mines:bank-reserve:${session.id}`, metadata: { sessionId: session.id, maxPayout: Number(maxPayout) } })
     const wallet = await tx.userWallet.findUniqueOrThrow({ where: { userId: id }, select: { balance: true } })
     return { session: { ...view(session), balance: Number(wallet.balance) } }
   }, { timeout: 15_000 })

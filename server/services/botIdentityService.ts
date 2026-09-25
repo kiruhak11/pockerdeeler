@@ -143,8 +143,11 @@ function toBotIdentity(user: Pick<User, 'id' | 'username' | 'isBot' | 'botKey' |
 
 type BotUserRow = Pick<User, 'id' | 'username' | 'isBot' | 'botKey' | 'botEnabled' | 'botSkillTier' | 'botPlayStyle' | 'balance' | 'tableRating' | 'tableHandsPlayed' | 'tableHandsWon' | 'predictionRating' | 'leaderboardVisible'>
 
-function assertProfileMatches(user: BotUserRow, profile: BotProfile): void {
-  if (!user.isBot || user.botKey !== profile.botKey || user.username !== profile.nickname || user.botSkillTier !== profile.skillTier || user.botPlayStyle !== profile.playStyle) {
+export function assertBotProfileMatches(user: BotUserRow, profile: BotProfile): void {
+  // botKey is the durable identity. Nicknames are presentation data and may
+  // legitimately have been edited in the database; never disable the whole
+  // orchestrator because a bot's displayed name differs from its seed profile.
+  if (!user.isBot || user.botKey !== profile.botKey || user.botSkillTier !== profile.skillTier || user.botPlayStyle !== profile.playStyle) {
     throw new Error(`Stored bot identity for ${profile.botKey} does not match the bootstrap profile.`)
   }
 }
@@ -155,7 +158,7 @@ async function ensureBotUser(tx: Prisma.TransactionClient, profile: BotProfile):
     select: { id: true, username: true, isBot: true, botKey: true, botEnabled: true, botSkillTier: true, botPlayStyle: true, balance: true, tableRating: true, tableHandsPlayed: true, tableHandsWon: true, predictionRating: true, leaderboardVisible: true }
   })
   if (existing) {
-    assertProfileMatches(existing, profile)
+    assertBotProfileMatches(existing, profile)
     if (!await tx.userWallet.findUnique({ where: { userId: existing.id }, select: { id: true } })) {
       const wallet = await tx.userWallet.create({ data: { userId: existing.id, balance: BigInt(Math.max(0, existing.balance)) } })
       if (wallet.balance > 0n) await tx.walletLedgerEntry.create({ data: {

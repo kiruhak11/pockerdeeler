@@ -45,6 +45,12 @@ export function minesBackedPayoutLimit(theoreticalMaxPayout: bigint, bankAvailab
   if (stake < 1n || bankAvailable < stake || theoreticalMaxPayout < stake) return null
   return theoreticalMaxPayout < bankAvailable ? theoreticalMaxPayout : bankAvailable
 }
+
+/** A player who is also the bank has one canonical wallet: reserve is a
+ * solvency check, not a second debit from that same wallet. */
+export function minesBankReserveDebit(reserve: bigint, playerIsBank: boolean): bigint {
+  return playerIsBank ? 0n : reserve
+}
 export function legacyMinesTerms(stake: bigint, mines: number, opened: number, limit: bigint) {
   // Older releases exposed several presets (including 15 and 20 mines).
   // Keep the legacy combinatorics readable for every value that could have
