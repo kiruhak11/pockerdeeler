@@ -14,6 +14,9 @@ const props = defineProps<{
   canStart?: boolean
   ready?: boolean
   sittingOut?: boolean
+  walletBalance?: number
+  stackOperationBusy?: boolean
+  stackOperationResultKey?: number
 }>()
 
 const emit = defineEmits<{
@@ -24,10 +27,14 @@ const emit = defineEmits<{
   leave: []
   join: []
   reconnect: []
+  stackOperation: [payload: { direction: 'ADD' | 'WITHDRAW'; amount: number; requestKey: string }]
 }>()
 
 const now = ref(Date.now())
 const amount = ref<number | null>(null)
+const stackAction = ref<'ADD' | 'WITHDRAW' | null>(null)
+const stackAmount = ref<number | null>(null)
+const stackRequestKey = ref<string | null>(null)
 let countdownTimer: ReturnType<typeof setInterval> | undefined
 
 const hand = computed(() => props.state.pokerTable.currentHand)
@@ -57,9 +64,16 @@ const callAmount = computed(() => Math.min(viewerToCall.value, viewer.value?.sta
 const maxTargetAmount = computed(() => (viewer.value?.streetContribution ?? 0) + (viewer.value?.stack ?? 0))
 const isWaiting = computed(() => isPostHandWaitingState(props.state))
 const finalizedWinners = computed(() => finalizedHand.value?.players.filter(player => player.winner) ?? [])
+const ownTablePlayer = computed(() => tableViewer.value)
 
 watch(() => [props.state.pokerTable.stateVersion, hand.value?.currentActor, hand.value?.street], () => {
   amount.value = null
+})
+watch(() => props.stackOperationResultKey, () => {
+  if (props.stackOperationResultKey) {
+    stackAction.value = null
+    stackRequestKey.value = null
+  }
 })
 
 onMounted(() => { countdownTimer = setInterval(() => { now.value = Date.now() }, 1000) })
@@ -74,6 +88,22 @@ function send(type: OnlineAction['type']) {
     return
   }
   emit('action', { type })
+}
+
+function openStackAction(direction: 'ADD' | 'WITHDRAW') {
+  if (!isWaiting.value || props.stackOperationBusy) return
+  stackAction.value = direction
+  stackAmount.value = null
+  stackRequestKey.value = crypto.randomUUID()
+}
+
+function submitStackAction() {
+  const value = Number(stackAmount.value)
+  if (!stackAction.value || !Number.isSafeInteger(value) || value <= 0 || !isWaiting.value || props.stackOperationBusy) return
+  if (stackAction.value === 'ADD' && value > (props.walletBalance ?? 0)) return
+  if (stackAction.value === 'WITHDRAW' && value >= (ownTablePlayer.value?.stack ?? 0)) return
+  if (!stackRequestKey.value) stackRequestKey.value = crypto.randomUUID()
+  emit('stackOperation', { direction: stackAction.value, amount: value, requestKey: stackRequestKey.value })
 }
 
 function handPlayer(playerId: string): OnlineHandPlayer | null {
@@ -185,6 +215,10 @@ function finalizedDisplayName(player: OnlineFinalizedShowdownPlayer): string {
             <div class="player-info">
               <strong :title="displayName(player)">{{ displayName(player) }}</strong>
               <span>Стек: {{ visibleHand ? handPlayer(player.playerId)?.stack ?? player.stack : player.stack }}</span>
+              <div v-if="player.playerId === viewerId" class="stack-actions" aria-label="Управление стеком">
+                <button class="btn btn--ghost" type="button" :disabled="!isWaiting || stackOperationBusy" @click="openStackAction('ADD')">+ Добавить</button>
+                <button class="btn btn--ghost" type="button" :disabled="!isWaiting || stackOperationBusy || player.stack <= 1" @click="openStackAction('WITHDRAW')">Вывести</button>
+              </div>
               <small v-if="visibleHand" class="player-bet">Ставка: {{ handPlayer(player.playerId)?.streetContribution ?? 0 }}</small>
               <small v-if="statusPlayer(player.playerId)?.lastAction" class="player-action">{{ actionLabel(statusPlayer(player.playerId)?.lastAction ?? null) }}</small>
               <small v-if="finalizedPlayer(player.playerId)?.label" class="player-combination">{{ finalizedPlayer(player.playerId)?.label }}</small>
@@ -270,6 +304,23 @@ function finalizedDisplayName(player: OnlineFinalizedShowdownPlayer): string {
     </section>
 
     <button v-if="connectionStatus === 'reconnecting' || connectionStatus === 'error' || connectionStatus === 'unavailable'" class="btn btn--ghost reconnect-button" type="button" @click="emit('reconnect')">Переподключиться</button>
+
+    <div v-if="stackAction" class="stack-modal-backdrop" @click.self="stackOperationBusy ? undefined : stackAction = null">
+      <section class="stack-modal panel" role="dialog" aria-modal="true" :aria-label="stackAction === 'ADD' ? 'Добавить в стек' : 'Вывести из стека'">
+        <span class="section-kicker">УПРАВЛЕНИЕ СТЕКОМ</span>
+        <h2>{{ stackAction === 'ADD' ? 'Добавить в стек' : 'Вывести из стека' }}</h2>
+        <p>Текущий стек: <strong>{{ (ownTablePlayer?.stack ?? 0).toLocaleString('ru-RU') }}</strong></p>
+        <p>Доступно на балансе: <strong>{{ (walletBalance ?? 0).toLocaleString('ru-RU') }}</strong></p>
+        <label class="stack-modal__amount">Сумма
+          <input v-model.number="stackAmount" class="input" type="number" min="1" :max="stackAction === 'ADD' ? walletBalance : Math.max(0, (ownTablePlayer?.stack ?? 0) - 1)" inputmode="numeric" placeholder="Введите сумму">
+        </label>
+        <p v-if="stackAction === 'WITHDRAW' && stackAmount === ownTablePlayer?.stack" class="stack-modal__hint">Чтобы вывести весь стек, выйдите из комнаты.</p>
+        <div class="stack-modal__buttons">
+          <button class="btn btn--ghost" type="button" :disabled="stackOperationBusy" @click="stackAction = null">Отмена</button>
+          <button class="btn" type="button" :disabled="stackOperationBusy || !Number.isSafeInteger(Number(stackAmount)) || Number(stackAmount) <= 0 || (stackAction === 'ADD' && Number(stackAmount) > (walletBalance ?? 0)) || (stackAction === 'WITHDRAW' && Number(stackAmount) >= (ownTablePlayer?.stack ?? 0))" @click="submitStackAction">{{ stackOperationBusy ? 'Обработка…' : 'Подтвердить' }}</button>
+        </div>
+      </section>
+    </div>
   </main>
 </template>
 
@@ -285,6 +336,14 @@ function finalizedDisplayName(player: OnlineFinalizedShowdownPlayer): string {
 .connection--error, .connection--unauthorized, .connection--not-found, .connection--unavailable { color: var(--danger); }
 .icon-button { border: 1px solid rgba(255,255,255,.16); border-radius: .65rem; padding: .38rem .55rem; color: var(--text-muted); background: transparent; cursor: pointer; font-size: .75rem; }
 .notice { margin: 0; padding: .55rem .7rem; border-radius: .7rem; color: var(--accent-strong); background: rgba(242,180,81,.12); font-size: .85rem; }
+.stack-actions { display: flex; flex-wrap: wrap; gap: .25rem; margin-top: .35rem; }
+.stack-actions .btn { min-height: 30px; padding: .25rem .45rem; font-size: .68rem; }
+.stack-modal-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 1rem; background: rgba(0,0,0,.68); }
+.stack-modal { width: min(100%, 390px); display: grid; gap: .65rem; padding: 1rem; }
+.stack-modal h2, .stack-modal p { margin: 0; }
+.stack-modal__amount { display: grid; gap: .35rem; color: var(--text-muted); }
+.stack-modal__hint { color: var(--danger); font-size: .8rem; }
+.stack-modal__buttons { display: flex; justify-content: flex-end; gap: .5rem; }
 .table-wrap { min-height: 360px; }
 .felt { position: relative; isolation: isolate; min-height: 390px; overflow: hidden; border: 9px solid #70461e; border-radius: 48%; background: radial-gradient(ellipse at center, #1a744b 0%, #0c442d 60%, #092b20 100%); box-shadow: inset 0 0 0 3px rgba(255,255,255,.08), 0 18px 35px rgba(0,0,0,.28); }
 .table-meta { position: absolute; z-index: 1; top: 40%; left: 50%; transform: translate(-50%, -50%); display: flex; gap: .55rem; align-items: center; max-width: calc(100% - 1.5rem); padding: .24rem .55rem; border: 1px solid rgba(255,255,255,.12); border-radius: 999px; background: rgba(7,35,24,.72); color: rgba(255,255,255,.8); font-size: .72rem; line-height: 1.2; white-space: nowrap; text-transform: uppercase; letter-spacing: .08em; }

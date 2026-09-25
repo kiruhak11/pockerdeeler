@@ -19,6 +19,9 @@ const privateRoom = ref(false)
 const joinSecret = ref('')
 const joinBusy = ref(false)
 const spectatorCount = ref(0)
+const walletBalance = ref(0)
+const stackOperationBusy = ref(false)
+const stackOperationResultKey = ref(0)
 let spectatorPoll: ReturnType<typeof setInterval> | undefined
 
 function applyAuthoritativeState(next: OnlineRoomState, token?: string): boolean {
@@ -53,6 +56,11 @@ function statusCode(error: unknown): number | undefined {
 function friendlyError(error: unknown): string {
   const status = statusCode(error)
   const message = String((error as { statusMessage?: string; data?: { statusMessage?: string; message?: string } }).statusMessage ?? (error as { data?: { statusMessage?: string; message?: string } }).data?.statusMessage ?? (error as { data?: { message?: string } }).data?.message ?? '')
+  if (/во время раздачи/i.test(message)) return 'Нельзя изменить стек во время раздачи.'
+  if (/недостаточно фишек на балансе/i.test(message)) return 'Недостаточно фишек на балансе.'
+  if (/превышает доступный стек/i.test(message)) return 'Сумма больше текущего стека.'
+  if (/весь стек/i.test(message)) return 'Чтобы вывести весь стек, выйдите из комнаты.'
+  if (/операци.*выполняется|завершается изменение стека/i.test(message)) return 'Операция уже выполняется. Обновляем стол…'
   if (status === 409 && /недостаточно|insufficient/i.test(message)) return 'Недостаточно фишек для входа за стол.'
   if (status === 409) return 'Место уже занято или стол изменился. Вы остались зрителем — обновите стол и попробуйте снова.'
   if (status === 401 || status === 403) return 'Войдите в аккаунт, чтобы открыть этот стол.'
@@ -163,9 +171,38 @@ async function leave() {
   }
 }
 
+async function changeStack(payload: { direction: 'ADD' | 'WITHDRAW'; amount: number; requestKey: string }) {
+  if (stackOperationBusy.value) return
+  stackOperationBusy.value = true
+  try {
+    const result = await $fetch<OnlineApiResult & { walletBalance: number }>(`/api/online/rooms/${encodeURIComponent(code.value)}/stack`, {
+      method: 'POST', body: payload, retry: 0
+    })
+    applyAuthoritativeState(result.room, result.concurrencyToken)
+    walletBalance.value = result.walletBalance
+    stackOperationResultKey.value += 1
+    notice.value = ''
+    socket.requestState()
+  } catch (error) {
+    notice.value = friendlyError(error)
+    await loadState()
+    try {
+      const session = await $fetch<any>('/api/auth/session')
+      walletBalance.value = Number(session.user?.balance) || 0
+    } catch { /* Keep the last known balance if the session refresh is unavailable. */ }
+  } finally {
+    stackOperationBusy.value = false
+  }
+}
+
 onMounted(async () => {
   await account.loadSession()
-  try { await $fetch('/api/auth/session').then((response: any) => account.setUser(response.user)) } catch { /* room endpoint reports auth state */ }
+  try {
+    await $fetch('/api/auth/session').then((response: any) => {
+      account.setUser(response.user)
+      walletBalance.value = Number(response.user?.balance) || 0
+    })
+  } catch { /* room endpoint reports auth state */ }
   await loadState()
   await loadSpectatorCount()
   spectatorPoll = setInterval(() => { void loadSpectatorCount() }, 5_000)
@@ -213,6 +250,9 @@ useHead(() => ({ title: state.value ? `ONLINE ${state.value.roomCode} · Poker` 
     :can-start="canStart"
     :ready="ready"
     :sitting-out="sittingOut"
+    :wallet-balance="walletBalance"
+    :stack-operation-busy="stackOperationBusy"
+    :stack-operation-result-key="stackOperationResultKey"
     @action="socket.sendAction"
     @start="socket.startHand"
     @ready="value => mutate('ready', { ready: value })"
@@ -220,6 +260,7 @@ useHead(() => ({ title: state.value ? `ONLINE ${state.value.roomCode} · Poker` 
     @leave="leave"
     @join="joinRoom"
     @reconnect="socket.reconnect"
+    @stack-operation="changeStack"
   />
 </template>
 

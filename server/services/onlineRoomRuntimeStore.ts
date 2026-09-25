@@ -790,7 +790,8 @@ export class OnlineRoomRuntimeStore {
     actionId: string,
     fingerprint: string,
     updater: (state: OnlineRoomState) => OnlineRoomState,
-    fence?: OnlineRoomMutationFence
+    fence?: OnlineRoomMutationFence,
+    actionTtlSeconds: number | null = this.actionTtlSeconds
   ): Promise<OnlineRoomActionMutationResult> {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) fail('INVALID_ARGUMENT', 'Expected runtime revision must be a positive integer.')
     if (typeof updater !== 'function') fail('INVALID_ARGUMENT', 'A controlled runtime updater is required.')
@@ -827,13 +828,12 @@ export class OnlineRoomRuntimeStore {
           if (!nextState || nextState.roomId !== roomId) fail('INVALID_STATE', 'Runtime updater returned an invalid room state.')
           const next = Object.freeze({ state: nextState, runtimeRevision: current.runtimeRevision + 1 })
           const expiry = expiryArgs(nextState, this.ttlSeconds)
-          const command = expiry.length === 0
-            ? transactionRedis.multi()
-                .set(key, encodeEnvelope(nextState, next.runtimeRevision))
-                .set(actionKey, encodeActionRecord({ fingerprint, runtimeRevision: next.runtimeRevision }), 'EX', this.actionTtlSeconds)
-            : transactionRedis.multi()
-                .set(key, encodeEnvelope(nextState, next.runtimeRevision), expiry[0], expiry[1])
-                .set(actionKey, encodeActionRecord({ fingerprint, runtimeRevision: next.runtimeRevision }), 'EX', this.actionTtlSeconds)
+          const actionRecord = encodeActionRecord({ fingerprint, runtimeRevision: next.runtimeRevision })
+          const command = transactionRedis.multi()
+          if (expiry.length === 0) command.set(key, encodeEnvelope(nextState, next.runtimeRevision))
+          else command.set(key, encodeEnvelope(nextState, next.runtimeRevision), expiry[0], expiry[1])
+          if (actionTtlSeconds === null) command.set(actionKey, actionRecord)
+          else command.set(actionKey, actionRecord, 'EX', actionTtlSeconds)
           const result = await command.exec()
           if (result === null) {
             if (attempt === 0) continue
@@ -852,6 +852,15 @@ export class OnlineRoomRuntimeStore {
       }
     }
     fail('STALE_STATE', 'Runtime state changed while the action was being written.')
+  }
+
+  /** Removes a persistent action marker once its PostgreSQL journal is complete. */
+  async forgetAction(roomId: string, playerId: string, actionId: string): Promise<void> {
+    try {
+      await this.redis.del(this.actionKey(roomId, playerId, actionId))
+    } catch (error) {
+      throw new OnlineRoomRuntimeStoreError('REDIS_UNAVAILABLE', error instanceof Error ? error.message : 'Redis action cleanup failed.')
+    }
   }
 
   async remove(roomId: string, expectedRevision: number): Promise<void> {

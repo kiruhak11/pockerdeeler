@@ -70,7 +70,8 @@ model OnlineRoom {
   createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt             DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  players              OnlineRoomPlayer[]
+  players         OnlineRoomPlayer[]
+  stackOperations OnlineStackOperation[]
 
   @@index([visibility, status])
   @@index([ownerId])
@@ -90,13 +91,39 @@ model OnlineRoomPlayer {
   updatedAt      DateTime  @updatedAt @map("updated_at")
   cashedOutAt    DateTime? @map("cashed_out_at") @db.Timestamptz(6)
 
-  room OnlineRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  user User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room            OnlineRoom             @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user            User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stackOperations OnlineStackOperation[]
 
   @@unique([roomId, userId])
   @@index([userId, status])
   @@index([roomId, status])
   @@map("online_room_players")
+}
+
+model OnlineStackOperation {
+  id            String    @id @default(uuid()) @db.Uuid
+  roomId        String    @map("room_id") @db.Uuid
+  userId        String    @map("user_id") @db.Uuid
+  reservationId String    @map("reservation_id") @db.Uuid
+  requestKey    String    @map("request_key") @db.Uuid
+  direction     String    @db.VarChar(8)
+  amount        BigInt
+  stackBefore   BigInt    @map("stack_before")
+  stackAfter    BigInt    @map("stack_after")
+  status        String    @default("PREPARED") @db.VarChar(24)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  completedAt   DateTime? @map("completed_at") @db.Timestamptz(6)
+
+  room        OnlineRoom       @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reservation OnlineRoomPlayer @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId, requestKey])
+  @@index([status, createdAt])
+  @@index([roomId, status])
+  @@map("online_stack_operations")
 }
 
 model User {
@@ -147,6 +174,7 @@ model User {
   roomChatMessages             RoomChatMessage[]
   wallet                       UserWallet?
   onlineRoomPlayers            OnlineRoomPlayer[]
+  onlineStackOperations        OnlineStackOperation[]
   roomMemberAccounts           RoomMemberAccount[]
   predictionRatingEvents       PredictionRatingEvent[]
   tableRatingEvents            TableRatingEvent[]

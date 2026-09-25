@@ -8,6 +8,7 @@ import {
   setOnlineRoomReady,
   setOnlineRoomSittingOut,
   setOnlineRoomConnected,
+  setOnlineRoomPlayerStack,
   setOnlineRoomTurnDeadline,
   startOnlineRoomHand,
   toPlayerSafeOnlineRoomState,
@@ -42,14 +43,22 @@ import { resolveRoomSecretPepper } from '../utils/roomSecretPepper'
 import {
   commitOnlineBuyInSeat,
   clearOnlineCashOut,
+  applyOnlineStackOperation,
+  completeOnlineStackOperation,
   completeOnlineCashOut,
+  lockOnlineRoomHandStart,
+  onlineStackWalletBalance,
+  pendingOnlineStackOperations,
+  prepareOnlineStackOperation,
   pendingOnlineCashOuts,
   pendingOnlineBuyIns,
   reconcileOnlineBuyIn,
   prepareOnlineCashOut,
   reserveOnlineBuyIn,
   reserveInitialOnlineRoomBuyIn,
-  type OnlineBuyInReservation
+  type OnlineBuyInReservation,
+  type OnlineStackOperation,
+  type OnlineStackOperationDirection
 } from './onlineRoomAccountingService'
 import { assertOnlinePokerBotMayJoin, OnlinePokerBotJoinError } from './botIdentityService'
 import { recordFinalizedOnlinePokerHand } from './onlinePokerRatingService'
@@ -399,7 +408,15 @@ function mapRuntimeError(error: unknown): OnlineRoomApiError {
     return new OnlineRoomApiError('UNAVAILABLE', 'Online room service is temporarily unavailable.', 503)
   }
   const code = (error as { code?: string } | null)?.code
+  if (code === 'INVALID_USER') return new OnlineRoomApiError('UNAUTHORIZED', 'Войдите в аккаунт, чтобы изменить стек.', 401)
   if (code === 'PRIVATE_ROOM_AUTH_REQUIRED') return new OnlineRoomApiError('FORBIDDEN', 'A valid private room credential is required.', 403)
+  if (code === 'HAND_IN_PROGRESS') return new OnlineRoomApiError('CONFLICT', 'Нельзя изменить стек во время раздачи.', 409)
+  if (code === 'FULL_STACK_WITHDRAWAL') return new OnlineRoomApiError('CONFLICT', 'Чтобы вывести весь стек, используйте «Выйти из комнаты».', 409)
+  if (code === 'STACK_OPERATION_PENDING') return new OnlineRoomApiError('CONFLICT', 'Изменение стека уже выполняется. Обновите стол и повторите.', 409)
+  if (code === 'STACK_OPERATION_CONFLICT') return new OnlineRoomApiError('CONFLICT', 'Ключ операции уже использован с другими данными.', 409)
+  if (code === 'STACK_OPERATION_NOT_APPLIED') return new OnlineRoomApiError('CONFLICT', 'Операция ещё не подтверждена. Обновите стол и повторите.', 409)
+  if (code === 'STACK_AMOUNT_UNAVAILABLE') return new OnlineRoomApiError('CONFLICT', 'Сумма превышает доступный стек.', 409)
+  if (code === 'STACK_SEAT_UNAVAILABLE') return new OnlineRoomApiError('NOT_FOUND', 'Место или комната больше недоступны.', 404)
   if (code === 'ROOM_CLOSED') return new OnlineRoomApiError('CLOSED', 'This online room is closed.', 410)
   if (code === 'PLAYER_NOT_IN_ROOM') return new OnlineRoomApiError('NOT_FOUND', 'The authenticated user is not seated in this room.', 404)
   if (code === 'STALE_ROOM_VERSION' || code === 'INVALID_ROOM_VERSION' || code === 'PLAYER_ALREADY_IN_ROOM' || code === 'TABLE_FULL' || code === 'SEAT_OCCUPIED' || code === 'HAND_IN_PROGRESS' || code === 'ALREADY_SEATED' || code === 'BUY_IN_UNAVAILABLE') {
@@ -407,7 +424,7 @@ function mapRuntimeError(error: unknown): OnlineRoomApiError {
   }
   if (error instanceof Error) {
     const errorText = `${error.message} ${(error as { statusMessage?: string }).statusMessage ?? ''}`
-    if (/недостаточно|insufficient/i.test(errorText)) return new OnlineRoomApiError('CONFLICT', 'Недостаточно фишек для входа за стол.', 409)
+    if (/недостаточно|insufficient/i.test(errorText)) return new OnlineRoomApiError('CONFLICT', 'Недостаточно фишек на балансе.', 409)
     if (/not this player['’]s turn/i.test(error.message)) return new OnlineRoomApiError('NOT_YOUR_TURN', error.message, 409)
     if (/round is complete|cannot act|cannot check|cannot call|no longer in the hand|unknown betting action|amount must be|bet is only|raise is only|raise is not reopened|must be at least|must increase|amount exceeds/i.test(error.message)) {
       return new OnlineRoomApiError('INVALID_ACTION', error.message, 400)
@@ -751,6 +768,7 @@ export async function getAuthenticatedOnlineRoom(userId: string, code: string, d
   requireUserId(userId)
   let metadata = await loadPersistentRoom(code)
   try {
+    await recoverPendingOnlineStackOperations(metadata.id, dependencies)
     await recoverPendingOnlineBuyIns(metadata.id, dependencies)
     await recoverPendingOnlineCashOuts(metadata.id, dependencies)
     // Recovery can publish a creator room that was still in its CLOSED
@@ -851,6 +869,123 @@ async function finishRoomRuntimeMutation(
     duplicate,
     runtimeRevision: record.runtimeRevision
   })
+}
+
+async function applyAndCompleteOnlineStackOperation(
+  metadata: PersistentRoom,
+  operation: OnlineStackOperation,
+  dependencies?: OnlineRoomApiDependencies
+): Promise<ApiOnlineRoomResult> {
+  const runtime = runtimeStore(dependencies)
+  try {
+    await applyOnlineStackOperation({ operationId: operation.id, applyRuntime: async (pendingOperation) => {
+      const current = await runtime.get(metadata.id)
+      if (!current) fail('UNAVAILABLE', 'Online room runtime is unavailable.', 503)
+      const result = await runtime.updateWithAction(
+        metadata.id,
+        current.runtimeRevision,
+        pendingOperation.userId,
+        `stack-op:${pendingOperation.id}`,
+        `${pendingOperation.direction}:${pendingOperation.amount}:${pendingOperation.stackBefore}:${pendingOperation.stackAfter}`,
+        state => {
+          if (state.pokerTable.currentHand && (state.pokerTable.currentHand.street !== 'FINISHED' || state.pokerTable.finalizedHandId !== state.pokerTable.currentHand.handId)) {
+            fail('CONFLICT', 'Нельзя изменить стек во время раздачи.', 409)
+          }
+          const player = state.pokerTable.players.find(item => item.playerId === pendingOperation.userId)
+          if (!player) fail('NOT_FOUND', 'Вы больше не занимаете место за этим столом.', 404)
+          if (player.stack !== Number(pendingOperation.stackBefore)) {
+            fail('CONFLICT', 'Стек изменился. Обновите стол и повторите операцию.', 409)
+          }
+          return setOnlineRoomPlayerStack(state, pendingOperation.userId, Number(pendingOperation.stackAfter))
+        },
+        dependencies?.botFence,
+        null
+      )
+      return result
+    } })
+    await completeOnlineStackOperation(operation.id)
+    await runtime.forgetAction(metadata.id, operation.userId, `stack-op:${operation.id}`).catch(() => undefined)
+  } catch (error) {
+    throw mapRuntimeError(error)
+  }
+  const record = await runtime.get(metadata.id)
+  if (!record) fail('UNAVAILABLE', 'Online room runtime is unavailable.', 503)
+  return (await finishRoomRuntimeMutation(operation.userId, metadata, record, false, dependencies)).result
+}
+
+async function recoverPendingOnlineStackOperations(roomId: string, dependencies?: OnlineRoomApiDependencies): Promise<void> {
+  const pending = await pendingOnlineStackOperations(roomId)
+  if (pending.length === 0) return
+  const metadata = await prisma.onlineRoom.findUnique({ where: { id: roomId } })
+  if (!metadata) return
+  const persistent: PersistentRoom = Object.freeze({
+    id: metadata.id,
+    roomCode: metadata.roomCode,
+    visibility: metadata.visibility as PersistentRoom['visibility'],
+    ownerId: metadata.ownerId,
+    status: metadata.status as PersistentRoom['status'],
+    maxPlayers: metadata.maxPlayers as 6,
+    privateJoinSecretHash: metadata.privateJoinSecretHash,
+    startingStack: Number(metadata.startingStack),
+    createdAt: metadata.createdAt
+  })
+  for (const operation of pending) await applyAndCompleteOnlineStackOperation(persistent, operation, dependencies)
+}
+
+/** One-shot server-start recovery complements request-driven room rehydration. */
+export async function recoverIncompleteOnlineStackOperations(dependencies?: OnlineRoomApiDependencies): Promise<number> {
+  const rows = await prisma.onlineStackOperation.findMany({
+    where: { status: { not: 'COMPLETED' } },
+    select: { roomId: true }
+  })
+  let recovered = 0
+  for (const roomId of new Set(rows.map(row => row.roomId))) {
+    try {
+      const before = await pendingOnlineStackOperations(roomId)
+      await recoverPendingOnlineStackOperations(roomId, dependencies)
+      const after = await pendingOnlineStackOperations(roomId)
+      recovered += Math.max(0, before.length - after.length)
+    } catch {
+      // Redis/database outages leave the durable operation for the next room read or process start.
+    }
+  }
+  return recovered
+}
+
+export async function changeAuthenticatedOnlineStack(
+  userId: string,
+  code: string,
+  input: Readonly<{ direction: OnlineStackOperationDirection; amount: number; requestKey: string }>,
+  dependencies?: OnlineRoomApiDependencies
+): Promise<Readonly<ApiOnlineRoomResult & { walletBalance: number }>> {
+  requireUserId(userId)
+  if (input.direction !== 'ADD' && input.direction !== 'WITHDRAW') fail('BAD_REQUEST', 'Некорректная операция со стеком.', 400)
+  requireInteger(input.amount, 'Amount', 1, Number.MAX_SAFE_INTEGER)
+  if (typeof input.requestKey !== 'string' || !UUID_PATTERN.test(input.requestKey)) fail('BAD_REQUEST', 'Некорректный ключ операции.', 400)
+  const metadata = await loadPersistentRoom(code)
+  ensureOpen(metadata)
+  try {
+    const operation = await prepareOnlineStackOperation({
+      roomId: metadata.id,
+      userId,
+      requestKey: input.requestKey,
+      direction: input.direction,
+      amount: input.amount,
+      readRuntime: async () => {
+        const record = await runtimeStore(dependencies).get(metadata.id)
+        if (!record || record.state.roomCode !== metadata.roomCode) return { stack: null, activeHand: false }
+        const hand = record.state.pokerTable.currentHand
+        return {
+          stack: record.state.pokerTable.players.find(player => player.playerId === userId)?.stack ?? null,
+          activeHand: Boolean(hand && (hand.street !== 'FINISHED' || record.state.pokerTable.finalizedHandId !== hand.handId))
+        }
+      }
+    })
+    const result = await applyAndCompleteOnlineStackOperation(metadata, operation, dependencies)
+    return Object.freeze({ ...result, walletBalance: await onlineStackWalletBalance(userId) })
+  } catch (error) {
+    throw mapRuntimeError(error)
+  }
 }
 
 async function updateRoomInternal(
@@ -958,6 +1093,7 @@ export async function leaveAuthenticatedOnlineRoom(userId: string, code: string,
   requireUserId(userId)
   const metadata = await loadPersistentRoom(code)
   ensureOpen(metadata)
+  try { await recoverPendingOnlineStackOperations(metadata.id, dependencies) } catch (error) { throw mapRuntimeError(error) }
   const current = await requireRuntime(metadata, dependencies)
   const player = current.state.pokerTable.players.find(candidate => candidate.playerId === userId)
   if (!player) fail('NOT_FOUND', 'The authenticated user is not seated in this room.', 404)
@@ -968,7 +1104,10 @@ export async function leaveAuthenticatedOnlineRoom(userId: string, code: string,
 
   let prepared: boolean
   try {
-    prepared = await prepareOnlineCashOut({ roomId: metadata.id, userId, amount: player.stack })
+    prepared = await prepareOnlineCashOut({ roomId: metadata.id, userId, amount: player.stack, readAuthoritativeAmount: async () => {
+      const latest = await runtimeStore(dependencies).get(metadata.id)
+      return latest?.state.pokerTable.players.find(candidate => candidate.playerId === userId)?.stack ?? null
+    } })
   } catch (error) {
     throw mapRuntimeError(error)
   }
@@ -1075,19 +1214,28 @@ export async function startAuthenticatedOnlineRoomHand(
       }))
     : []
   try {
-    for (const pending of pendingCashOuts) await prepareOnlineCashOut({ roomId: metadata.id, userId: pending.userId, amount: pending.amount })
+    for (const pending of pendingCashOuts) await prepareOnlineCashOut({ roomId: metadata.id, userId: pending.userId, amount: pending.amount, readAuthoritativeAmount: async () => {
+      const latest = await runtimeStore(dependencies).get(metadata.id)
+      return latest?.state.pokerTable.players.find(candidate => candidate.playerId === pending.userId)?.stack ?? null
+    } })
   } catch (error) {
     throw mapRuntimeError(error)
   }
   let runtimeStarted = false
-  const updated = await updateRoomInternal(userId, code, { concurrencyToken: current.concurrencyToken }, state => {
-    if (state.ownerId !== userId) fail('FORBIDDEN', 'Only the room owner can start a hand.', 403)
-    const settled = advanceCompletedStreet(state, expectedTableStateVersion)
-    if (!canStartNextHand(settled.pokerTable)) fail('INVALID_ACTION', 'At least two eligible players are required to start a hand.', 409)
-    const started = startOnlineRoomHand(settled, { expectedStateVersion: settled.pokerTable.stateVersion })
-    runtimeStarted = true
-    return withNextTurnDeadline(advanceCompletedStreet(started))
-  }, dependencies).catch(async error => {
+  let startedRecord: OnlineRoomRuntimeRecord
+  try {
+    startedRecord = await lockOnlineRoomHandStart(metadata.id, async () => {
+      const revision = expectedRevision(metadata.id, current.concurrencyToken)
+      return runtimeStore(dependencies).update(metadata.id, revision, state => {
+        if (state.ownerId !== userId) fail('FORBIDDEN', 'Only the room owner can start a hand.', 403)
+        const settled = advanceCompletedStreet(state, expectedTableStateVersion)
+        if (!canStartNextHand(settled.pokerTable)) fail('INVALID_ACTION', 'At least two eligible players are required to start a hand.', 409)
+        const started = startOnlineRoomHand(settled, { expectedStateVersion: settled.pokerTable.stateVersion })
+        runtimeStarted = true
+        return withNextTurnDeadline(advanceCompletedStreet(started))
+      }, dependencies?.botFence)
+    })
+  } catch (error) {
     if (!runtimeStarted) {
       try {
         const latest = await runtimeStore(dependencies).get(metadata.id)
@@ -1101,8 +1249,9 @@ export async function startAuthenticatedOnlineRoomHand(
         // reconcile it after the authoritative runtime is reachable.
       }
     }
-    throw error
-  })
+    throw mapRuntimeError(error)
+  }
+  const updated = await finishRoomRuntimeMutation(userId, metadata, startedRecord, false, dependencies)
   for (const pending of pendingCashOuts) await completeOnlineCashOut({ roomId: metadata.id, userId: pending.userId })
   await reconcileTurnTimer(updated.result, dependencies, updated.runtimeRevision)
   return updated.result

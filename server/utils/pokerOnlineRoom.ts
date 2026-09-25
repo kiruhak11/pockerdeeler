@@ -395,6 +395,26 @@ export function setOnlineRoomSittingOut(room: OnlineRoomState, playerId: string,
   return withRoomVersion(room, { pokerTable, status: roomStatusForTable(pokerTable) })
 }
 
+/** Changes one seated player's between-hands stack without touching hand state. */
+export function setOnlineRoomPlayerStack(room: OnlineRoomState, playerId: string, stack: number): OnlineRoomState {
+  assertRoom(room)
+  if (!Number.isSafeInteger(stack) || stack <= 0) fail('INVALID_ROOM', 'A seated player must have a positive safe-integer stack.')
+  if (room.pokerTable.currentHand && (room.pokerTable.currentHand.street !== 'FINISHED' || room.pokerTable.finalizedHandId !== room.pokerTable.currentHand.handId)) {
+    fail('HAND_IN_PROGRESS', 'Нельзя изменить стек во время раздачи.')
+  }
+  const index = room.pokerTable.players.findIndex(player => player.playerId === playerId)
+  if (index < 0) fail('PLAYER_NOT_IN_ROOM', 'The player is not seated in this online room.')
+  const players = room.pokerTable.players.map((player, playerIndex) => playerIndex === index
+    ? Object.freeze({ ...player, stack })
+    : player)
+  const pokerTable = Object.freeze({
+    ...room.pokerTable,
+    players: Object.freeze(players),
+    stateVersion: room.pokerTable.stateVersion + 1
+  })
+  return withRoomVersion(room, { pokerTable, status: roomStatusForTable(pokerTable) })
+}
+
 export function setOnlineRoomConnected(room: OnlineRoomState, playerId: string, connected: boolean, options: RoomVersionOptions = {}): OnlineRoomState {
   assertRoom(room)
   assertExpectedRoomVersion(room, options.expectedRoomVersion)
