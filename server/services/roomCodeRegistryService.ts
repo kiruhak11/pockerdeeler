@@ -36,7 +36,7 @@ export type PersistentOnlineRoomMetadata = Readonly<{
   roomCode: string
   visibility: 'PUBLIC' | 'PRIVATE'
   ownerId: string
-  status: 'WAITING' | 'CLOSED'
+  status: 'WAITING' | 'DRAINING' | 'CLOSED'
   maxPlayers: 6
   createdAt: string
   updatedAt: string
@@ -82,7 +82,7 @@ function mapOnlineRoom(row: {
   startingStack: bigint
 }): PersistentOnlineRoomMetadata {
   if (row.visibility !== 'PUBLIC' && row.visibility !== 'PRIVATE') throw new Error('Stored online room has invalid visibility.')
-  if (row.status !== 'WAITING' && row.status !== 'CLOSED') throw new Error('Stored online room has invalid status.')
+  if (row.status !== 'WAITING' && row.status !== 'DRAINING' && row.status !== 'CLOSED') throw new Error('Stored online room has invalid status.')
   if (row.maxPlayers !== 6) throw new Error('Stored online room has invalid player limit.')
   const startingStack = Number(row.startingStack)
   if (!Number.isSafeInteger(startingStack) || startingStack < 1) throw new Error('Stored online room has invalid starting stack.')

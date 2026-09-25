@@ -32,6 +32,7 @@ function harness(overrides: {
   rooms?: readonly any[]
   findRoom?: (id: string) => string | null
   getRoom?: (id: string, code: string) => any
+  markDraining?: (roomId: string) => Promise<boolean>
   decision?: (id: string, code: string) => any
   random?: () => number
 } = {}) {
@@ -44,8 +45,12 @@ function harness(overrides: {
     listPublicRooms: async () => rooms as any,
     countBotCreatedRooms: async () => 0,
     cleanupBotCreatedRooms: async () => 0,
+    markRoomDraining: async roomId => overrides.markDraining?.(roomId) ?? true,
     findSeatedRoom: async id => overrides.findRoom?.(id) ?? null,
-    getRoom: async (id, code) => ({ room: overrides.getRoom?.(id, code) ?? room() } as any),
+    getRoom: async (id, code) => {
+      const result = overrides.getRoom?.(id, code) ?? room()
+      return (result && typeof result === 'object' && 'room' in result ? result : { room: result }) as any
+    },
     getDecisionSnapshot: async (id, code) => overrides.decision?.(id, code) as any,
     createRoom: async (...args) => { calls.push({ method: 'create', args }); return { room: room({ ownerId: args[0] }) } as any },
     joinRoom: async (...args) => { calls.push({ method: 'join', args }); return { room: room() } as any },
@@ -146,6 +151,27 @@ test('bot-only idle timeout waits for the active hand to finish', async () => {
   snapshot = seatedRoom(botId, { pokerTable: { ...room().pokerTable, players: [{ playerId: botId, seat: 1, stack: 1_000, connected: true, ready: true, sittingOut: false }], seats: [{ seat: 1, playerId: botId }] } })
   await h.orchestrator.tick()
   assert.equal(h.calls.filter(call => call.method === 'leave').length, 1)
+})
+
+test('draining marker blocks a bot selected from a stale candidate list and prevents rejoin', async () => {
+  const botId = 'online-bot-01-id'
+  let draining = false
+  let seated = true
+  const candidates = [{ code: 'AB2345', playerCount: 1, maxPlayers: 6, status: 'WAITING', createdAt: new Date(0).toISOString(), startingStack: 1_000, smallBlind: 5, bigBlind: 10 }]
+  const h = harness({
+    findRoom: () => seated ? 'AB2345' : null,
+    rooms: candidates,
+    getRoom: () => ({ room: seated ? seatedRoom(botId) : room(), ...(draining ? { draining: true } : {}) }),
+    markDraining: async () => { draining = true; return true }
+  })
+  await h.orchestrator.tick()
+  h.setNow(1_000_000 + 5 * 60_000 + 1)
+  await h.orchestrator.tick()
+  assert.equal(draining, true)
+  assert.equal(h.calls.filter(call => call.method === 'leave').length, 1)
+  seated = false
+  await h.orchestrator.tick()
+  assert.equal(h.calls.filter(call => call.method === 'join').length, 0)
 })
 
 test('a stale full public room candidate does not block joining the next candidate', async () => {

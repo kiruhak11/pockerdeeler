@@ -47,6 +47,7 @@ import {
   completeOnlineStackOperation,
   completeOnlineCashOut,
   lockOnlineRoomHandStart,
+  lockOnlineRoomForDrain,
   onlineStackWalletBalance,
   pendingOnlineStackOperations,
   prepareOnlineStackOperation,
@@ -74,6 +75,7 @@ export type OnlineRoomApiErrorCode =
   | 'FORBIDDEN'
   | 'NOT_FOUND'
   | 'CLOSED'
+  | 'DRAINING'
   | 'CONFLICT'
   | 'UNAVAILABLE'
   | 'STALE_STATE'
@@ -167,6 +169,7 @@ export type AuthenticatedOnlineRoomActionResult = Readonly<ApiOnlineRoomResult &
 export type ApiOnlineRoomResult = Readonly<{
   room: ReturnType<typeof toPlayerSafeOnlineRoomState>
   concurrencyToken: string
+  draining?: boolean
 }>
 
 type SafeOnlineRoomState = ReturnType<typeof toPlayerSafeOnlineRoomState>
@@ -226,10 +229,11 @@ async function safeOnlineRoomState(state: OnlineRoomState, viewerId: string | un
   return addPublicPlayerNicknames(toPlayerSafeOnlineRoomState(state, viewerId))
 }
 
-async function safeOnlineRoomResult(state: OnlineRoomState, viewerId: string | undefined, runtimeRevision: number): Promise<ApiOnlineRoomResult> {
+async function safeOnlineRoomResult(state: OnlineRoomState, viewerId: string | undefined, runtimeRevision: number, draining = false): Promise<ApiOnlineRoomResult> {
   return Object.freeze({
     room: await safeOnlineRoomState(state, viewerId),
-    concurrencyToken: issueConcurrencyToken(state.roomId, runtimeRevision)
+    concurrencyToken: issueConcurrencyToken(state.roomId, runtimeRevision),
+    ...(draining ? { draining: true } : {})
   })
 }
 
@@ -238,7 +242,7 @@ type PersistentRoom = Readonly<{
   roomCode: string
   visibility: 'PUBLIC' | 'PRIVATE'
   ownerId: string
-  status: 'WAITING' | 'CLOSED'
+  status: 'WAITING' | 'DRAINING' | 'CLOSED'
   maxPlayers: 6
   privateJoinSecretHash: string | null
   startingStack: number
@@ -426,6 +430,7 @@ function mapRuntimeError(error: unknown): OnlineRoomApiError {
   if (code === 'STACK_AMOUNT_UNAVAILABLE') return new OnlineRoomApiError('CONFLICT', 'Сумма превышает доступный стек.', 409)
   if (code === 'STACK_SEAT_UNAVAILABLE') return new OnlineRoomApiError('NOT_FOUND', 'Место или комната больше недоступны.', 404)
   if (code === 'ROOM_CLOSED') return new OnlineRoomApiError('CLOSED', 'This online room is closed.', 410)
+  if (code === 'ROOM_DRAINING') return new OnlineRoomApiError('DRAINING', 'Комната закрывается.', 409)
   if (code === 'PLAYER_NOT_IN_ROOM') return new OnlineRoomApiError('NOT_FOUND', 'The authenticated user is not seated in this room.', 404)
   if (code === 'STALE_ROOM_VERSION' || code === 'INVALID_ROOM_VERSION' || code === 'PLAYER_ALREADY_IN_ROOM' || code === 'TABLE_FULL' || code === 'SEAT_OCCUPIED' || code === 'HAND_IN_PROGRESS' || code === 'ALREADY_SEATED' || code === 'BUY_IN_UNAVAILABLE') {
     return new OnlineRoomApiError('CONFLICT', 'The requested room operation conflicts with its current state.', 409)
@@ -460,7 +465,7 @@ function normalizeMetadata(row: {
   createdAt: Date
 }): PersistentRoom {
   if (row.visibility !== 'PUBLIC' && row.visibility !== 'PRIVATE') fail('UNAVAILABLE', 'Stored online room metadata is invalid.', 503)
-  if (row.status !== 'WAITING' && row.status !== 'CLOSED') fail('UNAVAILABLE', 'Stored online room metadata is invalid.', 503)
+  if (row.status !== 'WAITING' && row.status !== 'DRAINING' && row.status !== 'CLOSED') fail('UNAVAILABLE', 'Stored online room metadata is invalid.', 503)
   if (row.maxPlayers !== 6) fail('UNAVAILABLE', 'Stored online room metadata is invalid.', 503)
   const startingStack = Number(row.startingStack)
   if (!Number.isSafeInteger(startingStack) || startingStack < 1) fail('UNAVAILABLE', 'Stored online room metadata is invalid.', 503)
@@ -554,6 +559,77 @@ function ensureOpen(room: PersistentRoom): void {
   if (room.status === 'CLOSED') fail('CLOSED', 'This online room is closed.', 410)
 }
 
+function ensureJoinable(room: PersistentRoom): void {
+  ensureOpen(room)
+  if (room.status === 'DRAINING') fail('DRAINING', 'Комната закрывается.', 409)
+}
+
+/**
+ * Durable bot-only retirement marker. The room row lock is shared with buy-in
+ * and hand-start paths, so a stale candidate cannot reserve a seat after this
+ * transition commits. Human or in-flight reservations always prevent drain.
+ */
+export async function markBotOnlyOnlineRoomDraining(roomId: string, dependencies?: OnlineRoomApiDependencies): Promise<boolean> {
+  const runtime = runtimeStore(dependencies)
+  let record: OnlineRoomRuntimeRecord | null
+  try { record = await runtime.get(roomId) } catch { return false }
+  if (!record || record.state.visibility !== 'PUBLIC') return false
+  const playerIds = record.state.pokerTable.players.map(player => player.playerId).sort()
+  if (playerIds.length === 0) return false
+  try {
+    if (await presenceStore(dependencies).spectatorCount(roomId, playerIds) > 0) return false
+  } catch {
+    // Do not retire a room while human connection state is unavailable.
+    return false
+  }
+
+  return prisma.$transaction(async tx => {
+    const status = await lockOnlineRoomForDrain(tx, roomId)
+    if (status === 'DRAINING') return true
+    if (status !== 'WAITING') return false
+    const reservations = await tx.onlineRoomPlayer.findMany({
+      where: { roomId, status: { in: ['RESERVING', 'ACTIVE', 'CASH_OUT_PENDING'] } },
+      select: { userId: true, status: true, user: { select: { isBot: true } } }
+    })
+    const reservedIds = reservations.map(row => row.userId).sort()
+    if (reservations.length !== playerIds.length || reservedIds.some((id, index) => id !== playerIds[index]) ||
+        reservations.some(row => row.status !== 'ACTIVE' || !row.user.isBot)) return false
+    const changed = await tx.onlineRoom.updateMany({ where: { id: roomId, visibility: 'PUBLIC', status: 'WAITING' }, data: { status: 'DRAINING' } })
+    return changed.count === 1
+  })
+}
+
+/** Completes a drain after a crash if the normal last-seat close did not finish. */
+export async function reconcileDrainingOnlineRooms(dependencies?: OnlineRoomApiDependencies): Promise<number> {
+  const rows = await prisma.onlineRoom.findMany({ where: { status: 'DRAINING' }, select: { id: true }, take: 200 })
+  const runtime = runtimeStore(dependencies)
+  const timer = timerStore(dependencies)
+  const presence = presenceStore(dependencies)
+  let closed = 0
+  for (const row of rows) {
+    let record: OnlineRoomRuntimeRecord | null
+    try { record = await runtime.get(row.id) } catch { continue }
+    if (record && (record.state.pokerTable.players.length > 0 ||
+        (record.state.pokerTable.currentHand && record.state.pokerTable.currentHand.street !== 'FINISHED'))) continue
+    const didClose = await prisma.$transaction(async tx => {
+      const status = await lockOnlineRoomForDrain(tx, row.id)
+      if (status !== 'DRAINING') return false
+      const funded = await tx.onlineRoomPlayer.count({ where: { roomId: row.id, status: { in: ['RESERVING', 'ACTIVE', 'CASH_OUT_PENDING'] } } })
+      if (funded !== 0) return false
+      const result = await tx.onlineRoom.updateMany({ where: { id: row.id, status: 'DRAINING' }, data: { status: 'CLOSED' } })
+      return result.count === 1
+    }).catch(() => false)
+    if (!didClose) continue
+    await Promise.allSettled([
+      ...(record ? [Promise.resolve().then(() => runtime.remove(row.id, record!.runtimeRevision))] : []),
+      Promise.resolve().then(() => timer.clear(row.id)),
+      Promise.resolve().then(() => presence.clearRoom(row.id, true))
+    ])
+    closed += 1
+  }
+  return closed
+}
+
 export async function resolveOnlineRoomCode(code: string): Promise<Readonly<{ type: 'HOME' | 'ONLINE' | 'NOT_FOUND'; code: string; targetId?: string }>> {
   let normalizedCode: string
   try {
@@ -568,13 +644,13 @@ export async function resolveOnlineRoomCode(code: string): Promise<Readonly<{ ty
 }
 
 /** Lists safe lobby metadata for open rooms; credentials and runtime internals stay server-side. */
-export async function listPublicOnlineRooms(): Promise<readonly OnlineRoomLobbyEntry[]> {
+export async function listPublicOnlineRooms(dependencies?: OnlineRoomApiDependencies): Promise<readonly OnlineRoomLobbyEntry[]> {
   const rows = await prisma.onlineRoom.findMany({
     where: { visibility: { in: ['PUBLIC', 'PRIVATE'] }, status: 'WAITING' },
     select: { id: true, roomCode: true, visibility: true, createdAt: true, startingStack: true },
     orderBy: { createdAt: 'desc' }
   })
-  const runtime = new OnlineRoomRuntimeStore()
+  const runtime = runtimeStore(dependencies)
   try {
     const entries: OnlineRoomLobbyEntry[] = []
     for (const row of rows) {
@@ -602,7 +678,7 @@ export async function listPublicOnlineRooms(): Promise<readonly OnlineRoomLobbyE
     }
     return Object.freeze(entries)
   } finally {
-    await runtime.disconnect().catch(() => undefined)
+    if (!dependencies?.runtime) await runtime.disconnect().catch(() => undefined)
   }
 }
 
@@ -675,7 +751,7 @@ export async function getOnlinePokerBotDecisionSnapshot(userId: string, code: st
   if (!hand) fail('HAND_NOT_ACTIVE', 'There is no active hand.', 409)
   const player = hand.players.find(candidate => candidate.playerId === userId)
   if (!player) fail('NOT_FOUND', 'The bot is not seated in this room.', 404)
-  const result = await safeOnlineRoomResult(record.state, userId, record.runtimeRevision)
+  const result = await safeOnlineRoomResult(record.state, userId, record.runtimeRevision, metadata.status === 'DRAINING')
   const playerLevel = hand.lastActedAtBet.find(level => level.playerId === userId)
   return Object.freeze({
     room: result.room,
@@ -891,7 +967,7 @@ async function finishRoomRuntimeMutation(
     }).catch(() => undefined)
   }
   return Object.freeze({
-    result: await safeOnlineRoomResult(record.state, userId, record.runtimeRevision),
+    result: await safeOnlineRoomResult(record.state, userId, record.runtimeRevision, metadata.status === 'DRAINING'),
     duplicate,
     runtimeRevision: record.runtimeRevision
   })
@@ -1020,7 +1096,8 @@ async function updateRoomInternal(
   input: OnlineRoomConcurrencyInput,
   updater: (state: OnlineRoomState) => OnlineRoomState,
   dependencies?: OnlineRoomApiDependencies,
-  action?: RuntimeActionInput
+  action?: RuntimeActionInput,
+  allowDraining: 'LEAVE' | 'HAND_ACTION' | false = false
 ): Promise<InternalRoomUpdateResult> {
   requireUserId(userId)
   const metadata = await loadPersistentRoom(code)
@@ -1030,6 +1107,10 @@ async function updateRoomInternal(
     current = await requireRuntime(metadata, dependencies)
   } catch (error) {
     throw mapRuntimeError(error)
+  }
+  if (metadata.status === 'DRAINING' && (!allowDraining ||
+      (allowDraining === 'HAND_ACTION' && (!current.state.pokerTable.currentHand || current.state.pokerTable.currentHand.street === 'FINISHED')))) {
+    fail('DRAINING', 'Комната закрывается.', 409)
   }
   const revision = expectedRevision(metadata.id, input?.concurrencyToken)
   if (revision !== current.runtimeRevision) fail('CONFLICT', 'The room changed. Refresh and retry the action.', 409)
@@ -1050,15 +1131,16 @@ async function updateRoom(
   code: string,
   input: OnlineRoomConcurrencyInput,
   updater: (state: OnlineRoomState) => OnlineRoomState,
-  dependencies?: OnlineRoomApiDependencies
+  dependencies?: OnlineRoomApiDependencies,
+  allowDraining: 'LEAVE' | 'HAND_ACTION' | false = false
 ): Promise<ApiOnlineRoomResult> {
-  return (await updateRoomInternal(userId, code, input, updater, dependencies)).result
+  return (await updateRoomInternal(userId, code, input, updater, dependencies, undefined, allowDraining)).result
 }
 
 export async function joinAuthenticatedOnlineRoom(userId: string, code: string, input: JoinAuthenticatedOnlineRoomInput, dependencies?: OnlineRoomApiDependencies): Promise<ApiOnlineRoomResult> {
   requireUserId(userId)
   const metadata = await loadPersistentRoom(code)
-  ensureOpen(metadata)
+  ensureJoinable(metadata)
   try {
     await assertOnlinePokerBotMayJoin(userId, metadata.visibility)
   } catch (error) {
@@ -1125,7 +1207,7 @@ export async function leaveAuthenticatedOnlineRoom(userId: string, code: string,
   if (!player) fail('NOT_FOUND', 'The authenticated user is not seated in this room.', 404)
   const runningHand = current.state.pokerTable.currentHand !== null && current.state.pokerTable.currentHand.street !== 'FINISHED'
   if (runningHand) {
-    return updateRoom(userId, code, input, state => leaveOnlineRoom(state, userId, { expectedRoomVersion: input.expectedRoomVersion }), dependencies)
+    return updateRoom(userId, code, input, state => leaveOnlineRoom(state, userId, { expectedRoomVersion: input.expectedRoomVersion }), dependencies, 'LEAVE')
   }
 
   let prepared: boolean
@@ -1139,7 +1221,7 @@ export async function leaveAuthenticatedOnlineRoom(userId: string, code: string,
   }
   let runtimeLeft = false
   try {
-    const result = await updateRoom(userId, code, input, state => leaveOnlineRoom(state, userId, { expectedRoomVersion: input.expectedRoomVersion }), dependencies)
+    const result = await updateRoom(userId, code, input, state => leaveOnlineRoom(state, userId, { expectedRoomVersion: input.expectedRoomVersion }), dependencies, 'LEAVE')
     runtimeLeft = true
     await completeOnlineCashOut({ roomId: metadata.id, userId })
     return result
@@ -1311,7 +1393,8 @@ export async function applyAuthenticatedOnlineRoomAction(
       expectedStateVersion: input.expectedTableStateVersion
     }))),
     dependencies,
-    { playerId: userId, actionId: input.actionId, fingerprint: actionFingerprint(input) }
+    { playerId: userId, actionId: input.actionId, fingerprint: actionFingerprint(input) },
+    'HAND_ACTION'
   )
   if (!updated.duplicate) await reconcileTurnTimer(updated.result, dependencies, updated.runtimeRevision)
   return Object.freeze({ ...updated.result, duplicate: updated.duplicate })
@@ -1331,6 +1414,7 @@ export async function startAuthenticatedOnlineRoomHand(
   const current = await getAuthenticatedOnlineRoom(userId, code, dependencies)
   if (current.room.ownerId !== userId) fail('FORBIDDEN', 'Only the room owner can start a hand.', 403)
   const metadata = await loadPersistentRoom(code)
+  if (metadata.status === 'DRAINING') fail('DRAINING', 'Комната закрывается.', 409)
   const currentRecord = await requireRuntime(metadata, dependencies)
   const settledBeforeStart = advanceCompletedStreet(currentRecord.state, expectedTableStateVersion)
   const pendingCashOuts = canStartNextHand(settledBeforeStart.pokerTable)

@@ -11,6 +11,7 @@ import {
   applyAuthenticatedOnlineRoomAction,
   countPublicOnlineRoomsOwnedByBots,
   closeEmptyPublicOnlineRoomsCreatedByBots,
+  markBotOnlyOnlineRoomDraining,
   type OnlinePokerBotDecisionSnapshot
 } from './onlineRoomApiService'
 import { ensureOnlinePokerBots, listOnlinePokerBots, replenishOnlinePokerBotDailyBalances } from './botIdentityService'
@@ -25,6 +26,7 @@ export const onlinePokerBotApiAdapter: OnlinePokerBotOrchestratorAdapter = Objec
   listPublicRooms: listPublicOnlineRooms,
   countBotCreatedRooms: countPublicOnlineRoomsOwnedByBots,
   cleanupBotCreatedRooms: closeEmptyPublicOnlineRoomsCreatedByBots,
+  markRoomDraining: markBotOnlyOnlineRoomDraining,
   findSeatedRoom: findActivePublicOnlineRoomForPlayer,
   getRoom: getAuthenticatedOnlineRoom,
   getDecisionSnapshot: async (userId, code, dependencies): Promise<BotActionDecisionSnapshot> => {

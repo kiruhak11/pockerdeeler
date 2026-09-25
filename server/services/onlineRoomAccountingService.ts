@@ -51,12 +51,19 @@ function metadata(roomId: string, userId: string, sequence: number, amount: numb
 async function lockRoom(tx: Prisma.TransactionClient, roomId: string, allowClosed = false): Promise<string | null> {
   const rows = await tx.$queryRaw<Array<{ id: string; status: string }>>`SELECT id, status FROM "online_rooms" WHERE id = CAST(${roomId} AS uuid) FOR UPDATE`
   if (rows[0]?.status === 'CLOSED' && !allowClosed) throw Object.assign(new Error('The online room is closed.'), { code: 'ROOM_CLOSED' })
+  if (rows[0]?.status === 'DRAINING' && !allowClosed) throw Object.assign(new Error('The online room is closing.'), { code: 'ROOM_DRAINING' })
   return rows[0]?.status ?? null
 }
 
 /** Serializes all ONLINE wallet transitions with the season wallet reset. */
 export async function lockOnlineFundsTransition(tx: Prisma.TransactionClient): Promise<void> {
   await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended('season-transition', 0))::text`
+}
+
+/** Uses the same serialization order as buy-in/hand-start transitions. */
+export async function lockOnlineRoomForDrain(tx: Prisma.TransactionClient, roomId: string): Promise<string | null> {
+  await lockOnlineFundsTransition(tx)
+  return lockRoom(tx, roomId, true)
 }
 
 const lockSeasonTransition = lockOnlineFundsTransition

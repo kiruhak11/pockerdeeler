@@ -1,4 +1,4 @@
-import { reconcileStaleOnlineRoomParticipants, recoverIncompleteOnlineStackOperations } from '../services/onlineRoomApiService'
+import { reconcileDrainingOnlineRooms, reconcileStaleOnlineRoomParticipants, recoverIncompleteOnlineStackOperations } from '../services/onlineRoomApiService'
 
 export default defineNitroPlugin(app => {
   if (import.meta.prerender || !process.env.DATABASE_URL || !process.env.REDIS_URL) return
@@ -11,6 +11,9 @@ export default defineNitroPlugin(app => {
     const cleaned = await reconcileStaleOnlineRoomParticipants().catch(() => null)
     if (cleaned === null) console.error('[online room cleanup] Reconciliation deferred.')
     else if (cleaned > 0) console.info(`[online room cleanup] Cashed out ${cleaned} stale participant(s).`)
+    const drained = await reconcileDrainingOnlineRooms().catch(() => null)
+    if (drained === null) console.error('[online room drain] Reconciliation deferred.')
+    else if (drained > 0) console.info(`[online room drain] Closed ${drained} drained room(s).`)
     if (!stopped) timer = setTimeout(() => { void tick() }, 15_000)
   }
   app.hooks.hook('close', () => {

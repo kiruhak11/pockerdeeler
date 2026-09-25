@@ -75,6 +75,7 @@ export type OnlinePokerBotOrchestratorAdapter = Readonly<{
   listPublicRooms(): Promise<readonly OnlineRoomLobbyEntry[]>
   countBotCreatedRooms(botIds: readonly string[]): Promise<number>
   cleanupBotCreatedRooms(botIds: readonly string[], olderThan: Date): Promise<number>
+  markRoomDraining?(roomId: string, dependencies: OnlineRoomApiDependencies): Promise<boolean>
   findSeatedRoom(userId: string): Promise<string | null>
   getRoom(userId: string, code: string, dependencies: OnlineRoomApiDependencies): Promise<ApiOnlineRoomResult>
   getDecisionSnapshot(userId: string, code: string, dependencies: OnlineRoomApiDependencies): Promise<BotActionDecisionSnapshot>
@@ -319,7 +320,7 @@ export class OnlinePokerBotOrchestrator {
       if (candidate.startingStack > bot.balance) continue
       if (this.now() - Date.parse(candidate.createdAt) < 8_000 && this.random() >= config.quickJoinProbability) continue
       const publicRoom = await adapter.getRoom(bot.id, candidate.code, fence).catch(() => null)
-      if (!publicRoom || publicRoom.room.visibility !== 'PUBLIC') continue
+      if (!publicRoom || publicRoom.draining || publicRoom.room.visibility !== 'PUBLIC') continue
       const table = publicRoom.room.pokerTable
       const botCount = table.players.filter(player => botIds.has(player.playerId)).length
       const botOwnedRoom = table.players.some(player => player.playerId === publicRoom.room.ownerId && botIds.has(player.playerId))
@@ -436,7 +437,14 @@ export class OnlinePokerBotOrchestrator {
     if (botOnly) this.botOnlyRoomSince.set(room.roomId, this.botOnlyRoomSince.get(room.roomId) ?? this.now())
     else this.botOnlyRoomSince.delete(room.roomId)
     const botOnlyIdle = botOnly && this.now() - (this.botOnlyRoomSince.get(room.roomId) ?? this.now()) >= (config.activityWindowMs ?? 5 * 60_000)
-    if ((!active || seated.stack <= 0 || botOnlyIdle) && !handInProgress) {
+    let draining = Boolean(result.draining)
+    if (botOnlyIdle && !draining) {
+      draining = adapter.markRoomDraining
+        ? await adapter.markRoomDraining(room.roomId, fence).catch(() => false)
+        : botOnlyIdle
+      if (draining) this.dependencies.log?.('bot_only_room_draining', { roomCode: code })
+    }
+    if ((draining || !active || seated.stack <= 0) && !handInProgress) {
       const left = await this.mutateWithConflictRecovery(bot, code, fence, room, 'leave',
         current => adapter.leave(bot.id, code, current, fence),
         current => !current.pokerTable.currentHand || current.pokerTable.currentHand.street === 'FINISHED'
