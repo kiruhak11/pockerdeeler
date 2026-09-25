@@ -80,4 +80,11 @@ test('bot-only room drains durably, rejects a stale candidate and closes after s
   await db.onlineRoom.update({ where: { id: roomId }, data: { status: 'DRAINING' } })
   assert.equal(await reconcileDrainingOnlineRooms({ runtime, timer, presence }), 1)
   assert.equal((await db.onlineRoom.findUniqueOrThrow({ where: { id: roomId }, select: { status: true } })).status, 'CLOSED')
+  await db.onlineRoom.update({ where: { id: roomId }, data: { createdAt: new Date(Date.now() - 60 * 60_000) } })
+  await closeEmptyPublicOnlineRoomsCreatedByBots([ownerId!], new Date(Date.now() - 30 * 60_000), { runtime })
+  assert.equal(
+    await closeEmptyPublicOnlineRoomsCreatedByBots([ownerId!], new Date(Date.now() - 30 * 60_000), { runtime }),
+    0,
+    'already-cleaned CLOSED rows must not be reprocessed on later orchestrator ticks'
+  )
 })

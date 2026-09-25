@@ -705,12 +705,15 @@ export async function closeEmptyPublicOnlineRoomsCreatedByBots(
   if (botIds.length === 0) return 0
   const candidates = await prisma.onlineRoom.findMany({
     where: { ownerId: { in: [...botIds] }, visibility: 'PUBLIC', status: { in: ['WAITING', 'CLOSED'] }, createdAt: { lt: olderThan } },
-    select: { id: true, roomCode: true }
+    select: { id: true, roomCode: true, status: true }
   })
   let closedCount = 0
   for (const candidate of candidates) {
     let current: OnlineRoomRuntimeRecord | null
     try { current = await runtimeStore(dependencies).get(candidate.id) } catch { continue }
+    // A CLOSED row with no runtime was already fully cleaned. Do not re-lock
+    // and count it on every orchestrator tick; only stale WAITING rows need DB closure.
+    if (!current && candidate.status === 'CLOSED') continue
     if (current && (current.state.visibility !== 'PUBLIC' || current.state.pokerTable.players.length > 0 ||
         (current.state.pokerTable.currentHand !== null && current.state.pokerTable.currentHand.street !== 'FINISHED'))) continue
     const closed = await prisma.$transaction(async tx => {
