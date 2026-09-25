@@ -1,24 +1,26 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import Redis from 'ioredis'
 import { PrismaClient } from '@prisma/client'
 import { createRoom } from '../server/services/roomService'
 import { claimRoomCode, createPersistentOnlineRoom } from '../server/services/roomCodeRegistryService'
 import {
   OnlineRoomApiError,
-  applyAuthenticatedOnlineRoomAction,
+  applyAuthenticatedOnlineRoomAction as applyAuthenticatedOnlineRoomActionService,
   createAuthenticatedOnlineRoom,
-  getAuthenticatedOnlineRoom,
+  getAuthenticatedOnlineRoom as getAuthenticatedOnlineRoomService,
   joinAuthenticatedOnlineRoom,
   leaveAuthenticatedOnlineRoom,
   resolveOnlineRoomCode,
   setAuthenticatedOnlineRoomReady,
   setAuthenticatedOnlineRoomSittingOut,
-  startAuthenticatedOnlineRoomHand,
+  startAuthenticatedOnlineRoomHand as startAuthenticatedOnlineRoomHandService,
+  type OnlineRoomApiDependencies,
   type ApiOnlineRoomResult
 } from '../server/services/onlineRoomApiService'
 import { OnlineRoomRuntimeStore, serializeOnlineRoomRuntimeState } from '../server/services/onlineRoomRuntimeStore'
+import { OnlineRoomTurnTimerService } from '../server/services/onlineRoomTurnTimerService'
 import { setOnlineRoomReady, startOnlineRoomHand } from '../server/utils/pokerOnlineRoom'
 import { applyTableAction, advanceTableStreet } from '../server/utils/pokerTableState'
 import { getToCall } from '../server/utils/pokerBetting'
@@ -30,10 +32,49 @@ const redisUrl = process.env.ONLINE_ROOM_TEST_REDIS_URL
 const isolated = Boolean(dbUrl && redisUrl && /^redis:\/\/127\.0\.0\.1:\d+\/\d+$/.test(redisUrl))
 const db = new PrismaClient()
 const redis = isolated ? new Redis(redisUrl!, { lazyConnect: true }) : undefined
+const timerKeyPrefix = `pocker:test:online-room-api-timer:${randomUUID()}:`
+const timer = isolated ? new OnlineRoomTurnTimerService({ redis: redis!, keyPrefix: timerKeyPrefix }) : undefined
 const roomIds: string[] = []
 const homeIds: string[] = []
 const homeCodes: string[] = []
 const prefixes: string[] = []
+
+function withTestTimer(dependencies?: OnlineRoomApiDependencies): OnlineRoomApiDependencies | undefined {
+  return timer ? { ...dependencies, timer } : dependencies
+}
+
+function getAuthenticatedOnlineRoom(...args: Parameters<typeof getAuthenticatedOnlineRoomService>) {
+  return getAuthenticatedOnlineRoomService(args[0], args[1], withTestTimer(args[2]))
+}
+
+function applyAuthenticatedOnlineRoomAction(...args: Parameters<typeof applyAuthenticatedOnlineRoomActionService>) {
+  return applyAuthenticatedOnlineRoomActionService(args[0], args[1], args[2], withTestTimer(args[3]))
+}
+
+function startAuthenticatedOnlineRoomHand(...args: Parameters<typeof startAuthenticatedOnlineRoomHandService>) {
+  return startAuthenticatedOnlineRoomHandService(args[0], args[1], args[2], withTestTimer(args[3]))
+}
+
+async function timerNamespaceKeys(): Promise<string[]> {
+  if (!isolated) return []
+  const keys: string[] = []
+  let cursor = '0'
+  do {
+    const [nextCursor, batch] = await redis!.scan(cursor, 'MATCH', `${timerKeyPrefix}*`, 'COUNT', 100)
+    keys.push(...batch)
+    cursor = nextCursor
+  } while (cursor !== '0')
+  return keys
+}
+
+async function deleteTimerNamespace(): Promise<void> {
+  let cursor = '0'
+  do {
+    const [nextCursor, keys] = await redis!.scan(cursor, 'MATCH', `${timerKeyPrefix}*`, 'COUNT', 100)
+    if (keys.length > 0) await redis!.del(...keys)
+    cursor = nextCursor
+  } while (cursor !== '0')
+}
 
 function runtime(): OnlineRoomRuntimeStore {
   const keyPrefix = `pocker:test:online-room-api:${randomUUID()}:`
@@ -86,24 +127,37 @@ async function activeRoom(room: { result: ApiOnlineRoomResult; runtime: OnlineRo
 test.before(async () => {
   if (isolated) {
     await redis!.connect()
+    assert.deepEqual(await timerNamespaceKeys(), [], 'ONLINE API test timer namespace must start clean')
   }
 })
 
 test.after(async () => {
-  if (isolated) {
-    for (const prefix of prefixes) {
-      const keys = await redis!.keys(`${prefix}*`)
-      if (keys.length > 0) await redis!.del(...keys)
+  timer?.stop()
+  try {
+    if (isolated) {
+      try {
+        await deleteTimerNamespace()
+        assert.deepEqual(await timerNamespaceKeys(), [], 'ONLINE API test timer namespace must be empty after teardown')
+        for (const prefix of prefixes) {
+          const keys = await redis!.keys(`${prefix}*`)
+          if (keys.length > 0) await redis!.del(...keys)
+        }
+      } finally {
+        redis!.disconnect()
+      }
     }
-    redis!.disconnect()
+  } finally {
+    try {
+      if (dbUrl) {
+        if (roomIds.length > 0) await db.roomCodeRegistry.deleteMany({ where: { roomType: 'ONLINE', targetId: { in: roomIds } } })
+        if (roomIds.length > 0) await db.onlineRoom.deleteMany({ where: { id: { in: roomIds } } })
+        if (homeCodes.length > 0) await db.roomCodeRegistry.deleteMany({ where: { code: { in: homeCodes } } })
+        if (homeIds.length > 0) await db.room.deleteMany({ where: { id: { in: homeIds } } })
+      }
+    } finally {
+      await db.$disconnect()
+    }
   }
-  if (dbUrl) {
-    if (roomIds.length > 0) await db.roomCodeRegistry.deleteMany({ where: { roomType: 'ONLINE', targetId: { in: roomIds } } })
-    if (roomIds.length > 0) await db.onlineRoom.deleteMany({ where: { id: { in: roomIds } } })
-    if (homeCodes.length > 0) await db.roomCodeRegistry.deleteMany({ where: { code: { in: homeCodes } } })
-    if (homeIds.length > 0) await db.room.deleteMany({ where: { id: { in: homeIds } } })
-  }
-  await db.$disconnect()
 })
 
 test('resolve existing HOME code through the unified resolver', { skip: !isolated }, async () => {
@@ -467,6 +521,14 @@ test('same authenticated action id with another payload is a conflict', { skip: 
   const expected = room.result.room.pokerTable.stateVersion
   const input = { actionId: 'ws-conflict-123', expectedTableStateVersion: expected, action: { type: 'call' as const } }
   await applyAuthenticatedOnlineRoomAction(room.ownerId, room.result.room.roomCode, input, { runtime: room.runtime })
+  const timerKeys = await timerNamespaceKeys()
+  const expectedRoomTimerKey = `${timerKeyPrefix}room:${createHash('sha256').update(room.result.room.roomId).digest('hex')}`
+  assert.equal(timerKeys.includes(expectedRoomTimerKey), true, 'room timer record must use the suite namespace')
+  const jobs = await Promise.all(timerKeys.filter(key => key.startsWith(`${timerKeyPrefix}job:`)).map(async key => JSON.parse((await redis!.get(key)) ?? 'null')))
+  const conflictJobs = jobs.filter(job => job?.roomId === room.result.room.roomId && job?.roomCode === room.result.room.roomCode)
+  assert.equal(conflictJobs.length, 1, 'one timer job for this conflict-test room must use the suite namespace')
+  assert.equal(timerKeys.includes(`${timerKeyPrefix}index`), true, 'timer index must be isolated in the suite namespace')
+  assert.notEqual(await redis!.zscore(`${timerKeyPrefix}index`, conflictJobs[0].jobId), null, 'timer index must reference this test job')
   await assert.rejects(applyAuthenticatedOnlineRoomAction(room.ownerId, room.result.room.roomCode, {
     actionId: input.actionId,
     expectedTableStateVersion: expected,
