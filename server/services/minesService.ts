@@ -6,10 +6,9 @@ import { verifyUserAuthToken } from './userAccountService'
 import { adjustUserWallet, lockUserWallet } from './walletService'
 import { getEconomySnapshot, recentMiniGameThrottle, settleMiniGameEconomy } from './miniGameEconomyService'
 import { MINES_COLUMNS, MINES_COUNT, legacyMinesField, legacyMinesTerms, minesField, minesLimit, minesTerms, seedHash } from '../utils/minesMath'
+import { minesStartInputSchema, type MinesStartInput } from '../utils/minesValidation'
 
 type Tx = Prisma.TransactionClient
-const MIN_STAKE = 10
-const MAX_STAKE = 100_000
 const LEGACY_MINES_CUTOFF = new Date('2026-09-18T14:15:00.000Z')
 // The VPS clock is one day behind the local workstation clock. Keep the
 // rollout boundary in server time so games created after this deployment use
@@ -95,7 +94,8 @@ export async function getMinesState(token?: string | null) {
   ])
   const economy = await prisma.$transaction(tx => getEconomySnapshot(tx))
   const wallet = await prisma.userWallet.findUniqueOrThrow({ where: { userId: id }, select: { balance: true } })
-  return { active: active ? { ...view(active), balance: Number(wallet.balance) } : null, history: history.map(view), balance: Number(wallet.balance), minStake: MIN_STAKE, maxStake: MAX_STAKE, allowedMines: MINES_COUNT, rtp: 94, economy }
+  const balance = Number(wallet.balance)
+  return { active: active ? { ...view(active), balance } : null, history: history.map(view), balance, minStake: 1, maxStake: balance, allowedMines: MINES_COUNT, rtp: 94, economy }
 }
 export async function prepareMines(token?: string | null) {
   const id = await userId(token)
@@ -103,9 +103,15 @@ export async function prepareMines(token?: string | null) {
   const commitment = await prisma.minesCommitment.create({ data: { userId: id, serverSeed, seedHash: seedHash(serverSeed), expiresAt: new Date(Date.now() + 15 * 60_000) } })
   return { commitmentId: commitment.id, serverSeedHash: commitment.seedHash, expiresAt: commitment.expiresAt.toISOString() }
 }
-export async function startMines(token: string | null | undefined, input: { stake: number; mines: number; clientSeed: string; commitmentId: string; idempotencyKey: string }) {
+export async function startMines(token: string | null | undefined, input: MinesStartInput) {
   const id = await userId(token)
-  if (!Number.isSafeInteger(input.stake) || input.stake < MIN_STAKE || input.stake > MAX_STAKE || !MINES_COUNT.includes(input.mines as typeof MINES_COUNT[number])) throw createError({ statusCode: 400, statusMessage: 'Проверьте сумму и количество мин' })
+  const parsed = minesStartInputSchema.safeParse(input)
+  if (!parsed.success) {
+    const field = parsed.error.issues[0]?.path[0]
+    const statusMessage = field === 'stake' ? 'Введите корректную сумму ставки' : field === 'mines' ? 'Проверьте количество мин' : 'Некорректные параметры игры'
+    throw createError({ statusCode: 400, statusMessage })
+  }
+  input = parsed.data
   const bankId = await bankUser()
   return prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended('season-transition', 0))::text`
@@ -117,13 +123,13 @@ export async function startMines(token: string | null | undefined, input: { stak
       const wallet = await tx.userWallet.findUniqueOrThrow({ where: { userId: id }, select: { balance: true } })
       return { session: { ...view(duplicate), balance: Number(wallet.balance) } }
     }
+    const stake = BigInt(input.stake)
+    const playerWallet = await tx.userWallet.findUniqueOrThrow({ where: { userId: id } })
+    if (playerWallet.balance < stake) throw createError({ statusCode: 409, statusMessage: 'Недостаточно фишек' })
     if (await tx.miniGameSession.count({ where: { userId: id, game: 'mines', status: 'ACTIVE' } })) throw createError({ statusCode: 409, statusMessage: 'Сначала завершите текущую игру' })
     const commitment = await tx.minesCommitment.findFirst({ where: { id: input.commitmentId, userId: id, consumedAt: null, expiresAt: { gt: new Date() } } })
     if (!commitment) throw createError({ statusCode: 409, statusMessage: 'Подготовьте новое поле: срок проверки истёк' })
-    const stake = BigInt(input.stake)
     const theoreticalMaxPayout = minesLimit(stake, input.mines)
-    const playerWallet = await tx.userWallet.findUniqueOrThrow({ where: { userId: id } })
-    if (playerWallet.balance < stake) throw createError({ statusCode: 409, statusMessage: 'В кошельке недостаточно фишек для этой ставки' })
     const maxPayout = theoreticalMaxPayout
     // Move the full potential liability out of the bank wallet before the
     // session becomes active. This preserves the wallet/ledger total and
