@@ -149,17 +149,17 @@ function harness(options: {
   return { orchestrator, adapter, events, setNow: (value: number) => { now = value } }
 }
 
-test('Rocket automation shares the orchestrator feature flag and defaults to a bounded chance', async () => {
+test('Rocket automation shares the orchestrator feature flag and defaults to 80% with env override', async () => {
   assert.equal(readOnlinePokerBotOrchestratorConfig({}).enabled, false)
-  assert.equal(readOnlinePokerBotOrchestratorConfig({ BOT_ORCHESTRATOR_ENABLED: 'true' }).rocketPlayProbability, 0.25)
-  assert.equal(readOnlinePokerBotOrchestratorConfig({ BOT_ORCHESTRATOR_ENABLED: 'true', BOT_ORCHESTRATOR_ROCKET_CHANCE: '2' }).rocketPlayProbability, 0.25)
+  assert.equal(readOnlinePokerBotOrchestratorConfig({ BOT_ORCHESTRATOR_ENABLED: 'true' }).rocketPlayProbability, 0.8)
+  assert.equal(readOnlinePokerBotOrchestratorConfig({ BOT_ORCHESTRATOR_ENABLED: 'true', BOT_ORCHESTRATOR_ROCKET_CHANCE: '2' }).rocketPlayProbability, 0.8)
   assert.equal(readOnlinePokerBotOrchestratorConfig({ BOT_ORCHESTRATOR_ENABLED: 'true', BOT_ORCHESTRATOR_ROCKET_CHANCE: '0.15' }).rocketPlayProbability, 0.15)
   const h = harness({ enabled: false })
   await h.orchestrator.tick()
   assert.equal(h.events.length, 0)
 })
 
-test('default Rocket activity increases about 1.5-2x over the same deterministic 100 rounds', async () => {
+test('default Rocket activity matches 80% over the same deterministic 100 rounds', async () => {
   async function simulate(chance: number) {
     let draw = 0
     let opportunity = 0
@@ -181,8 +181,8 @@ test('default Rocket activity increases about 1.5-2x over the same deterministic
   const before = await simulate(0.15)
   const after = await simulate(readOnlinePokerBotOrchestratorConfig({ BOT_ORCHESTRATOR_ENABLED: 'true' }).rocketPlayProbability!)
   assert.equal(before, 15)
-  assert.equal(after, 25)
-  assert.ok(after / before >= 1.5 && after / before <= 2)
+  assert.equal(after, 80)
+  assert.ok(after > before)
 })
 
 test('an idle bot places one delayed account-backed Rocket bet with legal limits', async () => {
@@ -198,6 +198,26 @@ test('an idle bot places one delayed account-backed Rocket bet with legal limits
   assert.ok(placed.input.autoCashout >= 1.01 && placed.input.autoCashout <= 3)
   assert.equal(placed.input.key, 'pocker:online-bot-lease:v1:rocket-test-bot')
   assert.equal(h.events.filter(event => event.method === 'register').length, 1)
+})
+
+test('recent Rocket losses reduce stake and lower the auto-cashout risk without outcome access', async () => {
+  async function betFor(recentNet: number) {
+    const identity = bot('risk-profile-bot')
+    const h = harness({
+      identity,
+      random: () => 0.5,
+      snapshot: { roundId: 'risk-round', phase: 'betting', bettingMsRemaining: 15_000, bots: { [identity.id]: { balance: 10_000, hasBet: false, recentNet, recentCount: 5 } } }
+    })
+    await h.orchestrator.tick()
+    h.setNow(1_005_000)
+    await h.orchestrator.tick()
+    return h.events.find(event => event.method === 'bet')?.input
+  }
+  const losing = await betFor(-2_000)
+  const winning = await betFor(2_000)
+  assert.ok(losing.stake < winning.stake)
+  assert.ok(losing.autoCashout < winning.autoCashout)
+  assert.ok(losing.stake >= 1_000 && losing.stake <= 4_500)
 })
 
 test('a bot with an active poker seat has poker priority and cannot place a Rocket bet', async () => {

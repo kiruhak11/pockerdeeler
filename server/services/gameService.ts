@@ -1355,7 +1355,19 @@ export async function distributePotByDealer(input: {
 
     await settlePredictionMarket(tx, room, hand, mainPotWinnerIds)
     await updateBehaviorStatsForHand(tx, room.id, hand.id, mainPotWinnerIds, players)
-    await updateTableRatingAndAchievements(tx, hand.id, players, mainPotWinnerIds)
+    const ratingPots = distribution.result.pots.map(pot => {
+      const selected = input.potWinners?.[String(pot.id)]
+      const winners = pot.eligiblePlayerIds.length === 1 ? pot.eligiblePlayerIds : selected?.length ? selected : mainPotWinnerIds.filter(id => pot.eligiblePlayerIds.includes(id))
+      const contributors = players.filter(player => player.totalCommitted >= pot.cap)
+      return {
+        amount: pot.amount,
+        contributorPlayerIds: contributors.map(player => player.userId).filter((id): id is string => Boolean(id)),
+        eligiblePlayerIds: pot.eligiblePlayerIds.map(id => players.find(player => player.id === id)?.userId).filter((id): id is string => Boolean(id)),
+        foldedPlayerIds: contributors.filter(player => player.status === 'folded').map(player => player.userId).filter((id): id is string => Boolean(id)),
+        winnerIds: winners.map(id => players.find(player => player.id === id)?.userId).filter((id): id is string => Boolean(id))
+      }
+    })
+    await updateTableRatingAndAchievements(tx, hand.id, players, mainPotWinnerIds, ratingPots)
 
     for (const calculated of distribution.players) {
       const source = players.find(player => player.id === calculated.id)

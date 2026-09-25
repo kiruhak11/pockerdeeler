@@ -26,11 +26,11 @@ after(async () => {
   await db.$disconnect()
 })
 
-test('bootstrap creates exactly twelve persistent bot identities', { skip: !dbUrl }, async () => {
-  assert.equal(bots.length, 12)
-  assert.equal(new Set(bots.map(bot => bot.id)).size, 12)
-  assert.equal(new Set(bots.map(bot => bot.botKey)).size, 12)
-  assert.equal(new Set(bots.map(bot => bot.nickname)).size, 12)
+test('bootstrap creates twenty-four persistent bot identities', { skip: !dbUrl }, async () => {
+  assert.equal(bots.length, 24)
+  assert.equal(new Set(bots.map(bot => bot.id)).size, 24)
+  assert.equal(new Set(bots.map(bot => bot.botKey)).size, 24)
+  assert.equal(new Set(bots.map(bot => bot.nickname)).size, 24)
   assert.ok(bots.every(bot => bot.isBot && typeof bot.botEnabled === 'boolean' && bot.leaderboardVisible))
 })
 
@@ -66,16 +66,18 @@ test('repeated bootstrap preserves identity, rating, stats and balance', { skip:
 
 test('each bot has one idempotent opening grant in the ordinary wallet ledger', { skip: !dbUrl }, async () => {
   const entries = await db.walletLedgerEntry.findMany({ where: { idempotencyKey: { in: bots.map(bot => `bot-wallet-opening:${bot.botKey}`) } }, select: { idempotencyKey: true, amount: true } })
-  assert.equal(entries.length, 12)
+  assert.equal(entries.length, bots.length)
   assert.ok(entries.every(entry => entry.amount === BigInt(BOT_INITIAL_BALANCE)))
-  assert.equal(new Set(entries.map(entry => entry.idempotencyKey)).size, 12)
+  assert.equal(new Set(entries.map(entry => entry.idempotencyKey)).size, bots.length)
   assert.ok(bots.every(bot => Number.isSafeInteger(bot.balance) && bot.balance >= 0))
 })
 
 test('bots use normal wallets and ordinary leaderboard pipelines', { skip: !dbUrl }, async () => {
   const rows = await db.user.findMany({ where: { isBot: true, leaderboardVisible: true }, select: { id: true, username: true, wallet: { select: { id: true } } } })
-  assert.equal(rows.length, 12)
-  assert.ok(rows.every(row => row.wallet))
+  const botIds = new Set(bots.map(bot => bot.id))
+  const provisionedRows = rows.filter(row => botIds.has(row.id))
+  assert.equal(provisionedRows.length, bots.length)
+  assert.ok(provisionedRows.every(row => row.wallet))
   const season = await seasonLeaderboard('balance')
   assert.ok(bots.every(bot => season.entries.some(entry => entry.userId === bot.id && entry.username === bot.nickname)))
 })
@@ -103,7 +105,8 @@ test('disabled bots are rejected without deleting their identity', { skip: !dbUr
   } finally {
     await setOnlinePokerBotEnabled(bot.botKey, true)
   }
-  assert.equal((await listOnlinePokerBots()).length, 12)
+  const listedIds = new Set((await listOnlinePokerBots()).map(bot => bot.id))
+  assert.ok(bots.every(bot => listedIds.has(bot.id)))
 })
 
 test('bootstrap does not grant achievements or notifications', { skip: !dbUrl }, async () => {

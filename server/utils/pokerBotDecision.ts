@@ -36,6 +36,10 @@ export type BotDecisionContext = Readonly<{
   legalActions?: readonly BettingActionType[]
   position?: BotPosition
   actionHistory?: readonly BotPublicAction[]
+  /** Recent public all-in tendency of the current opponents, 0..1. */
+  opponentAllInFrequency?: number
+  opponentRaiseFrequency?: number
+  opponentFoldFrequency?: number
 }>
 
 export type BotPosition = 'EARLY' | 'MIDDLE' | 'LATE' | 'SMALL_BLIND' | 'BIG_BLIND' | 'DEALER'
@@ -336,7 +340,10 @@ export function decideBotAction(
   const potOdds = context.pot + Math.max(0, context.toCall) > 0
     ? Math.min(1, Math.max(0, context.toCall) / (context.pot + Math.max(0, context.toCall)))
     : 0
-  const aggression = values.aggression + position + Math.min(0.08, priorAggression(context) * 0.015)
+  const observedFoldFrequency = Number.isFinite(context.opponentFoldFrequency) ? Math.min(1, Math.max(0, context.opponentFoldFrequency!)) : 0
+  const observedRaiseFrequency = Number.isFinite(context.opponentRaiseFrequency) ? Math.min(1, Math.max(0, context.opponentRaiseFrequency!)) : 0
+  const adaptation = profile.skillTier === 'STRONG' ? (observedFoldFrequency - observedRaiseFrequency) * 0.12 : 0
+  const aggression = values.aggression + position + Math.min(0.08, priorAggression(context) * 0.015) + adaptation
   const effectiveStrength = clamp01(strength + (draw ? 0.1 : 0) + values.threshold * 0.18 + texture - Math.min(0.08, Math.max(0, opponents - 1) * 0.025))
 
   if (!valid) return safeFallback(context, actions, strength, potOdds)
@@ -356,12 +363,18 @@ export function decideBotAction(
       return safeFallback(context, actions, strength, potOdds)
     }
 
-    const continueThreshold = clamp01(potOdds + 0.08 + values.threshold + values.callBias - position * 0.25 + (opponents - 1) * 0.025 - Math.min(0.04, Math.max(0, 1 - stackToPot) * 0.04))
+    const allInFrequency = Number.isFinite(context.opponentAllInFrequency)
+      ? Math.min(1, Math.max(0, context.opponentAllInFrequency!))
+      : 0
+    const adaptation = profile.skillTier === 'STRONG' ? 0.12 : profile.skillTier === 'REGULAR' ? 0.08 : profile.skillTier === 'CASUAL' ? 0.04 : 0.015
+    const allInAdjustment = allInFrequency * adaptation
+    const continueThreshold = clamp01(potOdds + 0.08 + values.threshold + values.callBias - position * 0.25 + (opponents - 1) * 0.025 - Math.min(0.04, Math.max(0, 1 - stackToPot) * 0.04) - allInAdjustment)
     const canCall = actions.has('call') && context.toCall <= context.stack
     const canFullRaise = actions.has('raise') && maxTarget(context) >= (context.minRaiseTo ?? context.currentBet + context.bigBlind)
     const canFullAllIn = context.raiseReopened !== false && actions.has('all-in') && maxTarget(context) >= (context.minRaiseTo ?? context.currentBet + context.bigBlind)
     const canAllInCall = actions.has('all-in') && maxTarget(context) <= context.currentBet
-    const bluff = random < values.bluff && effectiveStrength < 0.66 && aggression > 0.15
+    const bluffAdjustment = profile.skillTier === 'STRONG' ? observedFoldFrequency * 0.1 : 0
+    const bluff = random < Math.min(0.45, values.bluff + bluffAdjustment) && effectiveStrength < 0.66 && aggression > 0.15
     const shouldContinue = effectiveStrength >= continueThreshold || bluff
 
     if (!shouldContinue) {

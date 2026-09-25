@@ -45,6 +45,17 @@ test('weak bot can fold a costly marginal call', () => {
   assert.equal(action.type, 'fold')
 })
 
+test('recent public all-in aggression makes a strong bot continue wider but weak bots can still fold', () => {
+  const marginal = context({ holeCards: [c('K', 'clubs'), c('J', 'diamonds')], pot: 100, currentBet: 150, toCall: 150, stack: 1000, legalActions: ['fold', 'call'] })
+  const cautious = decideBotAction(marginal, profile('STRONG', 'TIGHT_PASSIVE'), () => 0.9)
+  const adapted = decideBotAction({ ...marginal, opponentAllInFrequency: 1 }, profile('STRONG', 'TIGHT_PASSIVE'), () => 0.9)
+  assert.equal(cautious.type, 'fold')
+  assert.equal(adapted.type, 'call')
+
+  const weak = decideBotAction({ ...marginal, holeCards: [c('2', 'clubs'), c('7', 'diamonds')], opponentAllInFrequency: 1 }, profile('WEAK', 'TIGHT_PASSIVE'), () => 0.9)
+  assert.equal(weak.type, 'fold')
+})
+
 test('made postflop hand is evaluated from known cards only', () => {
   const action = decideBotAction(context({ street: 'FLOP', holeCards: [c('A', 'spades'), c('A', 'hearts')], board: [c('A', 'clubs'), c('8', 'diamonds'), c('2', 'clubs')], toCall: 100, pot: 500, currentBet: 100, legalActions: ['fold', 'call', 'raise'], minRaiseTo: 300 }), profile('STRONG', 'TIGHT_AGGRESSIVE'), () => 0.01)
   assert.notEqual(action.type, 'fold')
@@ -175,7 +186,7 @@ test('TAG and LAG aliases map to distinct aggressive style behavior', () => {
   assert.notDeepEqual(tag, lag)
 })
 
-test('all twelve strategy profiles produce bounded, legal decisions in 2/3/6-player contexts', () => {
+test('all strategy profiles produce bounded, legal decisions in 2/3/6-player contexts', () => {
   const profiles = [
     ['WEAK', 'LOOSE_PASSIVE'], ['WEAK', 'TIGHT_PASSIVE'], ['WEAK', 'LOOSE_AGGRESSIVE'],
     ['CASUAL', 'BALANCED'], ['CASUAL', 'TIGHT_AGGRESSIVE'], ['CASUAL', 'LOOSE_PASSIVE'],

@@ -76,7 +76,19 @@ export const ONLINE_POKER_BOT_PROFILES: readonly BotProfile[] = Object.freeze([
   { botKey: 'online-bot-09', nickname: 'Rin Arden', skillTier: 'REGULAR', playStyle: 'BALANCED' },
   { botKey: 'online-bot-10', nickname: 'Oleg Stone', skillTier: 'STRONG', playStyle: 'TIGHT_PASSIVE' },
   { botKey: 'online-bot-11', nickname: 'Vera Moss', skillTier: 'STRONG', playStyle: 'TIGHT_AGGRESSIVE' },
-  { botKey: 'online-bot-12', nickname: 'Kai River', skillTier: 'STRONG', playStyle: 'BALANCED' }
+  { botKey: 'online-bot-12', nickname: 'Kai River', skillTier: 'STRONG', playStyle: 'BALANCED' },
+  { botKey: 'online-bot-13', nickname: 'Luca Gray', skillTier: 'WEAK', playStyle: 'LOOSE_PASSIVE' },
+  { botKey: 'online-bot-14', nickname: 'Eva Brooks', skillTier: 'WEAK', playStyle: 'TIGHT_AGGRESSIVE' },
+  { botKey: 'online-bot-15', nickname: 'Theo Lane', skillTier: 'CASUAL', playStyle: 'LOOSE_AGGRESSIVE' },
+  { botKey: 'online-bot-16', nickname: 'Maya Quinn', skillTier: 'CASUAL', playStyle: 'TIGHT_PASSIVE' },
+  { botKey: 'online-bot-17', nickname: 'Noah Wells', skillTier: 'CASUAL', playStyle: 'BALANCED' },
+  { botKey: 'online-bot-18', nickname: 'Zoe Mills', skillTier: 'REGULAR', playStyle: 'LOOSE_PASSIVE' },
+  { botKey: 'online-bot-19', nickname: 'Eli Carter', skillTier: 'REGULAR', playStyle: 'TIGHT_AGGRESSIVE' },
+  { botKey: 'online-bot-20', nickname: 'Iris Cole', skillTier: 'REGULAR', playStyle: 'BALANCED' },
+  { botKey: 'online-bot-21', nickname: 'Milo Reed', skillTier: 'STRONG', playStyle: 'LOOSE_AGGRESSIVE' },
+  { botKey: 'online-bot-22', nickname: 'Aria Shaw', skillTier: 'STRONG', playStyle: 'TIGHT_PASSIVE' },
+  { botKey: 'online-bot-23', nickname: 'Finn Blake', skillTier: 'REGULAR', playStyle: 'TIGHT_PASSIVE' },
+  { botKey: 'online-bot-24', nickname: 'Nora Hayes', skillTier: 'CASUAL', playStyle: 'LOOSE_PASSIVE' }
 ])
 
 const BOT_PASSWORD_SENTINEL = 'bot-account-disabled'

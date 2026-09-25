@@ -1,5 +1,5 @@
 import { prisma } from '../db/client'
-import { applyRatingChange, calculateTableRatingChange } from '../../app/utils/ratingCalculations'
+import { applyRatingChange, calculateTableRatingChange, calculateZeroSumTableRatingDeltas } from '../../app/utils/ratingCalculations'
 import type { OnlineRoomState } from '../utils/pokerOnlineRoom'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -33,12 +33,21 @@ export async function recordFinalizedOnlinePokerHand(state: OnlineRoomState): Pr
   const winnerIds = new Set(result.players.filter(player => player.payout > 0).map(player => player.playerId))
   const splitWinnerIds = new Set(result.pots.filter(pot => pot.split).flatMap(pot => pot.winnerIds))
   return prisma.$transaction(async tx => {
+    const participantIds = hand.players.filter(player => UUID.test(player.playerId)).map(player => player.playerId)
+    const accounts = await tx.user.findMany({ where: { id: { in: participantIds } }, select: { id: true, tableRating: true } })
+    const ratingDeltas = calculateZeroSumTableRatingDeltas(participantIds, new Map(accounts.map(account => [account.id, account.tableRating])), result.pots.map(pot => ({
+      amount: pot.amount,
+      contributorPlayerIds: pot.contributorPlayerIds,
+      eligiblePlayerIds: pot.eligiblePlayerIds,
+      foldedPlayerIds: pot.foldedPlayerIds,
+      winnerIds: pot.winnerIds
+    })))
     let recorded = 0
     for (const player of [...hand.players].sort((a, b) => a.playerId.localeCompare(b.playerId))) {
       if (!UUID.test(player.playerId)) continue
       const won = winnerIds.has(player.playerId)
       const { hadAction, hadRaise, hadAllIn } = getOnlineHandRatingActionFacts(hand, player.playerId)
-      const { delta, reason } = calculateTableRatingChange({
+      const { reason } = calculateTableRatingChange({
         won,
         split: won && splitWinnerIds.has(player.playerId),
         folded: player.status === 'FOLDED',
@@ -46,6 +55,7 @@ export async function recordFinalizedOnlinePokerHand(state: OnlineRoomState): Pr
         hadRaise,
         hadAllIn
       })
+      const delta = ratingDeltas.get(player.playerId) ?? 0
       const alreadyRecorded = await tx.onlinePokerRatingEvent.findUnique({
         where: { userId_handId: { userId: player.playerId, handId: hand.handId } },
         select: { id: true }

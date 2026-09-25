@@ -38,6 +38,7 @@ import {
 } from './onlineRoomRuntimeStore'
 import { publishOnlineRoomChanged } from './onlineRoomRealtimeService'
 import { getOnlineRoomPresenceService, OnlineRoomPresenceError, type OnlineRoomPresenceService } from './onlineRoomPresenceService'
+import { getOnlinePokerOpponentProfileService } from './onlinePokerOpponentProfileService'
 import { isDatabaseUnavailableError } from '../utils/databaseErrors'
 import { resolveRoomSecretPepper } from '../utils/roomSecretPepper'
 import {
@@ -146,6 +147,9 @@ export type OnlinePokerBotDecisionSnapshot = Readonly<{
   toCall: number
   minRaiseTo: number
   raiseReopened: boolean
+  opponentAllInFrequency: number
+  opponentRaiseFrequency: number
+  opponentFoldFrequency: number
 }>
 
 export type ReadyAuthenticatedOnlineRoomInput = OnlineRoomConcurrencyInput & Readonly<{
@@ -753,12 +757,23 @@ export async function getOnlinePokerBotDecisionSnapshot(userId: string, code: st
   if (!player) fail('NOT_FOUND', 'The bot is not seated in this room.', 404)
   const result = await safeOnlineRoomResult(record.state, userId, record.runtimeRevision, metadata.status === 'DRAINING')
   const playerLevel = hand.lastActedAtBet.find(level => level.playerId === userId)
+  const opponents = hand.players.filter(candidate => candidate.playerId !== userId)
+  const profiles = await Promise.all(opponents.map(opponent => Promise.resolve().then(() => getOnlinePokerOpponentProfileService().getProfile(opponent.playerId)).catch(() => null)))
+  const observedProfiles = profiles.filter((profile): profile is NonNullable<typeof profile> => Boolean(profile && profile.sampleSize > 0))
+  const opponentAllInFrequency = observedProfiles.length
+    ? observedProfiles.reduce((sum, profile) => sum + profile.allInFrequency, 0) / observedProfiles.length
+    : hand.actionSummary.filter(summary => summary.playerId !== userId && summary.hadAllIn).length / Math.max(1, opponents.length)
+  const opponentRaiseFrequency = observedProfiles.length ? observedProfiles.reduce((sum, profile) => sum + profile.raiseFrequency, 0) / observedProfiles.length : 0
+  const opponentFoldFrequency = observedProfiles.length ? observedProfiles.reduce((sum, profile) => sum + profile.foldFrequency, 0) / observedProfiles.length : 0
   return Object.freeze({
     room: result.room,
     legalActions: getLegalBettingActions(hand, userId),
     toCall: getToCall(hand, userId),
     minRaiseTo: getMinimumRaiseTo(hand),
-    raiseReopened: !playerLevel || hand.currentBet - playerLevel.bet >= hand.lastFullRaiseSize
+    raiseReopened: !playerLevel || hand.currentBet - playerLevel.bet >= hand.lastFullRaiseSize,
+    opponentAllInFrequency,
+    opponentRaiseFrequency,
+    opponentFoldFrequency
   })
 }
 
@@ -1396,6 +1411,7 @@ export async function applyAuthenticatedOnlineRoomAction(
     { playerId: userId, actionId: input.actionId, fingerprint: actionFingerprint(input) },
     'HAND_ACTION'
   )
+  if (!updated.duplicate) void Promise.resolve().then(() => getOnlinePokerOpponentProfileService().recordPublicAction(userId, input.action.type)).catch(() => undefined)
   if (!updated.duplicate) await reconcileTurnTimer(updated.result, dependencies, updated.runtimeRevision)
   return Object.freeze({ ...updated.result, duplicate: updated.duplicate })
 }

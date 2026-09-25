@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import Redis from 'ioredis'
 
 export const ONLINE_POKER_BOT_LEASE_PREFIX = 'pocker:online-bot-lease:v1:'
+export const ONLINE_POKER_BOT_ROOM_COOLDOWN_PREFIX = 'pocker:online-bot-room-cooldown:v1:'
 export const ONLINE_POKER_BOT_LEASE_TTL_MS = 8_000
 
 export type OnlinePokerBotLease = Readonly<{
@@ -68,6 +69,9 @@ export class OnlinePokerBotLeaseService {
   }
 
   private key(botKey: string): string { return `${this.keyPrefix}${safeKeyPart(botKey, 'Bot key')}` }
+  private roomCooldownKey(botKey: string, roomCode: string): string {
+    return `${ONLINE_POKER_BOT_ROOM_COOLDOWN_PREFIX}${safeKeyPart(botKey, 'Bot key')}:${safeKeyPart(roomCode, 'Room code')}`
+  }
   private fenceKey(botKey: string): string { return `${this.key(botKey)}:fence` }
 
   private async connect(): Promise<void> {
@@ -100,6 +104,17 @@ export class OnlinePokerBotLeaseService {
   async release(lease: OnlinePokerBotLease): Promise<boolean> {
     await this.connect()
     return Number(await this.redis.eval(RELEASE_SCRIPT, 1, lease.leaseKey, lease.token)) === 1
+  }
+
+  async setRoomCooldown(botKey: string, roomCode: string, ttlMs: number): Promise<void> {
+    if (!Number.isSafeInteger(ttlMs) || ttlMs < 1_000 || ttlMs > 15 * 60_000) throw new Error('Bot room cooldown is out of range.')
+    await this.connect()
+    await this.redis.set(this.roomCooldownKey(botKey, roomCode), '1', 'PX', ttlMs)
+  }
+
+  async isRoomCoolingDown(botKey: string, roomCode: string): Promise<boolean> {
+    await this.connect()
+    return await this.redis.exists(this.roomCooldownKey(botKey, roomCode)) === 1
   }
 
   async disconnect(): Promise<void> { if (this.ownsRedis) this.redis.disconnect() }

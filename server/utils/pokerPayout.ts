@@ -12,6 +12,8 @@ export type PlayerPayout = Readonly<{
 export type PotPayout = Readonly<{
   potId: number
   amount: number
+  contributorPlayerIds: readonly string[]
+  eligiblePlayerIds: readonly string[]
   winnerIds: readonly string[]
   split: boolean
   oddChipCount: number
@@ -141,6 +143,8 @@ function distributePot(
   return Object.freeze({
     potId: pot.id,
     amount: pot.amount,
+    contributorPlayerIds: Object.freeze([...pot.contributorPlayerIds]),
+    eligiblePlayerIds: Object.freeze([...pot.eligiblePlayerIds]),
     winnerIds: Object.freeze([...orderedWinners]),
     split: orderedWinners.length > 1,
     oddChipCount,

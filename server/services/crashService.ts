@@ -23,7 +23,7 @@ export type BotRocketSnapshot = Readonly<{
   roundId: string
   phase: 'betting' | 'flying' | 'crashed'
   bettingMsRemaining: number
-  bots: Readonly<Record<string, Readonly<{ balance: number; hasBet: boolean }>>>
+  bots: Readonly<Record<string, Readonly<{ balance: number; hasBet: boolean; recentNet?: number; recentCount?: number }>>>
 }>
 
 function botLeaseError() {
@@ -78,10 +78,25 @@ export async function getBotRocketSnapshot(
     })
     const bets = await tx.crashBet.findMany({ where: { roundId: round.id, userId: { in: ids } }, select: { userId: true } })
     const alreadyBet = new Set(bets.map(bet => bet.userId))
-    const bots: Record<string, { balance: number; hasBet: boolean }> = Object.create(null)
+    const recent = ids.length ? await tx.$queryRaw<Array<{ user_id: string; recent_net: bigint; recent_count: bigint }>>`
+      SELECT bots.user_id::text, SUM(history.payout - history.stake)::bigint AS recent_net, COUNT(*)::bigint AS recent_count
+      FROM unnest(${ids}::uuid[]) AS bots(user_id)
+      CROSS JOIN LATERAL (
+        SELECT b.payout, b.stake
+        FROM crash_bets b
+        JOIN crash_rounds r ON r.id = b.round_id
+        WHERE b.user_id = bots.user_id AND r.phase = 'crashed'
+        ORDER BY b.created_at DESC
+        LIMIT 5
+      ) history
+      GROUP BY bots.user_id
+    ` : []
+    const recentByUser = new Map(recent.map(item => [item.user_id, { recentNet: Number(item.recent_net), recentCount: Number(item.recent_count) }]))
+    const bots: Record<string, { balance: number; hasBet: boolean; recentNet: number; recentCount: number }> = Object.create(null)
     for (const user of users) {
       if (!user.wallet) continue
-      bots[user.id] = { balance: Number(user.wallet.balance), hasBet: alreadyBet.has(user.id) }
+      const history = recentByUser.get(user.id)
+      bots[user.id] = { balance: Number(user.wallet.balance), hasBet: alreadyBet.has(user.id), recentNet: history?.recentNet ?? 0, recentCount: history?.recentCount ?? 0 }
     }
     const phase = round.phase
     if (phase !== 'betting' && phase !== 'flying' && phase !== 'crashed') throw new Error('Rocket round phase is invalid.')

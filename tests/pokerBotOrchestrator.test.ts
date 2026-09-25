@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { OnlinePokerBotOrchestrator, readOnlinePokerBotOrchestratorConfig, type OnlinePokerBotOrchestratorAdapter } from '../server/services/onlinePokerBotOrchestrator'
+import { OnlinePokerBotOrchestrator, onlinePokerBotRotationMode, readOnlinePokerBotOrchestratorConfig, type OnlinePokerBotOrchestratorAdapter } from '../server/services/onlinePokerBotOrchestrator'
 import type { PersistentBotIdentity } from '../server/services/botIdentityService'
+import { ONLINE_POKER_BOT_PROFILES } from '../server/services/botIdentityService'
 
 const baseConfig = (overrides: Partial<ReturnType<typeof readOnlinePokerBotOrchestratorConfig>> = {}) => ({
   enabled: true, minActiveBots: 1, maxActiveBots: 1, maxBotsPerRoom: 3, maxBotCreatedRooms: 1,
@@ -33,6 +34,7 @@ function harness(overrides: {
   findRoom?: (id: string) => string | null
   getRoom?: (id: string, code: string) => any
   markDraining?: (roomId: string) => Promise<boolean>
+  coolingRoom?: string
   decision?: (id: string, code: string) => any
   random?: () => number
 } = {}) {
@@ -60,6 +62,7 @@ function harness(overrides: {
     leave: async (...args) => { calls.push({ method: 'leave', args }); return { room: room() } as any }
   }
   const held = new Map<string, any>()
+  const cooldowns: string[] = []
   const lease = {
     acquire: async (botKey: string) => {
       if (held.has(botKey)) return null
@@ -68,7 +71,9 @@ function harness(overrides: {
       return item
     },
     renew: async (item: any) => held.get(item.botKey)?.token === item.token,
-    release: async (item: any) => held.delete(item.botKey)
+    release: async (item: any) => held.delete(item.botKey),
+    setRoomCooldown: async (_botKey: string, code: string) => { cooldowns.push(code) },
+    isRoomCoolingDown: async (_botKey: string, code: string) => code === overrides.coolingRoom
   }
   let now = 1_000_000
   const orchestrator = new OnlinePokerBotOrchestrator({
@@ -76,7 +81,7 @@ function harness(overrides: {
     now: () => now, random: overrides.random ?? (() => 0),
     log: (event, fields) => { logs.push({ event, fields }) }
   })
-  return { orchestrator, calls, logs, setNow: (value: number) => { now = value }, adapter }
+  return { orchestrator, calls, logs, cooldowns, setNow: (value: number) => { now = value }, adapter }
 }
 
 function codedConflict() {
@@ -106,6 +111,59 @@ test('feature flag defaults off and disabled tick performs no bot or room work',
   })
   await disabled.tick()
   assert.equal(h.calls.length, 0)
+})
+
+test('expanded bootstrap and defaults remain bounded at 24 identities, 2 seeded rooms and 3-5 bots', () => {
+  const config = readOnlinePokerBotOrchestratorConfig({})
+  assert.equal(ONLINE_POKER_BOT_PROFILES.length, 24)
+  assert.equal(config.minActiveBots, 8)
+  assert.equal(config.maxActiveBots, 12)
+  assert.equal(config.maxBotCreatedRooms, 2)
+  assert.equal(config.maxBotsPerRoom, 5)
+})
+
+test('human-owned PUBLIC room gets a bot before an older bot-seeded room', async () => {
+  const identity = bot('online-bot-01')
+  const botOwned = seatedRoom(identity.id, { roomCode: 'BOT111', ownerId: identity.id })
+  const humanOwned = room({ roomCode: 'HUM222', ownerId: 'human-id', pokerTable: { ...room().pokerTable, players: [{ playerId: 'human-id', seat: 1, stack: 1000, connected: true, ready: false, sittingOut: false }] } })
+  const h = harness({
+    bots: [identity],
+    rooms: [
+      { code: 'BOT111', playerCount: 1, maxPlayers: 6, status: 'WAITING', createdAt: new Date(0).toISOString(), startingStack: 1000, smallBlind: 5, bigBlind: 10 },
+      { code: 'HUM222', playerCount: 1, maxPlayers: 6, status: 'WAITING', createdAt: new Date(1).toISOString(), startingStack: 1000, smallBlind: 5, bigBlind: 10 }
+    ],
+    getRoom: (_id, code) => code === 'BOT111' ? botOwned : humanOwned
+  })
+  await h.orchestrator.tick()
+  assert.equal(h.calls.filter(call => call.method === 'join').length, 1)
+  assert.equal(h.calls.find(call => call.method === 'join')?.args[1], 'HUM222')
+})
+
+test('rotation assigns both poker and rocket phases with minute-scale dwell windows', () => {
+  const config = readOnlinePokerBotOrchestratorConfig({})
+  const modes = new Set(Array.from({ length: 30 }, (_, index) => onlinePokerBotRotationMode('online-bot-01', index * 30_000, config)))
+  assert.deepEqual([...modes].sort(), ['POKER', 'ROCKET'])
+})
+
+test('leaving a room writes a cooldown and the next tick does not rejoin it', async () => {
+  const identity = bot('online-bot-01')
+  const base = seatedRoom(identity.id)
+  const broke = { ...base, pokerTable: { ...base.pokerTable, players: base.pokerTable.players.map(player => ({ ...player, stack: 0 })) } }
+  const h = harness({
+    findRoom: () => 'AB2345',
+    getRoom: () => broke
+  })
+  await h.orchestrator.tick()
+  assert.equal(h.calls.some(call => call.method === 'leave'), true)
+  assert.deepEqual(h.cooldowns, ['AB2345'])
+  const candidates = [{ code: 'AB2345', playerCount: 1, maxPlayers: 6, status: 'WAITING' as const, createdAt: new Date(0).toISOString(), startingStack: 1000, smallBlind: 5, bigBlind: 10 }]
+  const adapter = { ...h.adapter, listPublicRooms: async () => candidates, findSeatedRoom: async () => null, getRoom: async () => ({ room: room() }) as any }
+  const subject = new OnlinePokerBotOrchestrator({ config: baseConfig({ maxBotCreatedRooms: 0 }), adapter, lease: {
+    acquire: async botKey => ({ botKey, ownerId: 'worker', token: botKey, leaseKey: botKey }), renew: async () => true,
+    release: async () => true, isRoomCoolingDown: async () => true
+  }, random: () => 0 })
+  await subject.tick()
+  assert.equal(h.calls.filter(call => call.method === 'join').length, 0)
 })
 
 test('bot joins an old public room through adapter join and respects room bot cap', async () => {
@@ -247,21 +305,64 @@ test('private room candidate is never joined or created as a private room', asyn
 })
 
 test('bot-created room is public, uses bounded settings, and is limited per tick', async () => {
-  const h = harness({ bots: [bot('online-bot-01'), bot('online-bot-02', 'bot-2-id')] })
+  const h = harness({ bots: [bot('online-bot-01'), bot('online-bot-02', 'bot-2-id'), bot('online-bot-03', 'bot-3-id')] })
   await h.orchestrator.tick()
   assert.equal(h.calls.filter(call => call.method === 'create').length, 1)
   const input = h.calls.find(call => call.method === 'create')!.args[1]
-  assert.deepEqual(input, { visibility: 'PUBLIC', startingStack: 10_000, smallBlind: 5, bigBlind: 10 })
+  assert.deepEqual(input, { visibility: 'PUBLIC', startingStack: 10_000, smallBlind: 10, bigBlind: 20 })
 })
 
 test('bot-created room uses a funded 5k stack when the 10k choice is unavailable', async () => {
   const first = { ...bot('online-bot-01'), balance: 5_000 }
   const second = { ...bot('online-bot-02', 'bot-2-id'), balance: 5_000 }
-  const h = harness({ bots: [first, second], random: () => 0.9 })
+  const third = { ...bot('online-bot-03', 'bot-3-id'), balance: 5_000 }
+  const h = harness({ bots: [first, second, third], random: () => 0.9 })
   await h.orchestrator.tick()
   const created = h.calls.filter(call => call.method === 'create')
   assert.equal(created.length, 1)
   assert.equal(created[0]!.args[1].startingStack, 5_000)
+})
+
+test('bot-created room presets vary while requiring at least three funded identities', async () => {
+  const bots = [bot('online-bot-01'), bot('online-bot-02', 'bot-2-id'), bot('online-bot-03', 'bot-3-id')]
+  const draws = [0.1, 0, 0.1, 0.6]
+  const h = harness({ bots, random: () => draws.shift() ?? 0 })
+  await h.orchestrator.tick()
+  await h.orchestrator.tick()
+  const presets = h.calls.filter(call => call.method === 'create').map(call => call.args[1])
+  assert.equal(presets.length, 2)
+  assert.notDeepEqual(presets[0], presets[1])
+})
+
+test('orchestrator does not create another room when the two-room target is met', async () => {
+  const h = harness({ bots: [bot('online-bot-01'), bot('online-bot-02', 'bot-2-id'), bot('online-bot-03', 'bot-3-id')] })
+  const adapter = { ...h.adapter, countBotCreatedRooms: async () => 2 }
+  const subject = new OnlinePokerBotOrchestrator({ config: baseConfig(), adapter, lease: {
+    acquire: async botKey => ({ botKey, ownerId: 'worker', token: botKey, leaseKey: botKey }), renew: async () => true, release: async () => true
+  }, random: () => 0 })
+  await subject.tick()
+  assert.equal(h.calls.some(call => call.method === 'create'), false)
+})
+
+test('bot-created room presets vary while requiring at least three funded identities', async () => {
+  const bots = [bot('online-bot-01'), bot('online-bot-02', 'bot-2-id'), bot('online-bot-03', 'bot-3-id')]
+  const draws = [0.1, 0, 0.1, 0.6]
+  const h = harness({ bots, random: () => draws.shift() ?? 0 })
+  await h.orchestrator.tick()
+  await h.orchestrator.tick()
+  const presets = h.calls.filter(call => call.method === 'create').map(call => call.args[1])
+  assert.equal(presets.length, 2)
+  assert.notDeepEqual(presets[0], presets[1])
+})
+
+test('orchestrator does not create another room when the two-room target is met', async () => {
+  const h = harness({ bots: [bot('online-bot-01'), bot('online-bot-02', 'bot-2-id'), bot('online-bot-03', 'bot-3-id')] })
+  const adapter = { ...h.adapter, countBotCreatedRooms: async () => 2 }
+  const subject = new OnlinePokerBotOrchestrator({ config: baseConfig(), adapter, lease: {
+    acquire: async botKey => ({ botKey, ownerId: 'worker', token: botKey, leaseKey: botKey }), renew: async () => true, release: async () => true
+  }, random: () => 0 })
+  await subject.tick()
+  assert.equal(h.calls.some(call => call.method === 'create'), false)
 })
 
 test('bot cannot create an unfunded room below 5k despite a legacy 1k config', async () => {

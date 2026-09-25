@@ -1,7 +1,7 @@
 import type { Prisma, Player } from '@prisma/client'
 import { adjustUserWallet } from './walletService'
 import { prisma } from '../db/client'
-import { applyRatingChange, calculateTableRatingChange } from '../../app/utils/ratingCalculations'
+import { applyRatingChange, calculateTableRatingChange, calculateZeroSumTableRatingDeltas, type RatingPotResult } from '../../app/utils/ratingCalculations'
 
 type Tx = Prisma.TransactionClient
 
@@ -75,9 +75,15 @@ export async function unlockBalanceAchievements(tx: Tx, userId: string, balance:
   for (const code of codes) await unlockAchievement(tx, userId, code)
 }
 
-export async function updateTableRatingAndAchievements(tx: Tx, handId: string, players: Player[], winnerIds: string[]) {
+export async function updateTableRatingAndAchievements(tx: Tx, handId: string, players: Player[], winnerIds: string[], ratingPots?: readonly RatingPotResult[]) {
   await ensureAchievementDefinitions(tx)
   const eligible = players.filter(player => player.userId && player.memberId && player.status !== 'waiting' && player.status !== 'out')
+  const ratingUsers = await tx.user.findMany({ where: { id: { in: eligible.map(player => player.userId!) } }, select: { id: true, tableRating: true } })
+  const ratingDeltas = calculateZeroSumTableRatingDeltas(
+    eligible.map(player => player.userId!),
+    new Map(ratingUsers.map(user => [user.id, user.tableRating])),
+    ratingPots ?? [{ amount: 1, contributorPlayerIds: eligible.map(player => player.userId!), eligiblePlayerIds: eligible.map(player => player.userId!), winnerIds: winnerIds.map(id => players.find(player => player.id === id)?.userId).filter((id): id is string => Boolean(id)) }]
+  )
   const actions = await tx.playerAction.findMany({ where: { handId, status: { in: ['applied', 'approved'] } }, orderBy: { createdAt: 'asc' } })
   for (const player of eligible) {
     const userId = player.userId!
@@ -86,7 +92,7 @@ export async function updateTableRatingAndAchievements(tx: Tx, handId: string, p
     const split = won && winnerIds.length > 1
     const hadRaise = ownActions.some(action => action.type === 'raise' || action.type === 'bet')
     const hadAllIn = ownActions.some(action => action.type === 'all-in')
-    const { delta, reason } = calculateTableRatingChange({
+    const { reason } = calculateTableRatingChange({
       won,
       split,
       folded: player.status === 'folded',
@@ -94,6 +100,7 @@ export async function updateTableRatingAndAchievements(tx: Tx, handId: string, p
       hadRaise,
       hadAllIn
     })
+    const delta = ratingDeltas.get(userId) ?? 0
     const event = await tx.tableRatingEvent.createMany({ data: [{ userId, handId, delta, reason }], skipDuplicates: true })
     if (!event.count) continue
     const account = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { balance: true, tableRating: true, tableHandsWon: true, tableCurrentStreak: true, tableBestStreak: true } })

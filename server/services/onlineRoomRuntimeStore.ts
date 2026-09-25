@@ -316,6 +316,9 @@ function serializeFinalizedHand(result: FinalizedHandResult): JsonRecord {
     pots: result.pots.map(pot => ({
       potId: pot.potId,
       amount: pot.amount,
+      contributorPlayerIds: [...pot.contributorPlayerIds],
+      eligiblePlayerIds: [...pot.eligiblePlayerIds],
+      foldedPlayerIds: [...pot.foldedPlayerIds],
       winnerIds: [...pot.winnerIds],
       split: pot.split,
       oddChipCount: pot.oddChipCount,
@@ -355,6 +358,15 @@ function deserializeFinalizedHand(value: unknown): FinalizedHandResult {
   const pots = requireArray(raw.pots, 'Finalized pots').map(item => {
     const pot = requireRecord(item, 'Finalized pot')
     const winnerIds = requireArray(pot.winnerIds, 'Finalized winners').map((id, index) => requireString(id, `Winner ${index}`))
+    const contributorPlayerIds = pot.contributorPlayerIds === undefined
+      ? [...(pot.eligiblePlayerIds === undefined ? winnerIds : requireArray(pot.eligiblePlayerIds, 'Finalized eligible players').map((id, index) => requireString(id, `Eligible player ${index}`)))]
+      : requireArray(pot.contributorPlayerIds, 'Finalized contributors').map((id, index) => requireString(id, `Contributor ${index}`))
+    const eligiblePlayerIds = pot.eligiblePlayerIds === undefined
+      ? [...winnerIds]
+      : requireArray(pot.eligiblePlayerIds, 'Finalized eligible players').map((id, index) => requireString(id, `Eligible player ${index}`))
+    const foldedPlayerIds = pot.foldedPlayerIds === undefined
+      ? []
+      : requireArray(pot.foldedPlayerIds, 'Finalized folded players').map((id, index) => requireString(id, `Folded player ${index}`))
     const oddChipRecipients = requireArray(pot.oddChipRecipients, 'Odd-chip recipients').map((id, index) => requireString(id, `Odd-chip recipient ${index}`))
     const payouts = requireArray(pot.payouts, 'Finalized payouts').map(item => {
       const payout = requireRecord(item, 'Finalized payout')
@@ -363,6 +375,9 @@ function deserializeFinalizedHand(value: unknown): FinalizedHandResult {
     return Object.freeze({
       potId: requireSafeInteger(pot.potId, 'Finalized pot id', 1),
       amount: requireSafeInteger(pot.amount, 'Finalized pot amount', 1),
+      contributorPlayerIds: Object.freeze(contributorPlayerIds),
+      eligiblePlayerIds: Object.freeze(eligiblePlayerIds),
+      foldedPlayerIds: Object.freeze(foldedPlayerIds),
       winnerIds: Object.freeze(winnerIds),
       split: requireBoolean(pot.split, 'Finalized pot split'),
       oddChipCount: requireSafeInteger(pot.oddChipCount, 'Finalized odd-chip count'),

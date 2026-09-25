@@ -154,6 +154,9 @@ function finishUncontested(
   const potPayouts = built.pots.map(pot => Object.freeze({
     potId: pot.id,
     amount: pot.amount,
+    contributorPlayerIds: Object.freeze([...pot.contributorPlayerIds]),
+    eligiblePlayerIds: Object.freeze([...pot.eligiblePlayerIds]),
+    foldedPlayerIds: Object.freeze(pot.contributorPlayerIds.filter(playerId => winnerStatus.get(playerId) === 'FOLDED')),
     winnerIds: Object.freeze([winnerId]),
     split: false,
     oddChipCount: 0,

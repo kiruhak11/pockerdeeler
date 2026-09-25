@@ -22,6 +22,9 @@ export type FinalizedShowdownPlayer = Readonly<{
 export type FinalizedShowdownPot = Readonly<{
   potId: number
   amount: number
+  contributorPlayerIds: readonly string[]
+  eligiblePlayerIds: readonly string[]
+  foldedPlayerIds: readonly string[]
   winnerIds: readonly string[]
   split: boolean
   oddChipCount: number
@@ -108,6 +111,9 @@ export function buildFinalizedHandResult(hand: Readonly<Pick<InternalHandState, 
     pots: Object.freeze(result.pots.map(pot => Object.freeze({
       potId: pot.potId,
       amount: pot.amount,
+      contributorPlayerIds: Object.freeze([...pot.contributorPlayerIds]),
+      eligiblePlayerIds: Object.freeze([...pot.eligiblePlayerIds]),
+      foldedPlayerIds: Object.freeze(pot.contributorPlayerIds.filter(playerId => hand.players.some(player => player.playerId === playerId && player.status === 'FOLDED'))),
       winnerIds: Object.freeze([...pot.winnerIds]),
       split: pot.split,
       oddChipCount: pot.oddChipCount,

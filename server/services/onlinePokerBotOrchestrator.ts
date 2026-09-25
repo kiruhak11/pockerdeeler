@@ -23,6 +23,11 @@ export type OnlinePokerBotOrchestratorConfig = Readonly<{
   createRoomProbability: number
   rocketPlayProbability?: number
   rocketAllInChance?: number
+  rotationPokerMinMs?: number
+  rotationPokerMaxMs?: number
+  rotationRocketMinMs?: number
+  rotationRocketMaxMs?: number
+  sameRoomCooldownMs?: number
 }>
 
 export function readOnlinePokerBotOrchestratorConfig(env: NodeJS.ProcessEnv = process.env): OnlinePokerBotOrchestratorConfig {
@@ -39,14 +44,14 @@ export function readOnlinePokerBotOrchestratorConfig(env: NodeJS.ProcessEnv = pr
   const smallBlind = integer('BOT_ORCHESTRATOR_SMALL_BLIND', 5, 1, 1_000_000)
   const configuredBigBlind = integer('BOT_ORCHESTRATOR_BIG_BLIND', 10, 1, 2_000_000)
   const bigBlind = configuredBigBlind >= smallBlind ? configuredBigBlind : Math.max(10, smallBlind * 2)
-  const maxActiveBots = integer('BOT_ORCHESTRATOR_MAX_ACTIVE_BOTS', 6, 1, 12)
-  const minActiveBots = Math.min(maxActiveBots, integer('BOT_ORCHESTRATOR_MIN_ACTIVE_BOTS', 2, 1, 12))
+  const maxActiveBots = integer('BOT_ORCHESTRATOR_MAX_ACTIVE_BOTS', 12, 1, 24)
+  const minActiveBots = Math.min(maxActiveBots, integer('BOT_ORCHESTRATOR_MIN_ACTIVE_BOTS', 8, 1, 24))
   return Object.freeze({
     enabled: env.BOT_ORCHESTRATOR_ENABLED === 'true',
     minActiveBots,
     maxActiveBots,
-    maxBotsPerRoom: integer('BOT_ORCHESTRATOR_MAX_BOTS_PER_ROOM', 3, 1, 6),
-    maxBotCreatedRooms: integer('BOT_ORCHESTRATOR_MAX_CREATED_ROOMS', 1, 0, 6),
+    maxBotsPerRoom: integer('BOT_ORCHESTRATOR_MAX_BOTS_PER_ROOM', 5, 1, 6),
+    maxBotCreatedRooms: integer('BOT_ORCHESTRATOR_MAX_CREATED_ROOMS', 2, 0, 6),
     tickIntervalMs: integer('BOT_ORCHESTRATOR_TICK_MS', 1_000, 250, 30_000),
     activityWindowMs: integer('BOT_ORCHESTRATOR_ACTIVITY_WINDOW_MS', 5 * 60_000, 60_000, 24 * 60 * 60_000),
     startingStack: integer('BOT_ORCHESTRATOR_STARTING_STACK', 5_000, 1, 2_000_000_000),
@@ -55,8 +60,13 @@ export function readOnlinePokerBotOrchestratorConfig(env: NodeJS.ProcessEnv = pr
     bigBlind,
     quickJoinProbability: probability('BOT_ORCHESTRATOR_QUICK_JOIN_CHANCE', 0.02),
     createRoomProbability: probability('BOT_ORCHESTRATOR_CREATE_CHANCE', 0.01),
-    rocketPlayProbability: probability('BOT_ORCHESTRATOR_ROCKET_CHANCE', 0.25),
-    rocketAllInChance: probability('BOT_ORCHESTRATOR_ROCKET_ALL_IN_CHANCE', 0.08)
+    rocketPlayProbability: probability('BOT_ORCHESTRATOR_ROCKET_CHANCE', 0.8),
+    rocketAllInChance: probability('BOT_ORCHESTRATOR_ROCKET_ALL_IN_CHANCE', 0.08),
+    rotationPokerMinMs: integer('BOT_ORCHESTRATOR_POKER_DWELL_MIN_MS', 180_000, 60_000, 30 * 60_000),
+    rotationPokerMaxMs: integer('BOT_ORCHESTRATOR_POKER_DWELL_MAX_MS', 300_000, 60_000, 30 * 60_000),
+    rotationRocketMinMs: integer('BOT_ORCHESTRATOR_ROCKET_DWELL_MIN_MS', 60_000, 30_000, 15 * 60_000),
+    rotationRocketMaxMs: integer('BOT_ORCHESTRATOR_ROCKET_DWELL_MAX_MS', 120_000, 30_000, 15 * 60_000),
+    sameRoomCooldownMs: integer('BOT_ORCHESTRATOR_ROOM_COOLDOWN_MS', 120_000, 10_000, 15 * 60_000)
   })
 }
 
@@ -67,6 +77,9 @@ export type BotActionDecisionSnapshot = Readonly<{
   toCall: number
   minRaiseTo: number
   raiseReopened: boolean
+  opponentAllInFrequency?: number
+  opponentRaiseFrequency?: number
+  opponentFoldFrequency?: number
 }>
 
 export type OnlinePokerBotOrchestratorAdapter = Readonly<{
@@ -92,7 +105,7 @@ export type OnlinePokerBotOrchestratorAdapter = Readonly<{
 
 export type OnlinePokerBotOrchestratorDependencies = Readonly<{
   config: OnlinePokerBotOrchestratorConfig
-  lease: Pick<OnlinePokerBotLeaseService, 'acquire' | 'renew' | 'release'>
+  lease: Pick<OnlinePokerBotLeaseService, 'acquire' | 'renew' | 'release'> & Partial<Pick<OnlinePokerBotLeaseService, 'setRoomCooldown' | 'isRoomCoolingDown'>>
   adapter: OnlinePokerBotOrchestratorAdapter
   now?: () => number
   random?: () => number
@@ -111,10 +124,32 @@ type PendingRocketBet = Readonly<{
 
 const ROCKET_MAX_BET = 1_000_000
 
-function botCreatedRoomStacks(config: OnlinePokerBotOrchestratorConfig): readonly [number, number] {
-  const configured = [config.startingStack, config.highStartingStack ?? 10_000]
-    .map(value => value === 10_000 ? 10_000 : 5_000)
-  return [Math.min(...configured), Math.max(...configured)]
+function botCreatedRoomPresets(config: OnlinePokerBotOrchestratorConfig): readonly Readonly<{ startingStack: number; smallBlind: number; bigBlind: number }>[] {
+  const low = config.startingStack <= 5_000 ? 5_000 : 10_000
+  const high = (config.highStartingStack ?? 10_000) >= 10_000 ? 10_000 : low
+  return Object.freeze([
+    Object.freeze({ startingStack: high, smallBlind: Math.max(config.smallBlind, 10), bigBlind: Math.max(config.bigBlind, 20) }),
+    Object.freeze({ startingStack: low, smallBlind: config.smallBlind, bigBlind: config.bigBlind }),
+    Object.freeze({ startingStack: low, smallBlind: Math.max(config.smallBlind, 10), bigBlind: Math.max(config.bigBlind, 20) })
+  ])
+}
+
+function stableHash(value: string): number {
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index += 1) hash = Math.imul(hash ^ value.charCodeAt(index), 16777619)
+  return hash >>> 0
+}
+
+export function onlinePokerBotRotationMode(botKey: string, now: number, config: OnlinePokerBotOrchestratorConfig): 'POKER' | 'ROCKET' {
+  const pokerMin = config.rotationPokerMinMs
+  const pokerMax = config.rotationPokerMaxMs
+  const rocketMin = config.rotationRocketMinMs
+  const rocketMax = config.rotationRocketMaxMs
+  if (!pokerMin || !pokerMax || !rocketMin || !rocketMax) return 'POKER'
+  const pokerDwell = pokerMin + stableHash(`${botKey}:poker`) % Math.max(1, pokerMax - pokerMin + 1)
+  const rocketDwell = rocketMin + stableHash(`${botKey}:rocket`) % Math.max(1, rocketMax - rocketMin + 1)
+  const cycle = pokerDwell + rocketDwell
+  return ((now + stableHash(`${botKey}:offset`) % cycle) % cycle) >= pokerDwell ? 'ROCKET' : 'POKER'
 }
 
 /** Coordinates bots; poker decisions and mutations stay in their existing authoritative services. */
@@ -210,10 +245,11 @@ export class OnlinePokerBotOrchestrator {
         this.leases.set(bot.botKey, lease)
         try {
           const fence: OnlineRoomApiDependencies = { botFence: { key: lease.leaseKey, token: lease.token } }
+          const rocketRotation = this.isRocketRotation(bot.botKey)
           const roomCode = await adapter.findSeatedRoom(bot.id).catch(() => null)
           if (roomCode) {
             this.pendingRocketBets.delete(bot.id)
-            await this.progressSeatedBot(bot, roomCode, fence, activeIds.has(bot.id), botIds)
+            await this.progressSeatedBot(bot, roomCode, fence, activeIds.has(bot.id) && !rocketRotation, botIds)
             return
           }
           this.pending.delete(bot.id)
@@ -221,7 +257,12 @@ export class OnlinePokerBotOrchestrator {
             this.pendingRocketBets.delete(bot.id)
             return
           }
-          if (bot.balance >= botCreatedRoomStacks(config)[0]) {
+          if (rocketRotation) {
+            const rocketState = rocketSnapshot?.bots[bot.id]
+            if (rocketSnapshot && rocketState && adapter.placeRocketBet) await this.progressRocketBot(bot, rocketSnapshot, rocketState, rocketFence)
+            return
+          }
+          if (bot.balance >= Math.min(...botCreatedRoomPresets(config).map(preset => preset.startingStack))) {
             const pokerPriority = await this.findRoomOrCreate(bot, rooms, botIds, fence)
             if (pokerPriority) {
               this.pendingRocketBets.delete(bot.id)
@@ -315,7 +356,8 @@ export class OnlinePokerBotOrchestrator {
 
   private async findRoomOrCreate(bot: PersistentBotIdentity, rooms: readonly OnlineRoomLobbyEntry[], botIds: ReadonlySet<string>, fence: OnlineRoomApiDependencies): Promise<boolean> {
     const { config, adapter } = this.dependencies
-    const candidates = [...rooms].filter(room => room.playerCount < room.maxPlayers).sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    const candidates = [...rooms].filter(room => room.playerCount < room.maxPlayers)
+    const hydrated: Array<{ candidate: OnlineRoomLobbyEntry; publicRoom: Awaited<ReturnType<typeof adapter.getRoom>>; botOwned: boolean; humanPresent: boolean; botCount: number }> = []
     for (const candidate of candidates) {
       if (candidate.startingStack > bot.balance) continue
       if (this.now() - Date.parse(candidate.createdAt) < 8_000 && this.random() >= config.quickJoinProbability) continue
@@ -325,7 +367,15 @@ export class OnlinePokerBotOrchestrator {
       const botCount = table.players.filter(player => botIds.has(player.playerId)).length
       const botOwnedRoom = table.players.some(player => player.playerId === publicRoom.room.ownerId && botIds.has(player.playerId))
       const humanPresent = table.players.some(player => !botIds.has(player.playerId))
-      const roomLimit = botOwnedRoom && !humanPresent ? 6 : config.maxBotsPerRoom
+      hydrated.push({ candidate, publicRoom, botOwned: botOwnedRoom, humanPresent, botCount })
+    }
+    hydrated.sort((a, b) => Number(a.botOwned) - Number(b.botOwned) || a.candidate.createdAt.localeCompare(b.candidate.createdAt))
+    for (const { candidate, publicRoom, humanPresent, botCount } of hydrated) {
+      const table = publicRoom.room.pokerTable
+      if (this.dependencies.lease.isRoomCoolingDown && await this.dependencies.lease.isRoomCoolingDown(bot.botKey, candidate.code).catch(() => true)) continue
+      // Human-created rooms get first priority and are filled gradually.
+      const humanCount = table.players.filter(player => !botIds.has(player.playerId)).length
+      const roomLimit = humanPresent ? (humanCount >= 3 ? 2 : 1) : config.maxBotsPerRoom
       if (botCount >= roomLimit) continue
       if (table.players.some(player => player.playerId === bot.id)) return true
       let joinAccepted = false
@@ -349,14 +399,15 @@ export class OnlinePokerBotOrchestrator {
       if (joinAccepted || seatedRoomCode) return true
     }
 
-    const [lowStack, highStack] = botCreatedRoomStacks(config)
+    const presets = botCreatedRoomPresets(config).filter(preset => preset.bigBlind >= preset.smallBlind && preset.startingStack <= bot.balance)
     const activeBotRooms = await adapter.countBotCreatedRooms([...botIds])
-    const otherFundedBots = (await adapter.listBots()).filter(item => item.botEnabled && item.balance >= lowStack).length
-    if (bot.balance >= lowStack && config.maxBotCreatedRooms > 0 && activeBotRooms + this.createdRoomReservations < config.maxBotCreatedRooms && otherFundedBots >= 2 && this.random() < config.createRoomProbability) {
+    const allBots = await adapter.listBots()
+    const availablePresets = presets.filter(preset => allBots.filter(item => item.botEnabled && item.balance >= preset.startingStack).length >= 3)
+    if (availablePresets.length > 0 && config.maxBotCreatedRooms > 0 && activeBotRooms + this.createdRoomReservations < config.maxBotCreatedRooms && this.random() < config.createRoomProbability) {
       this.createdRoomReservations += 1
       try {
-        const startingStack = bot.balance >= highStack && this.random() < 0.5 ? highStack : lowStack
-        const created = await adapter.createRoom(bot.id, { visibility: 'PUBLIC', startingStack, smallBlind: config.smallBlind, bigBlind: config.bigBlind }, fence)
+        const preset = availablePresets[Math.floor(this.random() * availablePresets.length)]!
+        const created = await adapter.createRoom(bot.id, { visibility: 'PUBLIC', ...preset }, fence)
         this.dependencies.log?.('bot_created_public_room', { botKey: bot.botKey, roomCode: created.room.roomCode })
         return true
       } catch (error) {
@@ -365,6 +416,10 @@ export class OnlinePokerBotOrchestrator {
       }
     }
     return false
+  }
+
+  private isRocketRotation(botKey: string): boolean {
+    return onlinePokerBotRotationMode(botKey, this.now(), this.dependencies.config) === 'ROCKET'
   }
 
   private rocketFence(lease: OnlinePokerBotLease): BotRocketFence {
@@ -378,7 +433,7 @@ export class OnlinePokerBotOrchestrator {
   private async progressRocketBot(
     bot: PersistentBotIdentity,
     snapshot: BotRocketSnapshot,
-    state: Readonly<{ balance: number; hasBet: boolean }>,
+    state: BotRocketSnapshot['bots'][string],
     fence: BotRocketFence
   ): Promise<void> {
     const { adapter, config } = this.dependencies
@@ -395,9 +450,13 @@ export class OnlinePokerBotOrchestrator {
       const delayMs = 700 + this.random() * 4_300
       const remaining = snapshot.bettingMsRemaining
       const dueAt = this.now() + Math.min(delayMs, Math.max(100, remaining - 100))
-      const autoCashout = Math.floor((1.05 + this.random() * 1.95) * 100) / 100
+      const losingTrend = (state.recentCount ?? 0) >= 2 && (state.recentNet ?? 0) < 0
+      const winningTrend = (state.recentCount ?? 0) >= 2 && (state.recentNet ?? 0) > 0
+      const profileScale = losingTrend ? 0.72 : winningTrend ? 1.08 : 1
+      const autoCashoutCeiling = losingTrend ? 1.45 : 3
+      const autoCashout = Math.floor((1.05 + this.random() * (autoCashoutCeiling - 1.05)) * 100) / 100
       const allIn = state.balance <= ROCKET_MAX_BET && this.random() < (config.rocketAllInChance ?? 0.08) && autoCashout <= 1.25
-      const portion = 0.1 + this.random() * 0.35
+      const portion = Math.min(0.45, Math.max(0.1, (0.1 + this.random() * 0.35) * profileScale))
       const minimum = Math.ceil(state.balance * 0.1)
       const maximum = Math.min(ROCKET_MAX_BET, Math.floor(state.balance * 0.45))
       if (!allIn && minimum > maximum) return
@@ -436,7 +495,9 @@ export class OnlinePokerBotOrchestrator {
     const botOnly = table.players.length > 0 && table.players.every(player => botIds.has(player.playerId))
     if (botOnly) this.botOnlyRoomSince.set(room.roomId, this.botOnlyRoomSince.get(room.roomId) ?? this.now())
     else this.botOnlyRoomSince.delete(room.roomId)
-    const botOnlyIdle = botOnly && this.now() - (this.botOnlyRoomSince.get(room.roomId) ?? this.now()) >= (config.activityWindowMs ?? 5 * 60_000)
+    const botOwned = Boolean(room.ownerId && botIds.has(room.ownerId))
+    const healthySeededRoom = botOwned && table.players.filter(player => botIds.has(player.playerId)).length >= 3
+    const botOnlyIdle = botOnly && !healthySeededRoom && this.now() - (this.botOnlyRoomSince.get(room.roomId) ?? this.now()) >= (config.activityWindowMs ?? 5 * 60_000)
     let draining = Boolean(result.draining)
     if (botOnlyIdle && !draining) {
       draining = adapter.markRoomDraining
@@ -451,6 +512,7 @@ export class OnlinePokerBotOrchestrator {
           ? current.pokerTable.players.some(player => player.playerId === bot.id)
           : false)
       if (!left) return
+      await this.dependencies.lease.setRoomCooldown?.(bot.botKey, code, config.sameRoomCooldownMs ?? 120_000).catch(() => undefined)
       this.pending.delete(bot.id)
       this.dependencies.log?.('bot_left_room', { botKey: bot.botKey, roomCode: code })
       return
@@ -480,6 +542,9 @@ export class OnlinePokerBotOrchestrator {
         bigBlind: hand.bigBlind,
         activePlayers: hand.players.filter(player => player.status === 'ACTIVE' || player.status === 'ALL_IN').length,
         publicPlayers: hand.players.map(player => ({ playerId: player.playerId, seat: player.seat, stack: player.stack, streetContribution: player.streetContribution, status: player.status })),
+        opponentAllInFrequency: snapshot.opponentAllInFrequency,
+        opponentRaiseFrequency: snapshot.opponentRaiseFrequency,
+        opponentFoldFrequency: snapshot.opponentFoldFrequency,
         minRaiseTo: snapshot.minRaiseTo,
         raiseReopened: snapshot.raiseReopened,
         legalActions: snapshot.legalActions
