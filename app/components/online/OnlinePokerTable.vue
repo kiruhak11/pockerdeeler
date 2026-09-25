@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OnlineFriendInviteModal from '~/components/online/OnlineFriendInviteModal.vue'
 import type { OnlineAction, OnlineCard, OnlineConnectionStatus, OnlineHandPlayer, OnlineRoomState, OnlineTablePlayer, OnlineFinalizedShowdownPlayer } from '~/types/online'
 import { cardIsRed, cardLabel, displayHand, formatTurnSeconds, isPostHandWaitingState, isShowdownWinningCard, isViewerActor, ownHoleCards, playerForViewer, remainingTurnSeconds, seatPosition, tablePlayerForViewer, toCall } from '~/utils/onlineRoomUi'
 
@@ -176,6 +177,7 @@ function finalizedDisplayName(player: OnlineFinalizedShowdownPlayer): string {
       </div>
       <div class="header-actions">
         <span class="connection" :class="`connection--${connectionStatus}`" role="status">● {{ spectating ? 'Наблюдение' : connectionLabel(connectionStatus) }}</span>
+        <OnlineFriendInviteModal v-if="!spectating" :room-code="state.roomCode" />
         <button v-if="spectating && isWaiting && state.pokerTable.players.length < state.maxPlayers" class="btn" type="button" :disabled="joinBusy" @click="emit('join')">{{ joinBusy ? 'Подключаем…' : 'Готов' }}</button>
         <button v-else-if="!spectating" class="icon-button" type="button" aria-label="Выйти из комнаты" @click="emit('leave')">Выйти</button>
       </div>
