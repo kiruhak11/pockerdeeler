@@ -1,4 +1,5 @@
 import { PWA_PREFERENCES_KEY, parsePwaPreferences } from '~/composables/usePwaPreferences'
+import { platformFromPath } from '~/platform/types'
 
 interface InstallPromptEvent extends Event {
   prompt(): Promise<void>
@@ -6,6 +7,8 @@ interface InstallPromptEvent extends Event {
 }
 
 export default defineNuxtPlugin(nuxtApp => {
+  const route = useRoute()
+  if (platformFromPath(route.path) === 'YANDEX_GAMES') return
   const { state, persist, openInstallHelp, openOnboarding } = usePwa()
   const { safeToUpdate } = usePwaSafety()
   let deferred: InstallPromptEvent | null = null

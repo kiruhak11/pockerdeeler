@@ -6,6 +6,12 @@ export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
   devtools: { enabled: process.env.NODE_ENV !== 'production' },
   modules: ['@pinia/nuxt'],
+  runtimeConfig: {
+    public: {
+      // Only honored by the /yandex shell in a non-production build.
+      yandexGamesMock: process.env.NUXT_PUBLIC_YANDEX_GAMES_MOCK || 'off'
+    }
+  },
   css: ['~/assets/styles/main.scss'],
   app: {
     head: {
@@ -29,6 +35,7 @@ export default defineNuxtConfig({
     '/setup': { ssr: false, prerender: true },
     '/game': { ssr: false },
     '/history': { ssr: false },
+    '/yandex': { ssr: true },
     '/sw.js': { headers: { 'cache-control': 'no-cache', 'service-worker-allowed': '/' } },
     '/manifest.webmanifest': { headers: { 'cache-control': 'no-cache' } }
   },
