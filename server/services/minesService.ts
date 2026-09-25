@@ -5,7 +5,7 @@ import { prisma } from '../db/client'
 import { verifyUserAuthToken } from './userAccountService'
 import { adjustUserWallet, lockUserWallet } from './walletService'
 import { getEconomySnapshot, recentMiniGameThrottle, settleMiniGameEconomy } from './miniGameEconomyService'
-import { MINES_COLUMNS, MINES_COUNT, legacyMinesField, legacyMinesTerms, minesField, minesLimit, minesTerms, seedHash } from '../utils/minesMath'
+import { MINES_COLUMNS, MINES_COUNT, legacyMinesField, legacyMinesTerms, minesBackedPayoutLimit, minesField, minesLimit, minesTerms, seedHash } from '../utils/minesMath'
 import { minesStartInputSchema, type MinesStartInput } from '../utils/minesValidation'
 
 type Tx = Prisma.TransactionClient
@@ -130,11 +130,6 @@ export async function startMines(token: string | null | undefined, input: MinesS
     const commitment = await tx.minesCommitment.findFirst({ where: { id: input.commitmentId, userId: id, consumedAt: null, expiresAt: { gt: new Date() } } })
     if (!commitment) throw createError({ statusCode: 409, statusMessage: 'Подготовьте новое поле: срок проверки истёк' })
     const theoreticalMaxPayout = minesLimit(stake, input.mines)
-    const maxPayout = theoreticalMaxPayout
-    // Move the full potential liability out of the bank wallet before the
-    // session becomes active. This preserves the wallet/ledger total and
-    // rejects insufficient coverage before the player's stake is debited.
-    const reserve = maxPayout
     const bankWallet = bankId === id
       ? playerWallet
       : await tx.userWallet.findUniqueOrThrow({ where: { userId: bankId } })
@@ -143,7 +138,12 @@ export async function startMines(token: string | null | undefined, input: MinesS
     // second time. Existing Mines reserves are also already debited from the
     // bank wallet, so its current balance is the spendable reserve.
     const bankAvailable = bankWallet.balance - (bankId === id ? stake : 0n)
-    if (bankAvailable < reserve) throw createError({ statusCode: 409, statusMessage: 'Игра временно недоступна' })
+    const maxPayout = minesBackedPayoutLimit(theoreticalMaxPayout, bankAvailable, stake)
+    if (maxPayout === null) throw createError({ statusCode: 409, statusMessage: 'Игра временно недоступна' })
+    // Use the actual funded reserve as this session's payout ceiling when the
+    // global theoretical cap exceeds available bank funds. This preserves the
+    // payout curve up to the backed ceiling and never permits an uncovered win.
+    const reserve = maxPayout
     await tx.minesCommitment.update({ where: { id: commitment.id }, data: { consumedAt: new Date() } })
     const session = await tx.miniGameSession.create({ data: { userId: id, game: 'mines', status: 'ACTIVE', stake, mines: input.mines, serverSeed: commitment.serverSeed, serverSeedHash: commitment.seedHash, clientSeed: input.clientSeed, idempotencyKey: key, openedCells: [], multiplier: 1, bankUserId: bankId, bankReserve: reserve, maxPayout } })
     await adjustUserWallet(tx, { userId: id, delta: -stake, entryType: 'MINES_STAKE', transferId: session.id, idempotencyKey: `mines:stake:${session.id}`, metadata: { sessionId: session.id, mines: input.mines } })

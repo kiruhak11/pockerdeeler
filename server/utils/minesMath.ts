@@ -38,6 +38,13 @@ export function minesLimit(stake: bigint, mines: number = 24) {
   const maximum = stake * BigInt(maxMultiplierBps) / 10000n
   return maximum < MINES_MAX_PAYOUT ? maximum : MINES_MAX_PAYOUT
 }
+
+/** Keep each active round fully backed while allowing smaller games when the
+ * reserve wallet cannot cover the global payout ceiling. */
+export function minesBackedPayoutLimit(theoreticalMaxPayout: bigint, bankAvailable: bigint, stake: bigint): bigint | null {
+  if (stake < 1n || bankAvailable < stake || theoreticalMaxPayout < stake) return null
+  return theoreticalMaxPayout < bankAvailable ? theoreticalMaxPayout : bankAvailable
+}
 export function legacyMinesTerms(stake: bigint, mines: number, opened: number, limit: bigint) {
   // Older releases exposed several presets (including 15 and 20 mines).
   // Keep the legacy combinatorics readable for every value that could have

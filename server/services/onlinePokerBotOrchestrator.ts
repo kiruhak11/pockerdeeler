@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { PersistentBotIdentity } from './botIdentityService'
-import { decideBotAction, secureBotRandom } from '../utils/pokerBotDecision'
+import { decideBotAction, roundBotDecisionToChipStep, secureBotRandom } from '../utils/pokerBotDecision'
 import type { BotDecisionContext } from '../utils/pokerBotDecision'
 import type { BettingActionType } from '../utils/pokerBetting'
 import type { ApiOnlineRoomResult, OnlineRoomLobbyEntry, OnlineRoomApiDependencies } from './onlineRoomApiService'
@@ -123,6 +123,18 @@ type PendingRocketBet = Readonly<{
 }>
 
 const ROCKET_MAX_BET = 1_000_000
+
+export function roundBotRocketStake(stake: number, balance: number, allIn: boolean): number {
+  if (allIn) return balance
+  if (!Number.isSafeInteger(stake) || !Number.isSafeInteger(balance) || balance < 100) return stake
+  const minimum = Math.ceil(balance * 0.1)
+  const maximum = Math.min(ROCKET_MAX_BET, Math.floor(balance * 0.45))
+  if (maximum < 100) return stake
+  let rounded = Math.round(stake / 100) * 100
+  if (rounded < minimum) rounded = Math.ceil(minimum / 100) * 100
+  if (rounded > maximum) rounded = Math.floor(maximum / 100) * 100
+  return rounded >= minimum && rounded <= maximum ? rounded : stake
+}
 
 function botCreatedRoomPresets(config: OnlinePokerBotOrchestratorConfig): readonly Readonly<{ startingStack: number; smallBlind: number; bigBlind: number }>[] {
   const low = config.startingStack <= 5_000 ? 5_000 : 10_000
@@ -490,13 +502,14 @@ export class OnlinePokerBotOrchestrator {
       const minimum = Math.ceil(state.balance * 0.1)
       const maximum = Math.min(ROCKET_MAX_BET, Math.floor(state.balance * 0.45))
       if (!allIn && minimum > maximum) return
-      const stake = allIn ? state.balance : Math.min(maximum, Math.max(minimum, Math.floor(state.balance * portion)))
+      const plannedStake = allIn ? state.balance : Math.min(maximum, Math.max(minimum, Math.floor(state.balance * portion)))
+      const stake = roundBotRocketStake(plannedStake, state.balance, allIn)
       plan = Object.freeze({ roundId: snapshot.roundId, dueAt, shouldPlay, stake, autoCashout, allIn })
       this.pendingRocketBets.set(bot.id, plan)
     }
     if (!plan.shouldPlay || this.now() < plan.dueAt) return
 
-    const stake = plan.allIn ? state.balance : Math.min(plan.stake, state.balance)
+    const stake = plan.allIn ? state.balance : roundBotRocketStake(Math.min(plan.stake, state.balance), state.balance, false)
     if (stake > ROCKET_MAX_BET || (!plan.allIn && (stake < Math.ceil(state.balance * 0.1) || stake > Math.floor(state.balance * 0.45)))) {
       this.pendingRocketBets.delete(bot.id)
       return
@@ -581,7 +594,7 @@ export class OnlinePokerBotOrchestrator {
       }
       let work = this.pending.get(bot.id)
       if (!work || work.key !== key) {
-        const decision = decideBotAction(context, { skillTier: bot.skillTier, playStyle: bot.playStyle }, this.random)
+        const decision = roundBotDecisionToChipStep(context, decideBotAction(context, { skillTier: bot.skillTier, playStyle: bot.playStyle }, this.random))
         work = this.scheduled(bot.id, key, this.actionDelay(decision.type))
         work.decision = decision
         this.pending.set(bot.id, work)

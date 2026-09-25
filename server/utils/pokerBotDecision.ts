@@ -254,6 +254,23 @@ function makeDecision(context: BotDecisionContext, type: BettingActionType, rati
   })
 }
 
+/** Round voluntary bot bet/raise targets to human-sized chip increments without
+ * making an ordinary action illegal or accidentally turning it into all-in. */
+export function roundBotDecisionToChipStep(context: BotDecisionContext, decision: BotDecision): BotDecision {
+  if ((decision.type !== 'bet' && decision.type !== 'raise') || decision.amount === undefined) return decision
+  const maximum = maxTarget(context)
+  if (decision.amount >= maximum) return decision
+  const minimum = decision.type === 'raise'
+    ? (context.minRaiseTo ?? context.currentBet + context.bigBlind)
+    : (context.minBet ?? context.bigBlind)
+  const nearest = Math.round(decision.amount / 10) * 10
+  const roundedMinimum = Math.ceil(minimum / 10) * 10
+  const roundedMaximum = Math.floor((maximum - 1) / 10) * 10
+  const amount = Math.min(roundedMaximum, Math.max(roundedMinimum, nearest))
+  if (!Number.isSafeInteger(amount) || amount < minimum || amount >= maximum) return decision
+  return Object.freeze({ ...decision, amount })
+}
+
 function safeFallback(context: BotDecisionContext, actions: Set<BettingActionType>, strength = 0.2, potOdds = 0): BotDecision {
   if (context.toCall <= 0 && actions.has('check')) return makeDecision(context, 'check', 'fallback', strength, potOdds)
   if (context.toCall > 0 && actions.has('call') && context.toCall <= context.stack) return makeDecision(context, 'call', 'fallback', strength, potOdds)

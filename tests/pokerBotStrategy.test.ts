@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createSeededBotRandom, decideBotAction, type BotDecisionContext } from '../server/utils/pokerBotDecision'
+import { createSeededBotRandom, decideBotAction, roundBotDecisionToChipStep, type BotDecisionContext } from '../server/utils/pokerBotDecision'
 import type { BotPlayStyle, BotSkillTier } from '../server/services/botIdentityService'
 import { createShuffledDeck, type Card } from '../server/utils/pokerDeck'
 import { startHand } from '../server/utils/pokerHandState'
@@ -33,6 +33,28 @@ test('decision uses existing lowercase betting action API and player id', () => 
   assert.equal(action.playerId, 'bot-1')
   assert.ok(['fold', 'call', 'raise', 'all-in'].includes(action.type))
   if (action.type === 'raise') assert.ok((action.amount ?? 0) >= 300)
+})
+
+test('bot voluntary bet and raise targets use 10-chip increments without rounding calls or all-ins', () => {
+  const base = context({ currentBet: 100, streetContribution: 0, stack: 1_000, minRaiseTo: 300 })
+  const raise = decideBotAction(base, profile('REGULAR', 'BALANCED'), () => 0.5)
+  const roundedRaise = roundBotDecisionToChipStep(base, { ...raise, type: 'raise', amount: 333 })
+  assert.equal(roundedRaise.amount, 330)
+  const roundedBet = roundBotDecisionToChipStep(base, { ...raise, type: 'bet', amount: 333 })
+  assert.equal(roundedBet.amount, 330)
+  const allIn = roundBotDecisionToChipStep(base, { ...raise, type: 'all-in', amount: 1_000 })
+  assert.equal(allIn.amount, 1_000)
+  const call = roundBotDecisionToChipStep(base, { ...raise, type: 'call', amount: 103 })
+  assert.equal(call.amount, 103)
+})
+
+test('rounded raise remains legal and never becomes an accidental all-in', () => {
+  const base = context({ currentBet: 305, streetContribution: 0, stack: 704, minRaiseTo: 500 })
+  const source = decideBotAction(base, profile('REGULAR', 'BALANCED'), () => 0.5)
+  const rounded = roundBotDecisionToChipStep(base, { ...source, type: 'raise', amount: 699 })
+  assert.equal(rounded.amount, 700)
+  assert.ok((rounded.amount ?? 0) >= 500)
+  assert.ok((rounded.amount ?? 0) < 704)
 })
 
 test('check is selected when there is no call and betting is not attractive', () => {

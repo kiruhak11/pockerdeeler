@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { minesStakeSchema, minesStartInputSchema } from '../server/utils/minesValidation'
+import { minesBackedPayoutLimit, minesLimit } from '../server/utils/minesMath'
 
 test('Mines accepts any positive safe-integer stake without a fixed upper cap', () => {
   for (const stake of [1, 9_999, 10_000, Number.MAX_SAFE_INTEGER]) {
@@ -21,6 +22,15 @@ test('Mines stake schema rejects zero, negative, fractional, non-finite and malf
   for (const stake of [0, -1, 1.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1, '100']) {
     assert.equal(minesStakeSchema.safeParse(stake).success, false, `stake ${String(stake)}`)
   }
+})
+
+test('Mines allows a small stake when the bank can cover a backed session cap', () => {
+  const stake = 10n
+  const theoretical = minesLimit(stake, 5)
+  assert.equal(theoretical, 499_422n)
+  assert.equal(minesBackedPayoutLimit(theoretical, 14_900n, stake), 14_900n)
+  assert.equal(minesBackedPayoutLimit(1_000n, 2_000n, stake), 1_000n)
+  assert.equal(minesBackedPayoutLimit(theoretical, 9n, stake), null)
 })
 
 test('Mines UI max follows the current wallet and full-balance button selects it', () => {

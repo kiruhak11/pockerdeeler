@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { OnlinePokerBotOrchestrator, onlinePokerBotRotationMode, readOnlinePokerBotOrchestratorConfig, type OnlinePokerBotOrchestratorAdapter } from '../server/services/onlinePokerBotOrchestrator'
+import { OnlinePokerBotOrchestrator, onlinePokerBotRotationMode, readOnlinePokerBotOrchestratorConfig, roundBotRocketStake, type OnlinePokerBotOrchestratorAdapter } from '../server/services/onlinePokerBotOrchestrator'
 import type { PersistentBotIdentity } from '../server/services/botIdentityService'
 import { ONLINE_POKER_BOT_PROFILES } from '../server/services/botIdentityService'
 
@@ -8,6 +8,13 @@ const baseConfig = (overrides: Partial<ReturnType<typeof readOnlinePokerBotOrche
   enabled: true, minActiveBots: 1, maxActiveBots: 1, maxBotsPerRoom: 3, maxBotCreatedRooms: 1,
   tickIntervalMs: 1_000, startingStack: 1_000, smallBlind: 5, bigBlind: 10,
   quickJoinProbability: 1, createRoomProbability: 1, ...overrides
+})
+
+test('Rocket bot non-all-in stakes round to 100 while all-in remains exact', () => {
+  assert.equal(roundBotRocketStake(1_499, 10_000, false), 1_500)
+  assert.equal(roundBotRocketStake(4_499, 10_000, false), 4_500)
+  assert.equal(roundBotRocketStake(997, 997, true), 997)
+  assert.equal(roundBotRocketStake(47, 80, false), 47)
 })
 
 function bot(botKey: string, id = `${botKey}-id`): PersistentBotIdentity {
