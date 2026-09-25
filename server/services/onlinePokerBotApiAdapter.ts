@@ -13,7 +13,7 @@ import {
   closeEmptyPublicOnlineRoomsCreatedByBots,
   type OnlinePokerBotDecisionSnapshot
 } from './onlineRoomApiService'
-import { ensureOnlinePokerBots, listOnlinePokerBots } from './botIdentityService'
+import { ensureOnlinePokerBots, listOnlinePokerBots, replenishOnlinePokerBotDailyBalances } from './botIdentityService'
 import { getBotRocketSnapshot, placeCrashBetForBot, registerBotRocketLease } from './crashService'
 import type { BotActionDecisionSnapshot, OnlinePokerBotOrchestratorAdapter } from './onlinePokerBotOrchestrator'
 import type { OnlineRoomApiDependencies } from './onlineRoomApiService'
@@ -21,6 +21,7 @@ import type { OnlineRoomApiDependencies } from './onlineRoomApiService'
 /** Production adapter: bots use the same account-backed ONLINE API and mutations as humans. */
 export const onlinePokerBotApiAdapter: OnlinePokerBotOrchestratorAdapter = Object.freeze({
   listBots: listOnlinePokerBots,
+  replenishDailyBalances: replenishOnlinePokerBotDailyBalances,
   listPublicRooms: listPublicOnlineRooms,
   countBotCreatedRooms: countPublicOnlineRoomsOwnedByBots,
   cleanupBotCreatedRooms: closeEmptyPublicOnlineRoomsCreatedByBots,

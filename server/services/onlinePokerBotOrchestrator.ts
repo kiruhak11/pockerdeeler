@@ -16,11 +16,13 @@ export type OnlinePokerBotOrchestratorConfig = Readonly<{
   tickIntervalMs: number
   activityWindowMs?: number
   startingStack: number
+  highStartingStack?: number
   smallBlind: number
   bigBlind: number
   quickJoinProbability: number
   createRoomProbability: number
   rocketPlayProbability?: number
+  rocketAllInChance?: number
 }>
 
 export function readOnlinePokerBotOrchestratorConfig(env: NodeJS.ProcessEnv = process.env): OnlinePokerBotOrchestratorConfig {
@@ -47,12 +49,14 @@ export function readOnlinePokerBotOrchestratorConfig(env: NodeJS.ProcessEnv = pr
     maxBotCreatedRooms: integer('BOT_ORCHESTRATOR_MAX_CREATED_ROOMS', 1, 0, 6),
     tickIntervalMs: integer('BOT_ORCHESTRATOR_TICK_MS', 1_000, 250, 30_000),
     activityWindowMs: integer('BOT_ORCHESTRATOR_ACTIVITY_WINDOW_MS', 5 * 60_000, 60_000, 24 * 60 * 60_000),
-    startingStack: integer('BOT_ORCHESTRATOR_STARTING_STACK', 1_000, 1, 2_000_000_000),
+    startingStack: integer('BOT_ORCHESTRATOR_STARTING_STACK', 5_000, 1, 2_000_000_000),
+    highStartingStack: integer('BOT_ORCHESTRATOR_HIGH_STARTING_STACK', 10_000, 1, 2_000_000_000),
     smallBlind,
     bigBlind,
     quickJoinProbability: probability('BOT_ORCHESTRATOR_QUICK_JOIN_CHANCE', 0.02),
     createRoomProbability: probability('BOT_ORCHESTRATOR_CREATE_CHANCE', 0.01),
-    rocketPlayProbability: probability('BOT_ORCHESTRATOR_ROCKET_CHANCE', 0.15)
+    rocketPlayProbability: probability('BOT_ORCHESTRATOR_ROCKET_CHANCE', 0.15),
+    rocketAllInChance: probability('BOT_ORCHESTRATOR_ROCKET_ALL_IN_CHANCE', 0.08)
   })
 }
 
@@ -67,6 +71,7 @@ export type BotActionDecisionSnapshot = Readonly<{
 
 export type OnlinePokerBotOrchestratorAdapter = Readonly<{
   listBots(): Promise<readonly PersistentBotIdentity[]>
+  replenishDailyBalances?(): Promise<number>
   listPublicRooms(): Promise<readonly OnlineRoomLobbyEntry[]>
   countBotCreatedRooms(botIds: readonly string[]): Promise<number>
   cleanupBotCreatedRooms(botIds: readonly string[], olderThan: Date): Promise<number>
@@ -100,7 +105,16 @@ type PendingRocketBet = Readonly<{
   shouldPlay: boolean
   stake: number
   autoCashout: number
+  allIn: boolean
 }>
+
+const ROCKET_MAX_BET = 1_000_000
+
+function botCreatedRoomStacks(config: OnlinePokerBotOrchestratorConfig): readonly [number, number] {
+  const configured = [config.startingStack, config.highStartingStack ?? 10_000]
+    .map(value => value === 10_000 ? 10_000 : 5_000)
+  return [Math.min(...configured), Math.max(...configured)]
+}
 
 /** Coordinates bots; poker decisions and mutations stay in their existing authoritative services. */
 export class OnlinePokerBotOrchestrator {
@@ -128,6 +142,13 @@ export class OnlinePokerBotOrchestrator {
       this.schedulerLease ??= await this.dependencies.lease.acquire('__scheduler__').catch(() => null) ?? undefined
       if (!this.schedulerLease) return
       this.createdRoomReservations = 0
+      if (adapter.replenishDailyBalances) {
+        const grants = await adapter.replenishDailyBalances().catch(error => {
+          this.dependencies.log?.('bot_daily_refill_failed', { code: errorCode(error) })
+          return 0
+        })
+        if (grants > 0) this.dependencies.log?.('bot_daily_refill_granted', { count: grants })
+      }
       const bots = await adapter.listBots()
       const botIds = new Set(bots.map(bot => bot.id))
       const closedRooms = await adapter.cleanupBotCreatedRooms([...botIds], new Date(this.now() - 30 * 60_000)).catch(() => 0)
@@ -198,7 +219,7 @@ export class OnlinePokerBotOrchestrator {
             this.pendingRocketBets.delete(bot.id)
             return
           }
-          if (bot.balance >= config.startingStack) {
+          if (bot.balance >= botCreatedRoomStacks(config)[0]) {
             const pokerPriority = await this.findRoomOrCreate(bot, rooms, botIds, fence)
             if (pokerPriority) {
               this.pendingRocketBets.delete(bot.id)
@@ -326,12 +347,14 @@ export class OnlinePokerBotOrchestrator {
       if (joinAccepted || seatedRoomCode) return true
     }
 
+    const [lowStack, highStack] = botCreatedRoomStacks(config)
     const activeBotRooms = await adapter.countBotCreatedRooms([...botIds])
-    const otherFundedBots = (await adapter.listBots()).filter(item => item.botEnabled && item.balance >= config.startingStack).length
-    if (config.maxBotCreatedRooms > 0 && activeBotRooms + this.createdRoomReservations < config.maxBotCreatedRooms && otherFundedBots >= 2 && this.random() < config.createRoomProbability) {
+    const otherFundedBots = (await adapter.listBots()).filter(item => item.botEnabled && item.balance >= lowStack).length
+    if (bot.balance >= lowStack && config.maxBotCreatedRooms > 0 && activeBotRooms + this.createdRoomReservations < config.maxBotCreatedRooms && otherFundedBots >= 2 && this.random() < config.createRoomProbability) {
       this.createdRoomReservations += 1
       try {
-        const created = await adapter.createRoom(bot.id, { visibility: 'PUBLIC', startingStack: config.startingStack, smallBlind: config.smallBlind, bigBlind: config.bigBlind }, fence)
+        const startingStack = bot.balance >= highStack && this.random() < 0.5 ? highStack : lowStack
+        const created = await adapter.createRoom(bot.id, { visibility: 'PUBLIC', startingStack, smallBlind: config.smallBlind, bigBlind: config.bigBlind }, fence)
         this.dependencies.log?.('bot_created_public_room', { botKey: bot.botKey, roomCode: created.room.roomCode })
         return true
       } catch (error) {
@@ -370,21 +393,30 @@ export class OnlinePokerBotOrchestrator {
       const delayMs = 700 + this.random() * 4_300
       const remaining = snapshot.bettingMsRemaining
       const dueAt = this.now() + Math.min(delayMs, Math.max(100, remaining - 100))
-      const portion = 0.005 + this.random() * 0.015
-      const stake = Math.min(1_000_000, Math.max(1, Math.floor(state.balance * portion)))
       const autoCashout = Math.floor((1.05 + this.random() * 1.95) * 100) / 100
-      plan = Object.freeze({ roundId: snapshot.roundId, dueAt, shouldPlay, stake, autoCashout })
+      const allIn = state.balance <= ROCKET_MAX_BET && this.random() < (config.rocketAllInChance ?? 0.08) && autoCashout <= 1.25
+      const portion = 0.1 + this.random() * 0.35
+      const minimum = Math.ceil(state.balance * 0.1)
+      const maximum = Math.min(ROCKET_MAX_BET, Math.floor(state.balance * 0.45))
+      if (!allIn && minimum > maximum) return
+      const stake = allIn ? state.balance : Math.min(maximum, Math.max(minimum, Math.floor(state.balance * portion)))
+      plan = Object.freeze({ roundId: snapshot.roundId, dueAt, shouldPlay, stake, autoCashout, allIn })
       this.pendingRocketBets.set(bot.id, plan)
     }
     if (!plan.shouldPlay || this.now() < plan.dueAt) return
 
+    const stake = plan.allIn ? state.balance : Math.min(plan.stake, state.balance)
+    if (stake > ROCKET_MAX_BET || (!plan.allIn && (stake < Math.ceil(state.balance * 0.1) || stake > Math.floor(state.balance * 0.45)))) {
+      this.pendingRocketBets.delete(bot.id)
+      return
+    }
     const placed = await placeRocketBet(bot.id, {
       expectedRoundId: plan.roundId,
-      stake: Math.min(plan.stake, state.balance),
+      stake,
       autoCashout: plan.autoCashout
     }, fence)
     this.pendingRocketBets.delete(bot.id)
-    if (placed) this.dependencies.log?.('bot_rocket_bet_placed', { botKey: bot.botKey, stake: Math.min(plan.stake, state.balance) })
+    if (placed) this.dependencies.log?.('bot_rocket_bet_placed', { botKey: bot.botKey, stake })
   }
 
   private async progressSeatedBot(bot: PersistentBotIdentity, code: string, fence: OnlineRoomApiDependencies, active: boolean, botIds: ReadonlySet<string>): Promise<void> {

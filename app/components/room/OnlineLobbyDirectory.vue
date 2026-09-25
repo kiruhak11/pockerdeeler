@@ -48,7 +48,10 @@ onMounted(() => { void refresh() })
         <article v-for="room in rooms" :key="room.code" class="online-lobby__card">
           <div class="online-lobby__card-top"><span :class="{ live: room.status === 'IN_HAND' }"><i />{{ room.status === 'IN_HAND' ? 'Игра идёт' : 'Сбор игроков' }}</span><strong>{{ room.code }}</strong></div>
           <p>{{ room.playerCount }}/{{ room.maxPlayers }} игроков</p>
-          <NuxtLink class="btn" :to="`/online/${room.code}`">Войти</NuxtLink>
+          <div class="online-lobby__actions">
+            <NuxtLink class="btn btn--ghost" :to="`/online/${room.code}`">Наблюдать</NuxtLink>
+            <NuxtLink v-if="room.status === 'WAITING' && room.playerCount < room.maxPlayers" class="btn" :to="`/online/${room.code}?join=1`">Занять место</NuxtLink>
+          </div>
         </article>
       </div>
     </template>
@@ -73,6 +76,7 @@ onMounted(() => { void refresh() })
 .online-lobby__card-top span.live i { background: var(--accent); }
 .online-lobby__card-top strong { color: var(--accent); letter-spacing: .12em; }
 .online-lobby__card p { margin: 0; color: var(--text-muted); }
+.online-lobby__actions { display: grid; gap: .45rem; }
 .online-lobby__error { margin: 0; color: var(--danger); }
 @media (max-width: 600px) { .online-lobby { padding: .8rem; } .online-lobby__header { align-items: flex-start; } .online-lobby__card .btn { width: 100%; } }
 </style>

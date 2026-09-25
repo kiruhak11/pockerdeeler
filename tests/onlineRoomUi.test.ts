@@ -80,7 +80,23 @@ test('Table route source exists without changing the HOME rooms page', () => {
   const route = resolve(process.cwd(), 'app/pages/online/[code].vue')
   const source = readFileSync(route, 'utf8')
   assert.match(source, /useOnlineRoomSocket/)
+  assert.match(source, /state\.visibility === 'PUBLIC'/)
+  assert.match(source, /:spectating="!viewerIsMember"/)
   assert.equal(readFileSync(resolve(process.cwd(), 'app/pages/rooms.vue'), 'utf8').includes('OnlinePokerTable'), false)
+})
+
+test('spectators see public tables and can explicitly choose to join', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
+  const lobby = readFileSync(resolve(process.cwd(), 'app/components/room/OnlineLobbyDirectory.vue'), 'utf8')
+  const route = readFileSync(resolve(process.cwd(), 'app/pages/online/[code].vue'), 'utf8')
+  assert.match(source, /spectating \? 'Наблюдение'/)
+  assert.match(source, /Зайти за стол/)
+  assert.match(source, /spectating && state\.pokerTable\.status === 'WAITING' && state\.pokerTable\.players\.length < state\.maxPlayers/)
+  assert.match(source, /Вы наблюдаете за публичным столом/)
+  assert.match(lobby, /Наблюдать/)
+  assert.match(lobby, /Занять место/)
+  assert.match(lobby, /room\.playerCount < room\.maxPlayers/)
+  assert.match(route, /route\.query\.join === '1'/)
 })
 
 test('HOME lobby fetch is SSR-compatible for the first hydrated render', () => {

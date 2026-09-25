@@ -5,6 +5,8 @@ import { cardIsRed, cardLabel, displayHand, formatTurnSeconds, isPostHandWaiting
 const props = defineProps<{
   state: OnlineRoomState
   viewerId: string | null
+  spectating?: boolean
+  joinBusy?: boolean
   connectionStatus: OnlineConnectionStatus
   pendingActionId?: string | null
   notice?: string
@@ -19,6 +21,7 @@ const emit = defineEmits<{
   ready: [value: boolean]
   sittingOut: [value: boolean]
   leave: []
+  join: []
   reconnect: []
 }>()
 
@@ -141,8 +144,9 @@ function finalizedDisplayName(player: OnlineFinalizedShowdownPlayer): string {
         <p>{{ state.visibility === 'PRIVATE' ? 'Приватный стол' : 'Публичный стол' }} · {{ state.pokerTable.players.length }}/{{ state.maxPlayers }}</p>
       </div>
       <div class="header-actions">
-        <span class="connection" :class="`connection--${connectionStatus}`" role="status">● {{ connectionLabel(connectionStatus) }}</span>
-        <button class="icon-button" type="button" aria-label="Выйти из комнаты" @click="emit('leave')">Выйти</button>
+        <span class="connection" :class="`connection--${connectionStatus}`" role="status">● {{ spectating ? 'Наблюдение' : connectionLabel(connectionStatus) }}</span>
+        <button v-if="spectating && state.pokerTable.status === 'WAITING' && state.pokerTable.players.length < state.maxPlayers" class="icon-button" type="button" :disabled="joinBusy" @click="emit('join')">{{ joinBusy ? 'Подключаем…' : 'Зайти за стол' }}</button>
+        <button v-else-if="!spectating" class="icon-button" type="button" aria-label="Выйти из комнаты" @click="emit('leave')">Выйти</button>
       </div>
     </header>
 
@@ -236,7 +240,10 @@ function finalizedDisplayName(player: OnlineFinalizedShowdownPlayer): string {
         <strong>{{ handStrength.label }}</strong>
       </div>
 
-      <div v-if="isWaiting && tableViewer" class="waiting-controls">
+      <div v-if="spectating" class="waiting-controls">
+        <p>Вы наблюдаете за публичным столом. В закрытые карты игроков не попасть.</p>
+      </div>
+      <div v-else-if="isWaiting && tableViewer" class="waiting-controls">
         <button v-if="canStart" class="btn" type="button" @click="emit('start')">Начать раздачу</button>
         <p v-else>Ожидаем готовых игроков и владельца стола.</p>
         <button class="btn btn--ghost" type="button" @click="emit('ready', !ready)">{{ ready ? 'Отменить готовность' : 'Я готов' }}</button>

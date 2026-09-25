@@ -33,6 +33,7 @@ function harness(overrides: {
   findRoom?: (id: string) => string | null
   getRoom?: (id: string, code: string) => any
   decision?: (id: string, code: string) => any
+  random?: () => number
 } = {}) {
   const calls: Array<{ method: string; args: any[] }> = []
   const logs: Array<{ event: string; fields: Readonly<Record<string, string | number | boolean>> }> = []
@@ -67,7 +68,7 @@ function harness(overrides: {
   let now = 1_000_000
   const orchestrator = new OnlinePokerBotOrchestrator({
     config: baseConfig(), adapter, lease,
-    now: () => now, random: () => 0,
+    now: () => now, random: overrides.random ?? (() => 0),
     log: (event, fields) => { logs.push({ event, fields }) }
   })
   return { orchestrator, calls, logs, setNow: (value: number) => { now = value }, adapter }
@@ -91,6 +92,8 @@ function seatedRoom(botId: string, overrides: Record<string, unknown> = {}) {
 
 test('feature flag defaults off and disabled tick performs no bot or room work', async () => {
   assert.equal(readOnlinePokerBotOrchestratorConfig({}).enabled, false)
+  assert.equal(readOnlinePokerBotOrchestratorConfig({}).startingStack, 5_000)
+  assert.equal(readOnlinePokerBotOrchestratorConfig({}).highStartingStack, 10_000)
   const h = harness()
   const disabled = new OnlinePokerBotOrchestrator({
     config: baseConfig({ enabled: false }), adapter: h.adapter,
@@ -187,7 +190,25 @@ test('bot-created room is public, uses bounded settings, and is limited per tick
   await h.orchestrator.tick()
   assert.equal(h.calls.filter(call => call.method === 'create').length, 1)
   const input = h.calls.find(call => call.method === 'create')!.args[1]
-  assert.deepEqual(input, { visibility: 'PUBLIC', startingStack: 1_000, smallBlind: 5, bigBlind: 10 })
+  assert.deepEqual(input, { visibility: 'PUBLIC', startingStack: 10_000, smallBlind: 5, bigBlind: 10 })
+})
+
+test('bot-created room uses a funded 5k stack when the 10k choice is unavailable', async () => {
+  const first = { ...bot('online-bot-01'), balance: 5_000 }
+  const second = { ...bot('online-bot-02', 'bot-2-id'), balance: 5_000 }
+  const h = harness({ bots: [first, second], random: () => 0.9 })
+  await h.orchestrator.tick()
+  const created = h.calls.filter(call => call.method === 'create')
+  assert.equal(created.length, 1)
+  assert.equal(created[0]!.args[1].startingStack, 5_000)
+})
+
+test('bot cannot create an unfunded room below 5k despite a legacy 1k config', async () => {
+  const first = { ...bot('online-bot-01'), balance: 4_999 }
+  const second = { ...bot('online-bot-02', 'bot-2-id'), balance: 4_999 }
+  const h = harness({ bots: [first, second] })
+  await h.orchestrator.tick()
+  assert.equal(h.calls.some(call => call.method === 'create'), false)
 })
 
 test('broke bots cannot join or create a room', async () => {

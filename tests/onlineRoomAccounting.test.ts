@@ -219,6 +219,22 @@ test('one balance can fund separate rooms only up to the available amount', { sk
   assert.equal(wallet.balance, 5_000n)
 })
 
+test('account-backed public spectator does not buy in, take a seat or change wallet', { skip: !apiIsolated }, async () => {
+  const owner = await db.user.create({ data: { username: `oa_spectator_owner_${randomUUID().replaceAll('-', '').slice(0, 16)}`, passwordHash: 'test', balance: 50_000, wallet: { create: { balance: 50_000n } } } })
+  const spectator = await db.user.create({ data: { username: `oa_spectator_${randomUUID().replaceAll('-', '').slice(0, 16)}`, passwordHash: 'test', balance: 20_000, wallet: { create: { balance: 20_000n } } } })
+  users.push(owner.id, spectator.id)
+  if (redis!.status === 'wait') await redis!.connect()
+  const runtime = apiRuntime()
+  const created = await createAuthenticatedOnlineRoom(owner.id, { visibility: 'PUBLIC', startingStack: 10_000 }, { runtime })
+  rooms.push(created.room.roomId)
+  const observed = await getAuthenticatedOnlineRoom(spectator.id, created.room.roomCode, { runtime })
+  await getAuthenticatedOnlineRoom(spectator.id, created.room.roomCode, { runtime })
+  assert.equal(observed.room.pokerTable.players.some(player => player.playerId === spectator.id), false)
+  assert.equal(await db.onlineRoomPlayer.count({ where: { roomId: created.room.roomId, userId: spectator.id } }), 0)
+  assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId: spectator.id } })).balance, 20_000n)
+  assert.equal(await db.walletLedgerEntry.count({ where: { wallet: { userId: spectator.id } } }), 0)
+})
+
 test('authenticated create, join and leave move real account chips exactly once', { skip: !apiIsolated }, async () => {
   const owner = await db.user.create({
     data: { username: `oa_owner_${randomUUID().replaceAll('-', '').slice(0, 20)}`, passwordHash: 'test', balance: 50_000, wallet: { create: { balance: 50_000n } } }

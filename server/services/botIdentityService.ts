@@ -2,8 +2,47 @@ import { randomUUID } from 'node:crypto'
 import type { Prisma, User } from '@prisma/client'
 import { prisma } from '../db/client'
 import { DEFAULT_BALANCE } from './userAccountService'
+import { adjustUserWallet, lockUserWallet } from './walletService'
 
 export const BOT_INITIAL_BALANCE = DEFAULT_BALANCE
+export const BOT_DAILY_REFILL_AMOUNT = 10_000
+export const BOT_DAILY_REFILL_THRESHOLD = 5_000
+const BOT_DAILY_TIME_ZONE = 'Asia/Barnaul'
+
+function localDayKey(date: Date): string {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: BOT_DAILY_TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date)
+  const value = Object.fromEntries(parts.map(part => [part.type, part.value]))
+  return `${value.year}-${value.month}-${value.day}`
+}
+
+/** At most once per Barnaul calendar day, refill a bot whose free wallet is below 5k. */
+export async function replenishOnlinePokerBotDailyBalances(now = new Date(), botIds?: readonly string[]): Promise<number> {
+  const dayKey = localDayKey(now)
+  const bots = await prisma.user.findMany({ where: { isBot: true, botKey: { not: null }, botEnabled: true, ...(botIds ? { id: { in: [...botIds] } } : {}) }, select: { id: true, botKey: true, lastDailyBonusAt: true } })
+  let grants = 0
+  for (const bot of bots) {
+    if (!bot.botKey || (bot.lastDailyBonusAt && localDayKey(bot.lastDailyBonusAt) === dayKey)) continue
+    const granted = await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`bot-daily-refill:${bot.botKey}:${dayKey}`}, 0))::text`
+      const current = await tx.user.findUnique({ where: { id: bot.id }, select: { isBot: true, botEnabled: true, botKey: true, lastDailyBonusAt: true } })
+      if (!current?.isBot || !current.botEnabled || current.botKey !== bot.botKey || (current.lastDailyBonusAt && localDayKey(current.lastDailyBonusAt) === dayKey)) return false
+      const wallet = await lockUserWallet(tx, bot.id)
+      if (wallet.balance < BigInt(BOT_DAILY_REFILL_THRESHOLD)) {
+        await adjustUserWallet(tx, {
+          userId: bot.id,
+          delta: BigInt(BOT_DAILY_REFILL_AMOUNT),
+          entryType: 'BOT_DAILY_REFILL',
+          idempotencyKey: `bot-daily-refill:${bot.botKey}:${dayKey}`,
+          metadata: { botKey: bot.botKey, dayKey, threshold: BOT_DAILY_REFILL_THRESHOLD }
+        })
+      }
+      await tx.user.update({ where: { id: bot.id }, data: { lastDailyBonusAt: now } })
+      return wallet.balance < BigInt(BOT_DAILY_REFILL_THRESHOLD)
+    })
+    if (granted) grants += 1
+  }
+  return grants
+}
 
 export const BOT_SKILL_TIERS = Object.freeze(['WEAK', 'CASUAL', 'REGULAR', 'STRONG'] as const)
 export type BotSkillTier = typeof BOT_SKILL_TIERS[number]

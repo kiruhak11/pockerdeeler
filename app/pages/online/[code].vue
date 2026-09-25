@@ -25,7 +25,7 @@ function applyAuthoritativeState(next: OnlineRoomState, token?: string): boolean
   if (token) concurrencyToken.value = token
   const player = next.pokerTable.players.find(candidate => candidate.playerId === account.user?.id)
   privateRoom.value = next.visibility === 'PRIVATE'
-  joinPrompt.value = !player
+  joinPrompt.value = !player && (next.visibility === 'PRIVATE' || route.query.join === '1')
   ready.value = player?.ready ?? false
   sittingOut.value = player?.sittingOut ?? false
   return true
@@ -67,7 +67,7 @@ async function loadState() {
     applyAuthoritativeState(result.room, result.concurrencyToken)
     const player = result.room.pokerTable.players.find(candidate => candidate.playerId === account.user?.id)
     privateRoom.value = result.room.visibility === 'PRIVATE'
-    joinPrompt.value = !player
+    joinPrompt.value = !player && (result.room.visibility === 'PRIVATE' || route.query.join === '1')
     ready.value = player?.ready ?? false
     sittingOut.value = player?.sittingOut ?? false
     loading.value = false
@@ -172,9 +172,11 @@ useHead(() => ({ title: state.value ? `ONLINE ${state.value.roomCode} · Poker` 
     </section>
   </main>
   <OnlinePokerTable
-    v-else-if="state && viewerIsMember"
+    v-else-if="state && (viewerIsMember || state.visibility === 'PUBLIC')"
     :state="state"
     :viewer-id="account.user?.id || null"
+    :spectating="!viewerIsMember"
+    :join-busy="joinBusy"
     :connection-status="connectionStatus"
     :pending-action-id="pendingActionId"
     :notice="notice || socketNotice"
@@ -186,6 +188,7 @@ useHead(() => ({ title: state.value ? `ONLINE ${state.value.roomCode} · Poker` 
     @ready="value => mutate('ready', { ready: value })"
     @sitting-out="value => mutate('sitting-out', { sittingOut: value })"
     @leave="leave"
+    @join="joinRoom"
     @reconnect="socket.reconnect"
   />
 </template>

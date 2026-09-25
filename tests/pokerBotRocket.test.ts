@@ -24,6 +24,7 @@ import {
   prepareOnlineCashOut,
   reserveOnlineBuyIn
 } from '../server/services/onlineRoomAccountingService'
+import { replenishOnlinePokerBotDailyBalances } from '../server/services/botIdentityService'
 
 const dbUrl = process.env.DATABASE_URL
 const isolatedDb = Boolean(dbUrl && (/:55439\//.test(dbUrl) || /_test(?:$|[?])/.test(dbUrl)))
@@ -97,6 +98,7 @@ function harness(options: {
   seatedRoom?: string | null
   currentRoom?: unknown
   enabled?: boolean
+  random?: () => number
 } = {}) {
   const identity = options.identity ?? bot('test-bot')
   const events: Array<{ method: string; input?: any }> = []
@@ -141,7 +143,7 @@ function harness(options: {
     adapter,
     lease,
     now: () => now,
-    random: () => 0
+    random: options.random ?? (() => 0)
   })
   return { orchestrator, adapter, events, setNow: (value: number) => { now = value } }
 }
@@ -164,7 +166,7 @@ test('an idle bot places one delayed account-backed Rocket bet with legal limits
   const placed = h.events.find(event => event.method === 'bet')
   assert.ok(placed)
   assert.equal(placed.input.expectedRoundId, 'round-1')
-  assert.ok(placed.input.stake >= 1 && placed.input.stake <= 500)
+  assert.equal(placed.input.stake, 500, 'a high-confidence low cashout may risk the full bot balance')
   assert.ok(placed.input.autoCashout >= 1.01 && placed.input.autoCashout <= 3)
   assert.equal(placed.input.key, 'pocker:online-bot-lease:v1:rocket-test-bot')
   assert.equal(h.events.filter(event => event.method === 'register').length, 1)
@@ -181,6 +183,78 @@ test('broke bots do not receive a Rocket stake or hidden refill', async () => {
   const h = harness({ identity })
   await h.orchestrator.tick()
   assert.equal(h.events.some(event => event.method === 'bet'), false)
+})
+
+test('normal Rocket stake stays between 10 and 45 percent of available wallet', async () => {
+  for (const balance of [3, 11, 1_000, 10_000_000]) {
+    const h = harness({ identity: bot(`range-${balance}`, balance), random: () => 0.5 })
+    await h.orchestrator.tick()
+    h.setNow(1_005_000)
+    await h.orchestrator.tick()
+    const stake = h.events.find(event => event.method === 'bet')?.input.stake
+    assert.ok(Number.isSafeInteger(stake) && stake > 0 && stake <= 1_000_000)
+    assert.ok(stake >= Math.ceil(balance * 0.1) && stake <= Math.floor(balance * 0.45))
+  }
+  for (const balance of [1, 2, 10_000_001]) {
+    const h = harness({ identity: bot(`unrepresentable-${balance}`, balance), random: () => 0.5 })
+    await h.orchestrator.tick()
+    h.setNow(1_005_000)
+    await h.orchestrator.tick()
+    assert.equal(h.events.some(event => event.method === 'bet'), false)
+  }
+})
+
+test('bots below 5k receive one idempotent 10k refill per Barnaul calendar day', { skip: !isolatedDb }, async () => {
+  const fixture = await createBotFixture(4_999)
+  const firstMidnight = new Date('2026-09-24T17:00:00.000Z')
+  assert.equal(await replenishOnlinePokerBotDailyBalances(firstMidnight, [fixture.id]), 1)
+  assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId: fixture.id } })).balance, 14_999n)
+  assert.equal(await db.walletLedgerEntry.count({ where: { wallet: { userId: fixture.id }, entryType: 'BOT_DAILY_REFILL' } }), 1)
+  assert.equal(await replenishOnlinePokerBotDailyBalances(new Date('2026-09-25T10:00:00.000Z'), [fixture.id]), 0)
+  assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId: fixture.id } })).balance, 14_999n)
+
+  await db.userWallet.update({ where: { userId: fixture.id }, data: { balance: 4_000n } })
+  await db.user.update({ where: { id: fixture.id }, data: { balance: 4_000 } })
+  assert.equal(await replenishOnlinePokerBotDailyBalances(new Date('2026-09-25T17:00:00.000Z'), [fixture.id]), 1)
+  assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId: fixture.id } })).balance, 14_000n)
+  assert.equal(await db.walletLedgerEntry.count({ where: { wallet: { userId: fixture.id }, entryType: 'BOT_DAILY_REFILL' } }), 2)
+})
+
+test('daily grant observes Barnaul midnight and rejects human or above-threshold wallets', { skip: !isolatedDb }, async () => {
+  const priorTimezone = process.env.TZ
+  process.env.TZ = 'America/New_York'
+  try {
+    const zero = await createBotFixture(0)
+    const high = await createBotFixture(5_000)
+    const human = await createHumanFixture(0)
+    const beforeMidnight = new Date('2026-09-24T16:59:59.000Z')
+    const afterMidnight = new Date('2026-09-24T17:00:00.000Z')
+    assert.equal(await replenishOnlinePokerBotDailyBalances(beforeMidnight, [zero.id, high.id, human]), 1)
+    assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId: zero.id } })).balance, 10_000n)
+    assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId: high.id } })).balance, 5_000n)
+    assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId: human } })).balance, 0n)
+    await db.userWallet.update({ where: { userId: zero.id }, data: { balance: 0n } })
+    await db.user.update({ where: { id: zero.id }, data: { balance: 0 } })
+    assert.equal(await replenishOnlinePokerBotDailyBalances(afterMidnight, [zero.id]), 1)
+    assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId: zero.id } })).balance, 10_000n)
+    assert.equal(await db.walletLedgerEntry.count({ where: { wallet: { userId: zero.id }, entryType: 'BOT_DAILY_REFILL' } }), 2)
+  } finally {
+    if (priorTimezone === undefined) delete process.env.TZ
+    else process.env.TZ = priorTimezone
+  }
+})
+
+test('concurrent daily ticks grant a bot only once', { skip: !isolatedDb }, async () => {
+  const fixture = await createBotFixture(4_999)
+  const day = new Date('2026-09-24T17:00:00.000Z')
+  const grants = await Promise.all([
+    replenishOnlinePokerBotDailyBalances(day, [fixture.id]),
+    replenishOnlinePokerBotDailyBalances(day, [fixture.id])
+  ])
+  assert.equal(grants.reduce((sum, count) => sum + count, 0), 1)
+  assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId: fixture.id } })).balance, 14_999n)
+  assert.equal(await db.walletLedgerEntry.count({ where: { wallet: { userId: fixture.id }, entryType: 'BOT_DAILY_REFILL' } }), 1)
+  assert.equal(await replenishOnlinePokerBotDailyBalances(day, [fixture.id]), 0)
 })
 
 test('Rocket snapshot contains no multiplier, seed, crash point or payout result', () => {

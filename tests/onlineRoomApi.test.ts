@@ -146,6 +146,39 @@ test('public ONLINE room creation validates public settings', { skip: !isolated 
   assert.equal((room.result.room as Record<string, unknown>).privateJoinSecret, undefined)
 })
 
+test('a non-member may spectate a public ONLINE hand without receiving players hole cards', { skip: !isolated }, async () => {
+  const room = await createRoomApi({ visibility: 'PUBLIC' })
+  const joined = await join(room, 'spectator-gate-player')
+  const active = await activeRoom(room, room.ownerId, joined.playerId)
+  const spectatorId = `spectator-${randomUUID()}`
+  const spectator = await getAuthenticatedOnlineRoom(spectatorId, active.room.roomCode, { runtime: room.runtime })
+  assert.equal(spectator.room.visibility, 'PUBLIC')
+  assert.ok(spectator.room.pokerTable.currentHand)
+  assert.equal(spectator.room.pokerTable.players.some(player => player.playerId === spectatorId), false)
+  assert.ok(spectator.room.pokerTable.currentHand.players.every(player => player.holeCards.length === 0))
+})
+
+test('a full public table remains viewable without a seat or poker permissions', { skip: !isolated }, async () => {
+  const room = await createRoomApi({ visibility: 'PUBLIC' })
+  for (let seat = 2; seat <= 6; seat += 1) await join(room, `full-player-${seat}`, { seat })
+  const spectatorId = `full-spectator-${randomUUID()}`
+  const waiting = await getAuthenticatedOnlineRoom(spectatorId, room.result.room.roomCode, { runtime: room.runtime })
+  assert.equal(waiting.room.pokerTable.players.length, 6)
+  assert.equal(waiting.room.pokerTable.players.some(player => player.playerId === spectatorId), false)
+  assert.equal(waiting.room.pokerTable.currentHand, null)
+  const active = await activeRoom(room, room.ownerId, 'full-player-2')
+  const observed = await getAuthenticatedOnlineRoom(spectatorId, active.room.roomCode, { runtime: room.runtime })
+  const refreshed = await getAuthenticatedOnlineRoom(spectatorId, active.room.roomCode, { runtime: room.runtime })
+  assert.equal(observed.room.pokerTable.players.length, 6)
+  assert.equal(refreshed.room.pokerTable.players.length, 6)
+  assert.ok(observed.room.pokerTable.currentHand?.players.every(player => player.holeCards.length === 0))
+  assert.equal(JSON.stringify(observed).includes('burnCards'), false)
+  assert.equal(JSON.stringify(observed).includes('deck'), false)
+  await assert.rejects(setAuthenticatedOnlineRoomReady(spectatorId, active.room.roomCode, { concurrencyToken: observed.concurrencyToken, ready: true }, { runtime: room.runtime }), (error: unknown) => error instanceof OnlineRoomApiError && error.statusCode === 404)
+  await assert.rejects(startAuthenticatedOnlineRoomHand(spectatorId, active.room.roomCode, active.room.pokerTable.stateVersion, { runtime: room.runtime }), (error: unknown) => error instanceof OnlineRoomApiError && error.statusCode === 403)
+  await assert.rejects(joinAuthenticatedOnlineRoom(spectatorId, active.room.roomCode, { concurrencyToken: observed.concurrencyToken }, { runtime: room.runtime }), (error: unknown) => error instanceof OnlineRoomApiError && error.statusCode === 409)
+})
+
 test('ONLINE creation persists HOME poker settings and uses them for the first hand', { skip: !isolated }, async () => {
   const room = await createRoomApi({ visibility: 'PUBLIC', startingStack: 321, smallBlind: 7, bigBlind: 14 })
   assert.equal(room.result.room.pokerTable.smallBlind, 7)
