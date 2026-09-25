@@ -94,7 +94,8 @@ test('spectators see public tables and can explicitly choose to join', () => {
   assert.match(source, /spectating && isWaiting && state\.pokerTable\.players\.length < state\.maxPlayers/)
   assert.match(source, /spectatorCount \?\? 0/)
   assert.match(source, /после её завершения/)
-  assert.match(source, /Вы наблюдаете за публичным столом/)
+  assert.match(source, /Можно смотреть раздачу или занять свободное место/)
+  assert.match(source, /Занять место/)
   assert.match(lobby, /Смотреть/)
   assert.match(lobby, /Занять место/)
   assert.match(lobby, /room\.status === 'WAITING'/)
@@ -164,6 +165,12 @@ test('own hole cards are visible only for the viewer', () => {
 test('opponent hole cards are absent from the safe state', () => {
   assert.deepEqual(ownHoleCards(roomState().pokerTable.currentHand, 'p2'), [])
   assert.deepEqual(roomState().pokerTable.currentHand!.players[1]!.holeCards, [])
+})
+
+test('ONLINE UI never shows another player\'s active hole cards, including to spectators', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
+  assert.match(source, /if \(playerId !== props\.viewerId\) return \[\]/)
+  assert.match(source, /if \(finalizedHand\.value\) return finalizedPlayer\(playerId\)\?\.holeCards \?\? \[\]/)
 })
 
 test('flop, turn and river board cards are read from state', () => {
@@ -362,6 +369,27 @@ test('mobile viewport styling includes safe area and compact controls', () => {
   assert.match(source, /min-height: 46px/)
 })
 
+test('ONLINE room hides the global nav overlay and isolates the one-second turn clock', () => {
+  const app = readFileSync(resolve(process.cwd(), 'app/app.vue'), 'utf8')
+  const table = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
+  const clock = readFileSync(resolve(process.cwd(), 'app/components/online/OnlineTurnClock.vue'), 'utf8')
+  assert.match(app, /BottomNav v-if="!isOnlineTable"/)
+  assert.match(app, /app-content--online-table/)
+  assert.doesNotMatch(table, /setInterval\(/)
+  assert.match(clock, /setInterval\(/)
+  assert.match(table, /<OnlineTurnClock[^>]+:deadline="visibleHand\.turnDeadlineAt"/)
+})
+
+test('mobile action controls keep destructive all-in separated and remain touch-sized', () => {
+  const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
+  assert.match(source, /class="[^"]*action-button--fold[^"]*"/)
+  assert.match(source, /class="[^"]*action-button--allin[^"]*"/)
+  assert.match(source, /\.action-button--allin \{ grid-column: 1 \/ -1/)
+  assert.match(source, /\.action-button \{[^}]*min-height: 54px/)
+  assert.match(source, /@media \(max-width: 360px\)/)
+  assert.match(source, /stack-control-row--locked[\s\S]*disabled title="Доступно между раздачами"/)
+})
+
 test('desktop styling has a responsive breakpoint', () => {
   assert.match(readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8'), /@media \(min-width: 700px\)/)
 })
@@ -384,7 +412,7 @@ test('HOME page remains free of ONLINE table wiring', () => {
 test('player presentation uses public nickname, table stack, street contribution and last action', () => {
   const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
   assert.match(source, /displayName\(player\)/)
-  assert.match(source, /Стек:/)
+  assert.match(source, /player-stack/)
   assert.match(source, /Ставка:/)
   assert.match(source, /actionLabel\(/)
   assert.match(source, /:title="displayName\(player\)"/)
@@ -405,7 +433,7 @@ test('seat layouts keep the viewer at the lower anchor for two through six playe
   for (let count = 2; count <= 6; count += 1) {
     const positions = Array.from({ length: count }, (_, index) => seatPosition(index, count))
     assert.equal(new Set(positions.map(position => JSON.stringify(position))).size, count)
-    assert.equal(positions[0]?.top, count === 2 ? '86%' : count === 6 ? '87%' : '86%')
+    assert.equal(positions[0]?.top, '90%')
   }
 })
 
@@ -421,21 +449,22 @@ test('live hand strength and gold card highlighting come from the safe ROOM_STAT
   assert.match(source, /handStrength\.label/)
   assert.match(source, /contributingCardIds/)
   assert.match(source, /card--gold/)
-  assert.match(source, /ВАША КОМБИНАЦИЯ/)
+  assert.match(source, /ВАШИ КАРТЫ/)
+  assert.match(source, /own-cards__strength/)
   assert.doesNotMatch(source, /evaluateLiveHand|evaluateHand|pokerHandEvaluator/)
 })
 
 test('live combination block is laid out inside controls without overlay positioning', () => {
   const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
-  assert.match(source, /class="hand-strength"/)
-  assert.match(source, /\.hand-strength \{ display: grid/)
-  assert.doesNotMatch(source, /\.hand-strength[^}]*position:\s*absolute/)
+  assert.match(source, /class="own-cards panel"/)
+  assert.match(source, /\.own-cards \{ display: grid/)
+  assert.match(source, /\.own-cards__strength/)
 })
 
 test('finished ROOM_STATE renders server finalized showdown results', () => {
   const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
   assert.match(source, /finalizedHand/)
-  assert.match(source, /РЕЗУЛЬТАТ РАЗДАЧИ/)
+  assert.match(source, /РАЗДАЧА ЗАВЕРШЕНА/)
   assert.match(source, /finalizedWinners/)
   assert.match(source, /\.payout/)
 })
@@ -491,15 +520,15 @@ test('seat and center metadata zones are separated for mobile and desktop breakp
   const source = readFileSync(resolve(process.cwd(), 'app/components/online/OnlinePokerTable.vue'), 'utf8')
   const layouts = readFileSync(resolve(process.cwd(), 'app/utils/onlineRoomUi.ts'), 'utf8')
   for (const count of [2, 4, 6]) {
-    const topSeat = Array.from({ length: count }, (_, index) => seatPosition(index, count)).find(position => position.top === '2%')
+    const topSeat = Array.from({ length: count }, (_, index) => seatPosition(index, count)).find(position => position.top === '5%')
     assert.ok(topSeat, `${count} player table has an explicitly top-anchored seat`)
   }
-  assert.match(source, /'player-seat--top': seatPosition\(index, displayPlayers\.length\)\.top === '2%'/)
+  assert.match(source, /'player-seat--top': seatPosition\(index, displayPlayers\.length\)\.top === '5%'/)
   assert.match(source, /\.player-seat--top \{ transform: translate\(-50%, 0\); \}/)
-  assert.match(source, /\.table-meta \{[^}]*top: 40%/)
-  assert.ok(source.includes('.table-meta { top: 44%; } .board { top: 58%; }'))
-  assert.ok(source.includes('.table-meta { top: 35%; } .board { top: 52%; }'))
-  assert.match(source, /class="table-meta"[\s\S]*Банк/)
+  assert.match(source, /\.table-center \{ position: absolute;[^}]*top: 48%/)
+  assert.match(source, /\.table-center \{ top: 46%; width: 78%/)
+  assert.match(source, /\.table-center \{ top: 48%; \}/)
+  assert.match(source, /class="table-info-row"[\s\S]*class="pot-display"/)
   assert.doesNotMatch(source, /class="pot-pill"/)
   assert.match(source, /text-overflow: ellipsis; white-space: nowrap/)
   assert.match(source, /overflow: hidden/)

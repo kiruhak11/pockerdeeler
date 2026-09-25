@@ -100,12 +100,12 @@ export function formatTurnSeconds(seconds: number | null): string {
 
 export function seatPosition(index: number, count: number): Readonly<{ left: string; top: string }> {
   const layouts: Record<number, readonly Readonly<{ left: string; top: string }>[]> = {
-    1: [{ left: '50%', top: '86%' }],
-    2: [{ left: '50%', top: '86%' }, { left: '50%', top: '2%' }],
-    3: [{ left: '50%', top: '86%' }, { left: '16%', top: '26%' }, { left: '84%', top: '26%' }],
-    4: [{ left: '50%', top: '86%' }, { left: '13%', top: '52%' }, { left: '50%', top: '2%' }, { left: '87%', top: '52%' }],
-    5: [{ left: '50%', top: '86%' }, { left: '12%', top: '62%' }, { left: '20%', top: '20%' }, { left: '80%', top: '20%' }, { left: '88%', top: '62%' }],
-    6: [{ left: '50%', top: '87%' }, { left: '11%', top: '66%' }, { left: '15%', top: '28%' }, { left: '50%', top: '2%' }, { left: '85%', top: '28%' }, { left: '89%', top: '66%' }]
+    1: [{ left: '50%', top: '90%' }],
+    2: [{ left: '50%', top: '90%' }, { left: '50%', top: '5%' }],
+    3: [{ left: '50%', top: '90%' }, { left: '12%', top: '33%' }, { left: '88%', top: '33%' }],
+    4: [{ left: '50%', top: '90%' }, { left: '12%', top: '53%' }, { left: '50%', top: '5%' }, { left: '88%', top: '53%' }],
+    5: [{ left: '50%', top: '90%' }, { left: '12%', top: '66%' }, { left: '12%', top: '25%' }, { left: '88%', top: '25%' }, { left: '88%', top: '66%' }],
+    6: [{ left: '50%', top: '90%' }, { left: '12%', top: '67%' }, { left: '12%', top: '31%' }, { left: '50%', top: '5%' }, { left: '88%', top: '31%' }, { left: '88%', top: '67%' }]
   }
   const safeCount = Math.max(1, Math.min(6, Math.floor(count)))
   const layout = layouts[safeCount] ?? layouts[6]!
