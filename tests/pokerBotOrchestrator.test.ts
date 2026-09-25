@@ -113,6 +113,41 @@ test('bot joins an old public room through adapter join and respects room bot ca
   assert.equal(h.calls.find(call => call.method === 'join')!.args[1], 'AB2345')
 })
 
+test('a bot-only room drains after one activity window, without leaving an active hand', async () => {
+  const botId = 'online-bot-01-id'
+  const h = harness({
+    findRoom: () => 'AB2345',
+    getRoom: () => seatedRoom(botId)
+  })
+  await h.orchestrator.tick()
+  assert.equal(h.calls.some(call => call.method === 'leave'), false)
+
+  h.setNow(1_000_000 + 5 * 60_000 + 1)
+  await h.orchestrator.tick()
+  assert.equal(h.calls.filter(call => call.method === 'leave').length, 1)
+})
+
+test('bot-only idle timeout waits for the active hand to finish', async () => {
+  const botId = 'online-bot-01-id'
+  let snapshot = seatedRoom(botId, {
+    pokerTable: {
+      ...room().pokerTable,
+      players: [{ playerId: botId, seat: 1, stack: 1_000, connected: true, ready: true, sittingOut: false }],
+      seats: [{ seat: 1, playerId: botId }],
+      currentHand: { handId: 'active-hand', street: 'FLOP', currentActor: 2 }
+    }
+  })
+  const h = harness({ findRoom: () => 'AB2345', getRoom: () => snapshot })
+  await h.orchestrator.tick()
+  h.setNow(1_000_000 + 5 * 60_000 + 1)
+  await h.orchestrator.tick()
+  assert.equal(h.calls.some(call => call.method === 'leave'), false)
+
+  snapshot = seatedRoom(botId, { pokerTable: { ...room().pokerTable, players: [{ playerId: botId, seat: 1, stack: 1_000, connected: true, ready: true, sittingOut: false }], seats: [{ seat: 1, playerId: botId }] } })
+  await h.orchestrator.tick()
+  assert.equal(h.calls.filter(call => call.method === 'leave').length, 1)
+})
+
 test('a stale full public room candidate does not block joining the next candidate', async () => {
   const identity = bot('online-bot-01')
   const fullRoom = room({ pokerTable: { ...room().pokerTable, players: Array.from({ length: 6 }, (_, index) => ({

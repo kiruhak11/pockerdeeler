@@ -123,6 +123,7 @@ export class OnlinePokerBotOrchestrator {
   private readonly pending = new Map<string, PendingWork>()
   private readonly pendingRocketBets = new Map<string, PendingRocketBet>()
   private readonly leases = new Map<string, OnlinePokerBotLease>()
+  private readonly botOnlyRoomSince = new Map<string, number>()
   private activeBotIds = new Set<string>()
   private schedulerLease: OnlinePokerBotLease | undefined
   private createdRoomReservations = 0
@@ -431,7 +432,11 @@ export class OnlinePokerBotOrchestrator {
     const seated = table.players.find(player => player.playerId === bot.id)
     if (!seated) { this.pending.delete(bot.id); return }
     const handInProgress = table.currentHand !== null && table.currentHand.street !== 'FINISHED'
-    if ((!active || seated.stack <= 0) && !handInProgress) {
+    const botOnly = table.players.length > 0 && table.players.every(player => botIds.has(player.playerId))
+    if (botOnly) this.botOnlyRoomSince.set(room.roomId, this.botOnlyRoomSince.get(room.roomId) ?? this.now())
+    else this.botOnlyRoomSince.delete(room.roomId)
+    const botOnlyIdle = botOnly && this.now() - (this.botOnlyRoomSince.get(room.roomId) ?? this.now()) >= (config.activityWindowMs ?? 5 * 60_000)
+    if ((!active || seated.stack <= 0 || botOnlyIdle) && !handInProgress) {
       const left = await this.mutateWithConflictRecovery(bot, code, fence, room, 'leave',
         current => adapter.leave(bot.id, code, current, fence),
         current => !current.pokerTable.currentHand || current.pokerTable.currentHand.street === 'FINISHED'

@@ -334,6 +334,36 @@ export class OnlineRoomPresenceService {
     return `${this.keyPrefix}room-spectators:${hashPart(roomId)}`
   }
 
+  /** Clears only presence artifacts whose keys belong to a room being closed. */
+  async clearRoom(roomId: string, includeReleasedFences = false): Promise<number> {
+    assertId(roomId, 'Room id')
+    const roomHash = hashPart(roomId)
+    const patterns = [
+      `${this.keyPrefix}${roomHash}:*`,
+      `${this.keyPrefix}spectator:${roomHash}:*`,
+      `${this.keyPrefix}room-spectators:${roomHash}`
+    ]
+    let removed = 0
+    try {
+      await this.connect()
+      for (const pattern of patterns) {
+        let cursor = '0'
+        do {
+          const [next, keys] = await this.redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100)
+          cursor = next
+          // A caller may close the room while holding a grace fence. Keep
+          // that short lock alive until its owner releases it.
+          const scoped = includeReleasedFences ? keys : keys.filter(key => !key.endsWith(':grace:fence'))
+          if (scoped.length > 0) removed += await this.redis.del(...scoped)
+        } while (cursor !== '0')
+      }
+      return removed
+    } catch (error) {
+      if (error instanceof OnlineRoomPresenceError) throw error
+      throw new OnlineRoomPresenceError('REDIS_UNAVAILABLE', error instanceof Error ? error.message : 'Room presence cleanup failed.')
+    }
+  }
+
   private spectatorId(userId: string): string {
     return hashPart(userId)
   }

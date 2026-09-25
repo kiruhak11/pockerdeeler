@@ -9,8 +9,10 @@ import {
   type PresenceGraceClaim
 } from '../server/services/onlineRoomPresenceService'
 import {
+  cleanupDisconnectedOnlineRoomParticipant,
   createAuthenticatedOnlineRoom,
   joinAuthenticatedOnlineRoom,
+  reconcileStaleOnlineRoomParticipants,
   setAuthenticatedOnlineRoomPresence,
   setAuthenticatedOnlineRoomReady
 } from '../server/services/onlineRoomApiService'
@@ -25,6 +27,7 @@ const isolated = Boolean(dbUrl && redisIsolated)
 const redis = redisIsolated ? new Redis(redisUrl!, { lazyConnect: true }) : undefined
 const db = new PrismaClient()
 const roomIds: string[] = []
+const userIds: string[] = []
 const prefixes: string[] = []
 
 function presence(): OnlineRoomPresenceService {
@@ -55,6 +58,7 @@ test.after(async () => {
     await db.roomCodeRegistry.deleteMany({ where: { roomType: 'ONLINE', targetId: { in: roomIds } } })
     await db.onlineRoom.deleteMany({ where: { id: { in: roomIds } } })
   }
+  if (dbUrl && userIds.length > 0) await db.user.deleteMany({ where: { id: { in: userIds } } })
   await db.$disconnect()
 })
 
@@ -181,11 +185,23 @@ test('Redis failure returns controlled presence error', { skip: !redisIsolated }
 })
 
 async function createRoom(): Promise<{ room: Awaited<ReturnType<typeof createAuthenticatedOnlineRoom>>; runtime: OnlineRoomRuntimeStore; ownerId: string; playerId: string }> {
-  const ownerId = `presence-owner-${randomUUID()}`
+  const owner = await db.user.create({ data: {
+    username: `presence_owner_${randomUUID().replaceAll('-', '').slice(0, 20)}`,
+    passwordHash: 'test', balance: 50_000,
+    wallet: { create: { balance: 50_000n } }
+  } })
+  userIds.push(owner.id)
+  const ownerId = owner.id
   const runtimeStore = runtime()
   const room = await createAuthenticatedOnlineRoom(ownerId, {}, { runtime: runtimeStore })
   roomIds.push(room.room.roomId)
-  const playerId = `presence-player-${randomUUID()}`
+  const player = await db.user.create({ data: {
+    username: `presence_player_${randomUUID().replaceAll('-', '').slice(0, 20)}`,
+    passwordHash: 'test', balance: 50_000,
+    wallet: { create: { balance: 50_000n } }
+  } })
+  userIds.push(player.id)
+  const playerId = player.id
   const joined = await joinAuthenticatedOnlineRoom(playerId, room.room.roomCode, { concurrencyToken: room.concurrencyToken }, { runtime: runtimeStore })
   return { room: joined, runtime: runtimeStore, ownerId, playerId }
 }
@@ -216,7 +232,7 @@ test('presence transition preserves active hand, cards, stacks, pot and contribu
   assert.equal(reconnected.room.pokerTable.currentHand?.pot, before.pot)
 })
 
-test('scheduled grace expiry marks metadata disconnected without mutating the active hand', { skip: !isolated }, async () => {
+test('scheduled grace expiry defers leave until an active hand finishes', { skip: !isolated }, async () => {
   const room = await createRoom()
   let result = await setAuthenticatedOnlineRoomReady(room.ownerId, room.room.room.roomCode, { concurrencyToken: room.room.concurrencyToken, ready: true }, { runtime: room.runtime })
   result = await setAuthenticatedOnlineRoomReady(room.playerId, result.room.roomCode, { concurrencyToken: result.concurrencyToken, ready: true }, { runtime: room.runtime })
@@ -231,15 +247,52 @@ test('scheduled grace expiry marks metadata disconnected without mutating the ac
   const closed = await presenceService.unregisterConnection(registration.registration)
   assert.equal(closed.graceStarted, true)
   presenceService.scheduleGraceExpiry(result.room.roomId, room.ownerId, async () => {
-    await setAuthenticatedOnlineRoomPresence(room.ownerId, result.room.roomCode, false, { runtime: room.runtime })
+    await cleanupDisconnectedOnlineRoomParticipant(room.ownerId, result.room.roomCode, {
+      runtime: room.runtime,
+      presence: presenceService,
+      timer: { clear: async () => {}, start() {}, schedule: async () => null } as any
+    })
   })
   await new Promise(resolve => setTimeout(resolve, 1_150))
 
   const after = await room.runtime.get(result.room.roomId)
   assert.ok(after)
   assert.equal(after.state.pokerTable.players.find(player => player.playerId === room.ownerId)?.connected, false)
+  assert.ok(after.state.pendingLeaves.includes(room.ownerId))
   assert.deepEqual(after.state.pokerTable.currentHand, before)
   await presenceService.disconnect()
+})
+
+test('stale participant sweep cashes out once after grace and preserves multi-tab presence', { skip: !isolated }, async () => {
+  const room = await createRoom()
+  const service = presence()
+  const walletBefore = (await db.userWallet.findUniqueOrThrow({ where: { userId: room.ownerId } })).balance
+  const ownerStack = (await room.runtime.get(room.room.room.roomId))!.state.pokerTable.players.find(player => player.playerId === room.ownerId)!.stack
+  const first = await service.registerConnection(room.room.room.roomId, room.ownerId)
+  const second = await service.registerConnection(room.room.room.roomId, room.ownerId)
+  await service.unregisterConnection(first.registration)
+  const dependencies = {
+    runtime: room.runtime,
+    presence: service,
+    timer: { clear: async () => {}, start() {}, schedule: async () => null } as any
+  }
+  assert.equal(await reconcileStaleOnlineRoomParticipants(dependencies, { roomIds: [room.room.room.roomId] }), 0)
+  await service.unregisterConnection(second.registration)
+  await new Promise(resolve => setTimeout(resolve, 1_100))
+  assert.equal(await reconcileStaleOnlineRoomParticipants(dependencies, { roomIds: [room.room.room.roomId] }), 2)
+  const reservation = await db.onlineRoomPlayer.findUniqueOrThrow({ where: { roomId_userId: { roomId: room.room.room.roomId, userId: room.ownerId } } })
+  assert.equal(reservation.status, 'CASHED_OUT')
+  const entries = await db.walletLedgerEntry.findMany({ where: { wallet: { userId: room.ownerId } }, select: { entryType: true, amount: true } })
+  const cashOutEntries = entries.filter(entry => entry.entryType === 'ONLINE_POKER_CASH_OUT')
+  assert.equal(cashOutEntries.length, 1)
+  assert.equal(cashOutEntries[0]!.amount, BigInt(ownerStack))
+  const achievementCredits = entries.filter(entry => entry.entryType === 'ACHIEVEMENT_REWARD').reduce((sum, entry) => sum + entry.amount, 0n)
+  assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId: room.ownerId } })).balance, walletBefore + BigInt(ownerStack) + achievementCredits)
+  assert.equal(await room.runtime.get(room.room.room.roomId), null)
+  assert.deepEqual(await redis!.keys(`${service.keyFor(room.room.room.roomId, room.ownerId)}*`), [])
+  assert.deepEqual(await redis!.keys(`${service.keyFor(room.room.room.roomId, room.playerId)}*`), [])
+  assert.equal(await reconcileStaleOnlineRoomParticipants(dependencies, { roomIds: [room.room.room.roomId] }), 0)
+  await service.disconnect()
 })
 
 test('disconnected seated player is excluded between hands without leaving the room', { skip: !isolated }, async () => {

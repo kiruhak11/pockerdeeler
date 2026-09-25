@@ -37,7 +37,7 @@ import {
   type OnlineRoomMutationFence
 } from './onlineRoomRuntimeStore'
 import { publishOnlineRoomChanged } from './onlineRoomRealtimeService'
-import { getOnlineRoomPresenceService, OnlineRoomPresenceError } from './onlineRoomPresenceService'
+import { getOnlineRoomPresenceService, OnlineRoomPresenceError, type OnlineRoomPresenceService } from './onlineRoomPresenceService'
 import { isDatabaseUnavailableError } from '../utils/databaseErrors'
 import { resolveRoomSecretPepper } from '../utils/roomSecretPepper'
 import {
@@ -101,6 +101,7 @@ function fail(code: OnlineRoomApiErrorCode, message: string, statusCode: number)
 export type OnlineRoomApiDependencies = Readonly<{
   runtime?: OnlineRoomRuntimeStore
   timer?: OnlineRoomTurnTimerService
+  presence?: OnlineRoomPresenceService
   /** Internal-only fencing data for autonomous bot mutations. Never accepted from HTTP/WS. */
   botFence?: OnlineRoomMutationFence
 }>
@@ -254,6 +255,11 @@ function runtimeStore(dependencies?: OnlineRoomApiDependencies): OnlineRoomRunti
 function timerStore(dependencies?: OnlineRoomApiDependencies): OnlineRoomTurnTimerService {
   if (dependencies?.timer) return dependencies.timer
   return getOnlineRoomTurnTimerService()
+}
+
+function presenceStore(dependencies?: OnlineRoomApiDependencies): OnlineRoomPresenceService {
+  if (dependencies?.presence) return dependencies.presence
+  return getOnlineRoomPresenceService()
 }
 
 function assertTableStateVersion(room: OnlineRoomState, expectedTableStateVersion: number | undefined): void {
@@ -866,6 +872,16 @@ async function finishRoomRuntimeMutation(
   if (record.state.pokerTable.finalizedHand) await recordFinalizedOnlinePokerHand(record.state)
   if (!duplicate) {
     await syncMetadataAfterMutation(metadata, record.state).catch(() => undefined)
+    if (record.state.status === 'CLOSED') {
+      // Retire room-scoped runtime artifacts only after the authoritative
+      // mutation has removed every seat; durable cash-out recovery remains
+      // responsible for any still-pending wallet credit.
+      await Promise.allSettled([
+        Promise.resolve().then(() => runtimeStore(dependencies).remove(record.state.roomId, record.runtimeRevision)),
+        Promise.resolve().then(() => timerStore(dependencies).clear(record.state.roomId)),
+        Promise.resolve().then(() => presenceStore(dependencies).clearRoom(record.state.roomId))
+      ])
+    }
     void publishOnlineRoomChanged({
       type: 'ROOM_CHANGED',
       roomId: record.state.roomId,
@@ -1140,6 +1156,106 @@ export async function leaveAuthenticatedOnlineRoom(userId: string, code: string,
     }
     throw mapRuntimeError(error)
   }
+}
+
+/** Called only while the shared Redis grace fence is held. */
+export async function cleanupDisconnectedOnlineRoomParticipant(
+  userId: string,
+  code: string,
+  dependencies?: OnlineRoomApiDependencies
+): Promise<boolean> {
+  let current: ApiOnlineRoomResult
+  try {
+    current = await getAuthenticatedOnlineRoom(userId, code, dependencies)
+  } catch (error) {
+    const statusCode = (error as { statusCode?: number } | null)?.statusCode
+    if (statusCode === 404 || statusCode === 410) return false
+    throw error
+  }
+  const player = current.room.pokerTable.players.find(candidate => candidate.playerId === userId)
+  if (!player) return false
+  if (player.connected) current = await setAuthenticatedOnlineRoomPresence(userId, code, false, dependencies)
+  await leaveAuthenticatedOnlineRoom(userId, code, {
+    concurrencyToken: current.concurrencyToken,
+    expectedRoomVersion: current.room.roomVersion
+  }, dependencies)
+  return true
+}
+
+/** Recovers stale seated humans if a socket close or grace timer was lost. */
+export async function reconcileStaleOnlineRoomParticipants(
+  dependencies?: OnlineRoomApiDependencies,
+  scope?: Readonly<{ roomIds?: readonly string[] }>
+): Promise<number> {
+  if (scope?.roomIds && scope.roomIds.length === 0) return 0
+  const [participants, closedRooms] = await Promise.all([
+    prisma.onlineRoomPlayer.findMany({
+      where: { status: 'ACTIVE', ...(scope?.roomIds ? { roomId: { in: [...scope.roomIds] } } : {}), room: { status: { not: 'CLOSED' } }, user: { isBot: false } },
+      select: { roomId: true, userId: true, room: { select: { roomCode: true } } },
+      orderBy: { updatedAt: 'asc' },
+      take: 200
+    }),
+    prisma.onlineRoom.findMany({ where: { status: 'CLOSED', ...(scope?.roomIds ? { id: { in: [...scope.roomIds] } } : {}) }, select: { id: true }, take: 100 })
+  ])
+  const presence = presenceStore(dependencies)
+  const runtime = runtimeStore(dependencies)
+  let cleaned = 0
+  for (const participant of participants) {
+    let record: OnlineRoomRuntimeRecord | null
+    try { record = await runtime.get(participant.roomId) } catch { continue }
+    const seat = record?.state.pokerTable.players.find(player => player.playerId === participant.userId)
+    if (!record || !seat) continue
+    const hand = record.state.pokerTable.currentHand
+    if (record.state.pendingLeaves.includes(participant.userId) && hand && hand.street !== 'FINISHED') continue
+    try {
+      const now = Date.now()
+      if (await presence.liveConnectionCount(participant.roomId, participant.userId) > 0) continue
+      // A missing lease plus a still-connected snapshot starts a fresh grace.
+      // An already-disconnected snapshot means the prior grace completed.
+      await presence.startGraceIfEmpty(participant.roomId, participant.userId,
+        seat.connected ? now : now - 24 * 60 * 60 * 1000)
+      const claim = await presence.claimExpiredGrace(participant.roomId, participant.userId)
+      if (!claim.claimed || !claim.token) continue
+      try {
+        const result = await presence.withGraceClaim(
+          { roomId: participant.roomId, userId: participant.userId, token: claim.token },
+          () => cleanupDisconnectedOnlineRoomParticipant(participant.userId, participant.room.roomCode, dependencies)
+        )
+        if (result === null) continue
+        if (result === true) cleaned += 1
+        await presence.completeGraceDisconnect(participant.roomId, participant.userId, claim.token)
+        if (result === true) {
+          const roomStatus = await prisma.onlineRoom.findUnique({ where: { id: participant.roomId }, select: { status: true } })
+          if (roomStatus?.status === 'CLOSED') await presence.clearRoom(participant.roomId, true)
+        }
+      } catch (error) {
+        await presence.releaseGrace(participant.roomId, participant.userId, claim.token).catch(() => undefined)
+        throw error
+      }
+    } catch {
+      // Store/database outages are retried by the next periodic sweep.
+    }
+  }
+
+  // Older releases marked empty rooms CLOSED but retained their runtime key.
+  // Reclaim only a closed, seatless runtime with no durable funded reservation.
+  for (const room of closedRooms) {
+    try {
+      const record = await runtime.get(room.id)
+      if (!record || record.state.status !== 'CLOSED' || record.state.pokerTable.players.length > 0 ||
+          (record.state.pokerTable.currentHand && record.state.pokerTable.currentHand.street !== 'FINISHED')) continue
+      const funded = await prisma.onlineRoomPlayer.count({ where: { roomId: room.id, status: { in: ['RESERVING', 'ACTIVE', 'CASH_OUT_PENDING'] } } })
+      if (funded !== 0) continue
+      await Promise.allSettled([
+        Promise.resolve().then(() => runtime.remove(room.id, record.runtimeRevision)),
+        Promise.resolve().then(() => timerStore(dependencies).clear(room.id)),
+        Promise.resolve().then(() => presence.clearRoom(room.id, true))
+      ])
+    } catch {
+      // Repair is intentionally retried; failed dependencies never force cash-out.
+    }
+  }
+  return cleaned
 }
 
 export async function setAuthenticatedOnlineRoomReady(userId: string, code: string, input: ReadyAuthenticatedOnlineRoomInput, dependencies?: OnlineRoomApiDependencies): Promise<ApiOnlineRoomResult> {

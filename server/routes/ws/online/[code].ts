@@ -2,6 +2,7 @@ import type { Message, Peer } from 'crossws'
 import { verifyUserAuthToken } from '../../../services/userAccountService'
 import {
   applyAuthenticatedOnlineRoomAction,
+  cleanupDisconnectedOnlineRoomParticipant,
   getAuthenticatedOnlineRoom,
   OnlineRoomApiError,
   setAuthenticatedOnlineRoomPresence,
@@ -101,7 +102,7 @@ async function sendFreshState(peer: Peer, socket: AuthenticatedSocket): Promise<
 function monitorPresenceLease(presence: OnlineRoomPresenceService, registration: OnlineRoomPresenceRegistration, roomCode: string): void {
   presence.scheduleConnectionExpiry(registration, async () => {
     presence.scheduleGraceExpiry(registration.roomId, registration.userId, async () => {
-      await setAuthenticatedOnlineRoomPresence(registration.userId, roomCode, false)
+      await cleanupDisconnectedOnlineRoomParticipant(registration.userId, roomCode)
     })
   })
 }
@@ -144,7 +145,7 @@ async function authenticate(peer: Peer): Promise<AuthenticatedSocket> {
         const released = await presence.unregisterConnection(registered.registration)
         if (released.graceStarted) {
           presence.scheduleGraceExpiry(connection.roomId, auth.userId, async () => {
-            await setAuthenticatedOnlineRoomPresence(auth.userId, code, false)
+            await cleanupDisconnectedOnlineRoomParticipant(auth.userId, code)
           })
         }
       }
@@ -160,7 +161,7 @@ async function authenticate(peer: Peer): Promise<AuthenticatedSocket> {
       const released = await presence.unregisterConnection(registered.registration).catch(() => undefined)
       if (released?.graceStarted) {
         presence.scheduleGraceExpiry(result.room.roomId, auth.userId, async () => {
-          await setAuthenticatedOnlineRoomPresence(auth.userId, code, false)
+          await cleanupDisconnectedOnlineRoomParticipant(auth.userId, code)
         })
       }
     }
@@ -288,7 +289,7 @@ export default defineWebSocketHandler({
         void socket.presence.unregisterConnection(socket.presenceRegistration).then(result => {
           if (!result.graceStarted) return
           socket.presence!.scheduleGraceExpiry(socket.connection.roomId, socket.userId, async () => {
-            await setAuthenticatedOnlineRoomPresence(socket.userId, socket.connection.roomCode, false)
+            await cleanupDisconnectedOnlineRoomParticipant(socket.userId, socket.connection.roomCode)
           })
         }).catch(() => undefined)
       }
