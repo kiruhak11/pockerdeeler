@@ -270,8 +270,14 @@ test('Rocket snapshot contains no multiplier, seed, crash point or payout result
 
 const usersForCleanup: string[] = []
 const roundsForCleanup: string[] = []
+const baselineCrashRoundIds = new Set<string>()
 const roomsForCleanup: string[] = []
 let economyBefore: null | { id: string; dayKey: string; minesBank: bigint; rocketBank: bigint; jackpot: bigint; jackpotTenths: bigint; updatedAt: Date } | undefined
+
+test.before(async () => {
+  if (!isolatedDb) return
+  for (const round of await db.crashRound.findMany({ select: { id: true } })) baselineCrashRoundIds.add(round.id)
+})
 
 async function createBotFixture(balance: number) {
   const key = `rocket-test-${randomUUID()}`
@@ -319,6 +325,32 @@ async function createBettingRound(crashAt: number) {
   return round
 }
 
+async function cleanupRocketTestRounds(roundIds: readonly string[]) {
+  const ownedIds = [...new Set(roundIds)].filter(id => !baselineCrashRoundIds.has(id))
+  if (ownedIds.length === 0) return
+  await db.crashRound.deleteMany({ where: { id: { in: ownedIds } } })
+  const remaining = await db.crashRound.count({ where: { id: { in: ownedIds } } })
+  assert.equal(remaining, 0, 'Rocket tests must remove only rounds created by their own fixtures')
+}
+
+test('Rocket fixture cleanup is scoped and runs after successful or failed test work', { skip: !isolatedDb }, async () => {
+  for (const failBody of [false, true]) {
+    const round = await createBettingRound(150)
+    const fixtureIds = [round.id]
+    const expectedFailure = new Error('intentional Rocket fixture cleanup regression')
+    try {
+      if (failBody) throw expectedFailure
+    } catch (error) {
+      if (!failBody) throw error
+      assert.equal(error, expectedFailure)
+    } finally {
+      await cleanupRocketTestRounds(fixtureIds)
+    }
+    assert.equal(await db.crashRound.count({ where: { id: { in: fixtureIds } } }), 0)
+    assert.equal(await db.crashRound.count({ where: { phase: { in: ['betting', 'flying'] }, id: { in: fixtureIds } } }), 0)
+  }
+})
+
 async function createActivePokerReservation(userId: string) {
   const room = await db.onlineRoom.create({
     data: {
@@ -360,6 +392,7 @@ test('bot bet uses the normal CrashBet, wallet ledger and automatic settlement p
   assert.equal((await db.userWallet.findUniqueOrThrow({ where: { userId } })).balance, 1_025n)
   assert.equal(await db.walletLedgerEntry.count({ where: { idempotencyKey: `crash:payout:${round.id}:${userId}` } }), 1)
   const retriedSettlement = await getBotRocketSnapshot([userId], async () => true)
+  if (retriedSettlement.roundId !== round.id) roundsForCleanup.push(retriedSettlement.roundId)
   assert.ok(['betting', 'flying', 'crashed'].includes(retriedSettlement.phase))
   // The round may legitimately advance after the crash gap; retry safety is
   // verified against the original round's wallet and idempotency ledger below.
@@ -615,10 +648,7 @@ test('500 real bot Rocket games use existing identities, wallet entries and sett
 test.after(async () => {
   if (roomsForCleanup.length > 0) await db.onlineRoom.deleteMany({ where: { id: { in: roomsForCleanup } } })
   if (usersForCleanup.length > 0) await db.user.deleteMany({ where: { id: { in: usersForCleanup } } })
-  if (roundsForCleanup.length > 0) await db.crashRound.deleteMany({ where: { id: { in: roundsForCleanup } } })
-  // Empty rounds created by currentRound while settling the synthetic test
-  // rounds have no financial state and must not block the later season tests.
-  if (isolatedDb) await db.crashRound.deleteMany({ where: { bets: { none: {} } } })
+  await cleanupRocketTestRounds(roundsForCleanup)
   if (economyBefore !== undefined) {
     if (economyBefore) await db.miniGameEconomy.update({ where: { id: 'global' }, data: { dayKey: economyBefore.dayKey, minesBank: economyBefore.minesBank, rocketBank: economyBefore.rocketBank, jackpot: economyBefore.jackpot, jackpotTenths: economyBefore.jackpotTenths, updatedAt: economyBefore.updatedAt } }).catch(() => undefined)
     else await db.miniGameEconomy.deleteMany({ where: { id: 'global' } }).catch(() => undefined)

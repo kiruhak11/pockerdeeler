@@ -32,11 +32,27 @@ let botIdentities: readonly PersistentBotIdentity[] = []
 let roomIds: string[] = []
 let humanId: string | null = null
 const accountSnapshots = new Map<string, { user: Record<string, any>; walletBalance: bigint; walletId: string }>()
+const baselineCrashRoundIds = new Set<string>()
+const rocketRoundIds = new Set<string>()
 const baselineWalletEntryIds = new Set<string>()
 const baselineOnlineRatingIds = new Set<string>()
 const baselineTableRatingIds = new Set<string>()
 let soakStartedAt = new Date()
 const operationFailures: string[] = []
+
+function trackRocketTestRound(roundId: string) {
+  if (!baselineCrashRoundIds.has(roundId)) rocketRoundIds.add(roundId)
+}
+
+async function cleanupRocketTestRounds(roundIds: readonly string[]) {
+  const ownedIds = [...new Set(roundIds)].filter(id => !baselineCrashRoundIds.has(id))
+  if (ownedIds.length === 0) return
+  const rows = await db.crashRound.findMany({ where: { id: { in: ownedIds } }, select: { id: true, _count: { select: { bets: true } } } })
+  const emptyRoundIds = rows.filter(round => round._count.bets === 0).map(round => round.id)
+  if (emptyRoundIds.length > 0) await db.crashRound.deleteMany({ where: { id: { in: emptyRoundIds } } })
+  const remaining = await db.crashRound.findMany({ where: { id: { in: ownedIds } }, select: { id: true } })
+  assert.equal(remaining.length, 0, 'Rocket soak may clean only its empty currentRound fixtures; bet-bearing rounds must remain intact')
+}
 
 async function fundSoakWallet(userId: string, amount: bigint, grantKey: string): Promise<void> {
   const wallet = await db.userWallet.findUniqueOrThrow({ where: { userId }, select: { id: true, balance: true } })
@@ -59,6 +75,7 @@ async function fundSoakWallet(userId: string, amount: bigint, grantKey: string):
 
 before(async () => {
   if (!isolated) return
+  for (const round of await db.crashRound.findMany({ select: { id: true } })) baselineCrashRoundIds.add(round.id)
   botIdentities = await ensureOnlinePokerBots()
   const chosen = botIdentities
   for (const bot of chosen) {
@@ -87,6 +104,7 @@ after(async () => {
       await db.roomCodeRegistry.deleteMany({ where: { roomType: 'ONLINE', targetId: { in: createdRoomIds } } })
       await db.onlineRoom.deleteMany({ where: { id: { in: createdRoomIds } } })
     }
+    await cleanupRocketTestRounds([...rocketRoundIds])
     const chosenIds = [...accountSnapshots.keys()]
     const walletIds = [...accountSnapshots.values()].map(item => item.walletId)
     const newWalletRows = await db.walletLedgerEntry.findMany({ where: { walletId: { in: walletIds } }, select: { id: true } })
@@ -119,11 +137,34 @@ after(async () => {
   await db.$disconnect()
 })
 
+test('Rocket current-round fixture cleanup is scoped and runs after failed test work', { skip: !isolated }, async () => {
+  const seed = randomUUID().replaceAll('-', '').padEnd(64, '0').slice(0, 64)
+  const fixture = await db.crashRound.create({
+    data: { phase: 'betting', crashAt: 150, seed, seedHash: seed }
+  })
+  trackRocketTestRound(fixture.id)
+  const expectedFailure = new Error('intentional Rocket soak cleanup regression')
+  try {
+    throw expectedFailure
+  } catch (error) {
+    assert.equal(error, expectedFailure)
+  } finally {
+    await cleanupRocketTestRounds([fixture.id])
+  }
+  assert.equal(await db.crashRound.count({ where: { id: fixture.id } }), 0)
+})
+
 function apiWithInfrastructure(bots?: readonly PersistentBotIdentity[], targetRoomCode?: () => string | null): OnlinePokerBotOrchestratorAdapter {
   const base = onlinePokerBotApiAdapter
   const recordFailure = (operation: string, error: unknown) => operationFailures.push(`${operation}:${(error as { code?: unknown } | null)?.code ?? 'OPERATION_FAILED'}:${error instanceof Error ? error.message : 'unknown error'}`)
   return {
     ...base,
+    getRocketSnapshot: async (botIds, assertSchedulerLease) => {
+      if (!base.getRocketSnapshot) throw new Error('Rocket snapshot adapter is required for the bot soak.')
+      const snapshot = await base.getRocketSnapshot(botIds, assertSchedulerLease)
+      trackRocketTestRound(snapshot.roundId)
+      return snapshot
+    },
     cleanupBotCreatedRooms: (botIds, before) => base.cleanupBotCreatedRooms(botIds, before, infrastructure),
     ...(bots ? { listBots: async () => bots } : {}),
     ...(targetRoomCode ? { listPublicRooms: async () => {
