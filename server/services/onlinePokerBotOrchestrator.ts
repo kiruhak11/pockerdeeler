@@ -160,6 +160,7 @@ export class OnlinePokerBotOrchestrator {
   private readonly pendingRocketBets = new Map<string, PendingRocketBet>()
   private readonly leases = new Map<string, OnlinePokerBotLease>()
   private readonly botOnlyRoomSince = new Map<string, number>()
+  private readonly roomJoinTails = new Map<string, Promise<void>>()
   private activeBotIds = new Set<string>()
   private schedulerLease: OnlinePokerBotLease | undefined
   private createdRoomReservations = 0
@@ -370,33 +371,48 @@ export class OnlinePokerBotOrchestrator {
       hydrated.push({ candidate, publicRoom, botOwned: botOwnedRoom, humanPresent, botCount })
     }
     hydrated.sort((a, b) => Number(a.botOwned) - Number(b.botOwned) || a.candidate.createdAt.localeCompare(b.candidate.createdAt))
-    for (const { candidate, publicRoom, humanPresent, botCount } of hydrated) {
-      const table = publicRoom.room.pokerTable
+    for (const { candidate } of hydrated) {
       if (this.dependencies.lease.isRoomCoolingDown && await this.dependencies.lease.isRoomCoolingDown(bot.botKey, candidate.code).catch(() => true)) continue
-      // Human-created rooms get first priority and are filled gradually.
-      const humanCount = table.players.filter(player => !botIds.has(player.playerId)).length
-      const roomLimit = humanPresent ? (humanCount >= 3 ? 2 : 1) : config.maxBotsPerRoom
-      if (botCount >= roomLimit) continue
-      if (table.players.some(player => player.playerId === bot.id)) return true
-      let joinAccepted = false
-      await this.mutateWithConflictRecovery(bot, candidate.code, fence, publicRoom.room, 'join',
-        async () => {
-          const result = await adapter.joinRoom(bot.id, candidate.code, fence)
-          joinAccepted = true
-          return result
-        },
-        current => current.visibility === 'PUBLIC'
-          && current.pokerTable.players.length < current.maxPlayers
-          && !current.pokerTable.players.some(player => player.playerId === bot.id)
-          && bot.balance >= candidate.startingStack)
-      const seatedRoomCode = await adapter.findSeatedRoom(bot.id).catch(() => null)
-      if (seatedRoomCode === candidate.code) {
-        this.dependencies.log?.('bot_joined_public_room', { botKey: bot.botKey, roomCode: candidate.code })
-        return true
-      }
-      // A fulfilled join response or an existing seat elsewhere must stop us
-      // from trying another room, but a stale/full candidate is not a join.
-      if (joinAccepted || seatedRoomCode) return true
+      const outcome = await this.withRoomJoinLock(candidate.code, async () => {
+        // Room capacity and bot caps are checked again under the per-room lock,
+        // so two bot tasks in one scheduler tick cannot both consume the last
+        // bot slot using the same stale lobby snapshot.
+        const latest = await adapter.getRoom(bot.id, candidate.code, fence).catch(() => null)
+        if (!latest || latest.draining || latest.room.visibility !== 'PUBLIC') return 'continue'
+        const table = latest.room.pokerTable
+        const humanCount = table.players.filter(player => !botIds.has(player.playerId)).length
+        const botCount = table.players.filter(player => botIds.has(player.playerId)).length
+        const roomLimit = humanCount > 0 ? (humanCount >= 3 ? 2 : 1) : config.maxBotsPerRoom
+        if (table.players.some(player => player.playerId === bot.id)) return 'seated'
+        if (botCount >= roomLimit || table.players.length >= latest.room.maxPlayers) return 'continue'
+
+        let joinAccepted = false
+        await this.mutateWithConflictRecovery(bot, candidate.code, fence, latest.room, 'join',
+          async () => {
+            const result = await adapter.joinRoom(bot.id, candidate.code, fence)
+            joinAccepted = true
+            return result
+          },
+          current => {
+            const currentHumans = current.pokerTable.players.filter(player => !botIds.has(player.playerId)).length
+            const currentBots = current.pokerTable.players.filter(player => botIds.has(player.playerId)).length
+            const currentLimit = currentHumans > 0 ? (currentHumans >= 3 ? 2 : 1) : config.maxBotsPerRoom
+            return current.visibility === 'PUBLIC'
+              && current.pokerTable.players.length < current.maxPlayers
+              && currentBots < currentLimit
+              && !current.pokerTable.players.some(player => player.playerId === bot.id)
+              && bot.balance >= candidate.startingStack
+          })
+        const seatedRoomCode = await adapter.findSeatedRoom(bot.id).catch(() => null)
+        if (seatedRoomCode === candidate.code) {
+          this.dependencies.log?.('bot_joined_public_room', { botKey: bot.botKey, roomCode: candidate.code })
+          return 'joined'
+        }
+        // A fulfilled join response or an existing seat elsewhere must stop us
+        // from trying another room, but a stale/full candidate is not a join.
+        return joinAccepted || seatedRoomCode ? 'stop' : 'continue'
+      })
+      if (outcome === 'seated' || outcome === 'joined' || outcome === 'stop') return true
     }
 
     const presets = botCreatedRoomPresets(config).filter(preset => preset.bigBlind >= preset.smallBlind && preset.startingStack <= bot.balance)
@@ -416,6 +432,20 @@ export class OnlinePokerBotOrchestrator {
       }
     }
     return false
+  }
+
+  private async withRoomJoinLock<T>(roomCode: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.roomJoinTails.get(roomCode) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>(resolve => { release = resolve })
+    this.roomJoinTails.set(roomCode, current)
+    await previous.catch(() => undefined)
+    try {
+      return await action()
+    } finally {
+      release()
+      if (this.roomJoinTails.get(roomCode) === current) this.roomJoinTails.delete(roomCode)
+    }
   }
 
   private isRocketRotation(botKey: string): boolean {

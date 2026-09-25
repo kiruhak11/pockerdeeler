@@ -262,7 +262,7 @@ test('a stale full public room candidate does not block joining the next candida
 
   await subject.tick()
 
-  assert.deepEqual(attemptedCodes, ['AB2345', 'CD3456'])
+  assert.deepEqual(attemptedCodes, ['CD3456'])
   assert.equal(seatedCode, 'CD3456')
 })
 
@@ -278,6 +278,41 @@ test('a human room is not filled beyond the configured bot limit', async () => {
     lease: { acquire: async (botKey: string) => ({ botKey, ownerId: 'worker', token: botKey, leaseKey: botKey }), renew: async () => true, release: async () => true }, random: () => 0 })
   await orchestrator.tick()
   assert.equal(h.calls.some(call => call.method === 'join'), false)
+})
+
+test('parallel bot work cannot exceed the seeded-room bot cap from a stale snapshot', async () => {
+  const owner = { ...bot('online-bot-00'), botEnabled: false }
+  const first = bot('online-bot-01')
+  const second = bot('online-bot-02')
+  const initial = room({ ownerId: owner.id, pokerTable: { ...room().pokerTable, players: [
+    { playerId: owner.id, seat: 1, stack: 1_000, connected: true, ready: false, sittingOut: false }
+  ] } })
+  let current = initial
+  const seated = new Map([[owner.id, 'AB2345']])
+  const h = harness({
+    bots: [owner, first, second],
+    rooms: [{ code: 'AB2345', playerCount: 1, maxPlayers: 6, status: 'WAITING', createdAt: new Date(0).toISOString(), startingStack: 1_000, smallBlind: 5, bigBlind: 10 }],
+    getRoom: () => current,
+    findRoom: id => seated.get(id) ?? null
+  })
+  const adapter: OnlinePokerBotOrchestratorAdapter = {
+    ...h.adapter,
+    joinRoom: async userId => {
+      await new Promise(resolve => setImmediate(resolve))
+      current = { ...current, pokerTable: { ...current.pokerTable, players: [
+        ...current.pokerTable.players,
+        { playerId: userId, seat: current.pokerTable.players.length + 1, stack: 1_000, connected: true, ready: false, sittingOut: false }
+      ] } } as any
+      seated.set(userId, 'AB2345')
+      return { room: current } as any
+    }
+  }
+  const orchestrator = new OnlinePokerBotOrchestrator({ config: baseConfig({ minActiveBots: 3, maxActiveBots: 3, maxBotsPerRoom: 2, maxBotCreatedRooms: 0 }), adapter,
+    lease: { acquire: async botKey => ({ botKey, ownerId: 'worker', token: botKey, leaseKey: botKey }), renew: async () => true, release: async () => true }, random: () => 0 })
+
+  await orchestrator.tick()
+
+  assert.equal(current.pokerTable.players.filter(player => [owner.id, first.id, second.id].includes(player.playerId)).length, 2)
 })
 
 test('a human joining a bot-created room restores the regular bot cap', async () => {
