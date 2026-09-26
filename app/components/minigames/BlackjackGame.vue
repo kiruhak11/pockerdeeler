@@ -2,10 +2,11 @@
 import { useAccountStore } from '~/stores/account'
 
 type Card = { rank: string; suit: string; code: string } | { hidden: true }
+type SplitHand = { cards: Card[]; stake: number; total: number; status: 'ACTIVE' | 'WAITING' | 'STOOD' | 'BUST' | 'FINISHED'; result: 'WIN' | 'LOSE' | 'PUSH' | 'BUST' | null; payout: number }
 type Round = {
   roundId: string; status: 'ACTIVE' | 'FINISHED'; stake: number; playerCards: Card[]; dealerCards: Card[];
   playerTotal: number; dealerTotal: number; dealerSoft: boolean; dealerHoleHidden: boolean;
-  outcome: 'WIN' | 'LOSE' | 'PUSH' | 'BLACKJACK' | null; doubled: boolean; payout: number; netChange: number; balance: number
+  outcome: 'WIN' | 'LOSE' | 'PUSH' | 'BLACKJACK' | null; doubled: boolean; splitHands: SplitHand[] | null; activeHandIndex: number | null; actionRevision: number; payout: number; netChange: number; balance: number
 }
 const account = useAccountStore()
 const round = ref<Round | null>(null)
@@ -16,8 +17,10 @@ const busy = ref(false)
 const errorMessage = ref('')
 const numberFormat = new Intl.NumberFormat('ru-RU')
 const maxEvenStake = computed(() => Math.max(0, balance.value - balance.value % 2))
-const canDouble = computed(() => Boolean(round.value?.status === 'ACTIVE' && round.value.playerCards.length === 2 && round.value.stake > 0 && balance.value >= round.value.stake))
+const canDouble = computed(() => Boolean(round.value?.status === 'ACTIVE' && !round.value.splitHands && round.value.playerCards.length === 2 && round.value.stake > 0 && balance.value >= round.value.stake))
+const canSplit = computed(() => Boolean(round.value?.status === 'ACTIVE' && !round.value.splitHands && round.value.actionRevision === 0 && round.value.playerCards.length === 2 && round.value.playerCards[0] && round.value.playerCards[1] && !('hidden' in round.value.playerCards[0]) && !('hidden' in round.value.playerCards[1]) && round.value.playerCards[0].rank === round.value.playerCards[1].rank && balance.value >= round.value.stake))
 const outcomeText = computed(() => {
+  if (round.value?.splitHands) return 'Итог двух рук'
   const labels: Record<string, string> = { WIN: 'Победа', LOSE: 'Раунд за дилером', PUSH: 'Ничья — ставка возвращена', BLACKJACK: 'Натуральный блэкджек!' }
   return labels[round.value?.outcome ?? ''] ?? ''
 })
@@ -60,12 +63,12 @@ async function start() {
   finally { busy.value = false }
 }
 
-async function action(kind: 'hit' | 'stand' | 'double') {
+async function action(kind: 'hit' | 'stand' | 'double' | 'split') {
   if (!round.value || round.value.status !== 'ACTIVE' || busy.value) return
   busy.value = true
   errorMessage.value = ''
   try {
-    const result = await $fetch<{ round: Round }>(`/api/blackjack/${kind}`, { method: 'POST', retry: 0, body: { roundId: round.value.roundId, requestId: crypto.randomUUID() } })
+    const result = await $fetch<{ round: Round }>(`/api/blackjack/${kind}`, { method: 'POST', retry: 0, body: { roundId: round.value.roundId, requestId: crypto.randomUUID(), expectedRevision: round.value.actionRevision } })
     round.value = result.round
     balance.value = result.round.balance
     if (account.user) account.setUser({ ...account.user, balance: balance.value })
@@ -102,19 +105,27 @@ onMounted(() => void refresh())
 
         <div class="bj-center-line"><span>♣</span><i/><span>♠</span></div>
 
-        <div class="bj-hand bj-player">
+        <div v-if="round?.splitHands?.length === 2" class="bj-split-hands" aria-label="Разделённые руки">
+          <article v-for="(hand,index) in round.splitHands" :key="`split-${index}`" class="bj-split-hand" :class="{ 'bj-split-active':round.status === 'ACTIVE' && round.activeHandIndex === index, 'bj-split-finished':round.status === 'FINISHED', 'bj-split-bust':hand.result === 'BUST' }">
+            <div class="bj-hand-meta"><div><span class="bj-player-label">РУКА {{ index + 1 }}<i v-if="round.status === 'ACTIVE' && round.activeHandIndex === index" class="bj-active-tag">ТВОЙ ХОД</i></span><span class="bj-quiet">Ставка · {{ numberFormat.format(hand.stake) }}</span></div><strong>{{ hand.total }}</strong></div>
+            <div class="bj-cards"><div v-for="(card,cardIndex) in hand.cards" :key="`split-${index}-${cardIndex}`" class="bj-card" :class="{ 'bj-card-red':cardRed(card) }" :style="{ animationDelay: `${cardIndex * 70}ms` }" :aria-label="cardLabel(card)"><span class="bj-card-corner">{{ 'hidden' in card ? '?' : card.rank }}<i v-if="!('hidden' in card)">{{ suitMark(card.suit) }}</i></span><b v-if="!('hidden' in card)">{{ suitMark(card.suit) }}</b><span v-if="!('hidden' in card)" class="bj-card-corner bj-card-corner-bottom">{{ card.rank }}<i>{{ suitMark(card.suit) }}</i></span></div></div>
+            <div v-if="round.status === 'FINISHED'" class="bj-hand-result" :class="`hand-result-${hand.result?.toLowerCase()}`"><strong>{{ hand.result === 'WIN' ? 'ПОБЕДА' : hand.result === 'PUSH' ? 'НИЧЬЯ' : hand.result === 'BUST' ? 'ПЕРЕБОР' : 'ПРОИГРЫШ' }}</strong><span>{{ hand.payout > hand.stake ? `+${numberFormat.format(hand.payout - hand.stake)}` : hand.payout === hand.stake ? `возврат ${numberFormat.format(hand.stake)}` : '0' }}</span></div>
+          </article>
+        </div>
+
+        <div v-else class="bj-hand bj-player">
           <div class="bj-hand-meta"><div><span class="bj-player-label">ТВОЯ РУКА</span><span class="bj-quiet">Ставка · {{ numberFormat.format(round?.stake ?? stake) }}<i v-if="round?.doubled" class="bj-double-tag">УДВОЕНА</i></span></div><strong v-if="round">{{ round.playerTotal }}</strong></div>
           <div class="bj-cards"><div v-for="(card,index) in round?.playerCards ?? []" :key="'p'+index" class="bj-card" :class="{ 'bj-card-red':cardRed(card) }" :style="{ animationDelay: `${index * 70}ms` }" :aria-label="cardLabel(card)"><span class="bj-card-corner">{{ 'hidden' in card ? '?' : card.rank }}<i v-if="!('hidden' in card)">{{ suitMark(card.suit) }}</i></span><b v-if="!('hidden' in card)">{{ suitMark(card.suit) }}</b><span v-if="!('hidden' in card)" class="bj-card-corner bj-card-corner-bottom">{{ card.rank }}<i>{{ suitMark(card.suit) }}</i></span></div><span v-if="!round" class="bj-empty-cards">Твои карты появятся здесь</span></div>
         </div>
 
-        <div v-if="round?.status === 'FINISHED'" class="bj-result" :class="`result-${round.outcome?.toLowerCase()}`" aria-live="polite"><span class="bj-result-icon">{{ outcomeIcon }}</span><div><strong>{{ outcomeText }}</strong><span>{{ round.netChange > 0 ? `+${numberFormat.format(round.netChange)} фишек` : round.netChange < 0 ? `−${numberFormat.format(-round.netChange)} фишек` : 'Ставка возвращена' }}</span></div></div>
+        <div v-if="round?.status === 'FINISHED'" class="bj-result" :class="`result-${round.outcome?.toLowerCase()}`" aria-live="polite"><span class="bj-result-icon">{{ outcomeIcon }}</span><div><strong>{{ outcomeText }}</strong><span>{{ round.splitHands ? `Итог: ${round.netChange > 0 ? '+' : ''}${numberFormat.format(round.netChange)} фишек` : round.netChange > 0 ? `+${numberFormat.format(round.netChange)} фишек` : round.netChange < 0 ? `−${numberFormat.format(-round.netChange)} фишек` : 'Ставка возвращена' }}</span></div></div>
       </template>
     </section>
 
     <section class="bj-controls">
       <template v-if="!loading && round?.status === 'ACTIVE'">
         <div class="bj-controls-copy"><div><p class="arcade-eyebrow">ТВОЙ ХОД</p><h2>Как сыграем?</h2></div><span class="bj-turn-pip"><i/>Твой выбор</span></div>
-        <div class="bj-actions"><button class="bj-hit" :disabled="busy" @click="action('hit')"><span>＋</span><b>Взять</b><small>Ещё карта</small></button><button class="bj-stand" :disabled="busy" @click="action('stand')"><span>✓</span><b>Хватит</b><small>Передать дилеру</small></button><button v-if="canDouble" class="bj-double" :disabled="busy" @click="action('double')"><span>×2</span><b>Удвоить</b><small>+{{ numberFormat.format(round?.stake ?? 0) }}</small></button></div>
+        <div class="bj-actions" :class="{ 'bj-actions-split':round.splitHands }"><button class="bj-hit" :disabled="busy" @click="action('hit')"><span>＋</span><b>Взять</b><small>Ещё карта</small></button><button class="bj-stand" :disabled="busy" @click="action('stand')"><span>✓</span><b>Хватит</b><small>Передать дилеру</small></button><button v-if="canDouble" class="bj-double" :disabled="busy" @click="action('double')"><span>×2</span><b>Удвоить</b><small>+{{ numberFormat.format(round?.stake ?? 0) }}</small></button><button v-if="canSplit" class="bj-split-button" :disabled="busy" @click="action('split')"><span>⑂</span><b>Разделить</b><small>+{{ numberFormat.format(round?.stake ?? 0) }}</small></button></div>
       </template>
       <template v-else-if="!loading && (!round || round.status === 'FINISHED')">
         <div class="bj-controls-copy"><div><p class="arcade-eyebrow">{{ round ? 'НОВАЯ РАЗДАЧА' : 'СДЕЛАЙ СТАВКУ' }}</p><h2>{{ round ? 'Ещё одну?' : 'Сыграем?' }}</h2></div><span class="bj-payout-tag">NATURAL <b>3:2</b></span></div>
@@ -138,6 +149,6 @@ onMounted(() => void refresh())
 @keyframes bj-reveal{from{transform:rotateY(90deg);filter:brightness(.7)}to{transform:rotateY(0);filter:brightness(1)}}
 .bj-card-reveal{animation:bj-reveal .42s cubic-bezier(.2,.75,.3,1) both;backface-visibility:hidden}
 @media(prefers-reduced-motion:reduce){.bj-card-reveal{animation:none}}
-.bj-actions{grid-template-columns:repeat(3,minmax(0,1fr))}.bj-double{border:1px solid #e4ca814d;background:linear-gradient(145deg,#3b3822,#292a20);color:#f3dda1}.bj-double>span{background:#e7cd7b20;color:#f0d88f;font-size:11px!important;font-weight:800}.bj-double-tag{margin-left:7px;padding:2px 5px;border:1px solid #e4ca8155;border-radius:20px;color:#e8cc83;font-size:7px;font-style:normal;letter-spacing:.08em;white-space:nowrap;animation:bj-result-in .3s ease-out}
-@media(max-width:600px){.bj-actions{grid-template-columns:repeat(3,minmax(0,1fr))}.bj-actions button{grid-template-columns:29px minmax(0,1fr);padding-inline:7px}.bj-actions b{font-size:10px}.bj-actions small{font-size:8px}}
+.bj-actions{grid-template-columns:repeat(4,minmax(0,1fr))}.bj-actions-split{grid-template-columns:repeat(2,minmax(0,1fr))}.bj-double{border:1px solid #e4ca814d;background:linear-gradient(145deg,#3b3822,#292a20);color:#f3dda1}.bj-double>span{background:#e7cd7b20;color:#f0d88f;font-size:11px!important;font-weight:800}.bj-double-tag{margin-left:7px;padding:2px 5px;border:1px solid #e4ca8155;border-radius:20px;color:#e8cc83;font-size:7px;font-style:normal;letter-spacing:.08em;white-space:nowrap;animation:bj-result-in .3s ease-out}.bj-split-button{border:1px solid #91d6ad42;background:linear-gradient(145deg,#183b2e,#172b24);color:#ccebd4}.bj-split-button>span{background:#95e4b51c;color:#a8e7bd;font-size:19px!important}.bj-split-hands{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;max-width:820px;margin:0 auto}.bj-split-hand{min-width:0;padding:14px 8px 11px;border:1px solid #d7c88425;border-radius:17px;background:#0a2b22a6;transition:border-color .2s,background .2s,transform .2s}.bj-split-active{border-color:#a3e3b586;background:#174b37;box-shadow:0 0 0 2px #9ee3b519,0 10px 28px #041d1850;transform:translateY(-2px)}.bj-split-finished{border-color:#d6bd7550}.bj-split-bust{opacity:.67}.bj-split-hands .bj-hand-meta{padding:0 8px}.bj-active-tag{margin-left:6px;color:#a5e5b9;font-size:7px;font-style:normal;letter-spacing:.08em}.bj-hand-result{display:flex;justify-content:space-between;gap:6px;margin:8px 8px 0;color:#a7e7b9;font-size:9px}.bj-hand-result span{color:#c2d6c7}.hand-result-lose,.hand-result-bust{color:#ee9b8d}.hand-result-push{color:#e5d598}
+@media(max-width:600px){.bj-actions{grid-template-columns:repeat(2,minmax(0,1fr))}.bj-actions button{grid-template-columns:29px minmax(0,1fr);padding-inline:7px}.bj-actions b{font-size:10px}.bj-actions small{font-size:8px}.bj-split-hands{grid-template-columns:minmax(0,1fr);gap:8px;max-width:420px}.bj-split-hand{padding:11px 5px 9px;border-radius:14px}.bj-split-hands .bj-cards{min-height:82px}.bj-split-hands .bj-card{width:50px;height:73px}.bj-split-hands .bj-hand-meta{margin-bottom:4px}}
 </style>

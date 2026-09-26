@@ -223,6 +223,9 @@ model BlackjackRound {
   status           String    @default("ACTIVE") @db.VarChar(16)
   stake            BigInt
   playerCards      Json      @map("player_cards") @db.JsonB
+  playerHands      Json?     @map("player_hands") @db.JsonB
+  activeHandIndex  Int?      @map("active_hand_index")
+  actionRevision   Int       @default(0) @map("action_revision")
   dealerCards      Json      @map("dealer_cards") @db.JsonB
   shoe             Json      @db.JsonB
   nextCard         Int       @default(4) @map("next_card")

@@ -7,7 +7,8 @@ export const blackjackStartSchema = z.object({
 
 export const blackjackActionSchema = z.object({
   roundId: z.string().uuid(),
-  requestId: z.string().uuid()
+  requestId: z.string().uuid(),
+  expectedRevision: z.number().int().nonnegative()
 })
 
 export type BlackjackStartInput = z.infer<typeof blackjackStartSchema>
