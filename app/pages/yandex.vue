@@ -41,7 +41,7 @@ async function initialize() {
   try {
     await adapter().initialize()
     identity.value = await adapter().getPlayerIdentity()
-    await adapter().gameReady()
+    if (adapter().isSdkAvailable) await adapter().gameReady()
     stage = 'guest'
     await ensureYandexSession()
     stage = 'api'
@@ -53,6 +53,9 @@ async function initialize() {
       signedAuthAvailable.value = session.signedAuthAvailable
     }
     status.value = 'ready'
+    if (!adapter().isSdkAvailable) {
+      errorMessage.value = 'Прямой запуск открыт как гость. SDK Яндекс Игр доступен только внутри игрового iframe; реклама и вход через Яндекс здесь отключены.'
+    }
   } catch {
     status.value = 'error'
     errorMessage.value = stage === 'sdk'
@@ -64,7 +67,7 @@ async function initialize() {
 }
 
 async function showRewardedVideo() {
-  if (rewardedBusy.value || status.value !== 'ready' || route.path !== '/yandex') return
+  if (rewardedBusy.value || status.value !== 'ready' || route.path !== '/yandex' || !adapter().isSdkAvailable) return
   rewardedBusy.value = true
   rewardedError.value = ''
   rewardedNotice.value = ''
@@ -152,10 +155,10 @@ useHead({ title: 'Pocker · Яндекс Игры' })
   <main class="yandex-shell">
     <header class="yandex-shell__header">
       <div><span class="yandex-shell__mark">P</span><div><strong>Pocker</strong><small>ONLINE poker</small></div></div>
-      <div v-if="status === 'ready' && identity" class="yandex-shell__player">
+      <div v-if="status === 'ready'" class="yandex-shell__player">
         <span class="yandex-shell__avatar" aria-hidden="true">{{ playerInitials }}</span>
-        <div><strong>{{ identity.displayName || 'Гость' }}</strong><small>{{ accountAuthorized ? 'Игрок Яндекса' : 'Гостевой режим' }}</small></div>
-        <button v-if="!accountAuthorized && signedAuthAvailable" type="button" :disabled="authorizationBusy" @click="authorize">{{ authorizationBusy ? 'Входим…' : 'Войти' }}</button>
+        <div><strong>{{ identity?.displayName || 'Гость' }}</strong><small>{{ accountAuthorized ? 'Игрок Яндекса' : 'Гостевой режим' }}</small></div>
+        <button v-if="!accountAuthorized && signedAuthAvailable && adapter().isSdkAvailable" type="button" :disabled="authorizationBusy" @click="authorize">{{ authorizationBusy ? 'Входим…' : 'Войти' }}</button>
         <small v-else-if="!accountAuthorized" class="yandex-shell__auth-hint">Вход через Яндекс пока недоступен — гостевой режим работает.</small>
       </div>
     </header>
@@ -180,7 +183,7 @@ useHead({ title: 'Pocker · Яндекс Игры' })
       <p class="yandex-shell__disclosure">Все выигрыши и награды в Pocker — только внутренняя виртуальная валюта. Она не выводится и не обменивается на реальные деньги или имущество.</p>
       <section class="yandex-reward" aria-labelledby="yandex-reward-title">
         <div><span class="yandex-reward__eyebrow">БОНУС ЗА РЕКЛАМУ</span><h2 id="yandex-reward-title">3 просмотра = 10 000 фишек</h2><p>Прогресс: {{ rewardedProgress.viewsSinceGrant }} / 3</p></div>
-        <button class="btn" type="button" :disabled="rewardedBusy || route.path !== '/yandex'" @click="showRewardedVideo">{{ rewardedBusy ? 'Загрузка…' : 'Посмотреть рекламу' }}</button>
+        <button class="btn" type="button" :disabled="rewardedBusy || route.path !== '/yandex' || !adapter().isSdkAvailable" @click="showRewardedVideo">{{ rewardedBusy ? 'Загрузка…' : adapter().isSdkAvailable ? 'Посмотреть рекламу' : 'Доступно в Яндекс Играх' }}</button>
         <p class="yandex-reward__disclosure">Награда — внутренняя виртуальная валюта Pocker. Она не выводится и не обменивается на реальные деньги или имущество.</p>
         <p v-if="rewardedNotice" class="yandex-reward__notice" role="status">{{ rewardedNotice }}</p>
         <p v-if="rewardedError" class="yandex-reward__error" role="alert">{{ rewardedError }}</p>

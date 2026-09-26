@@ -1,6 +1,9 @@
 import { defineEventHandler, getRequestURL, setResponseHeader } from 'h3'
 
 const YANDEX_SDK_ORIGIN = 'https://sdk.games.s3.yandex.net'
+// The official loader advertises its source map from this exact host. It is
+// useful to browser DevTools but is not an SDK runtime dependency.
+const YANDEX_SDK_SOURCE_MAP_ORIGIN = 'https://s3.mds.yandex.net'
 
 function isLoopbackHost(hostname: string): boolean {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
@@ -48,7 +51,7 @@ export function securityPolicyForPath(pathname: string, env: NodeJS.ProcessEnv =
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "img-src 'self' data: blob:",
     "font-src 'self' data: https://fonts.gstatic.com",
-    `connect-src 'self'${isYandex ? ` ${websocketOrigin(env.NUXT_PUBLIC_APP_URL, env.NODE_ENV) || ''}` : ' ws: wss:'}`
+    `connect-src 'self'${isYandex ? ` ${websocketOrigin(env.NUXT_PUBLIC_APP_URL, env.NODE_ENV) || ''} ${YANDEX_SDK_SOURCE_MAP_ORIGIN}` : ' ws: wss:'}`
   ]
   return { csp: directives.join('; '), ...(isYandex ? {} : { xFrameOptions: 'DENY' as const }) }
 }

@@ -28,6 +28,7 @@ function fixture(options: { authorized?: boolean; failLoad?: boolean; rewardedVi
   }
   let globalAvailable = false
   const host = {
+    isTopLevel: () => false,
     getYaGames: () => globalAvailable ? { init: async () => { calls.init++; return sdk } } : undefined,
     loadScript: async (src: string) => {
       calls.load++
@@ -90,6 +91,7 @@ test('gameplay events are stateful and initialization can be retried', async () 
   let attempts = 0
   const retryAdapter = new YandexGamesPlatformAdapter({
     host: {
+      isTopLevel: () => false,
       getYaGames: () => attempts > 0 ? { init: async () => ({
         getPlayer: async () => ({ isAuthorized: () => false, getUniqueID: () => 'guest' }),
         auth: { openAuthDialog: async () => {} }
@@ -106,10 +108,29 @@ test('production never enables the development mock', async () => {
   const adapter = new YandexGamesPlatformAdapter({
     production: true,
     mockMode: 'authorized',
-    host: { getYaGames: () => undefined, loadScript: async () => { loads++; throw new Error('SDK unavailable') } }
+    host: { isTopLevel: () => false, getYaGames: () => undefined, loadScript: async () => { loads++; throw new Error('SDK unavailable') } }
   })
   await assert.rejects(adapter.initialize())
   assert.equal(loads, 1)
+})
+
+test('direct top-level launch remains a real guest without claiming Yandex SDK readiness', async () => {
+  let loads = 0
+  const adapter = new YandexGamesPlatformAdapter({
+    production: true,
+    mockMode: 'authorized',
+    host: {
+      isTopLevel: () => true,
+      getYaGames: () => undefined,
+      loadScript: async () => { loads++ }
+    }
+  })
+
+  await adapter.initialize()
+  await adapter.gameReady()
+  assert.equal(adapter.isSdkAvailable, false)
+  assert.equal(await adapter.getPlayerIdentity(), null)
+  assert.equal(loads, 0)
 })
 
 test('rewarded progress outcome requires onRewarded; onOpen/onClose wasShown alone do not count', async () => {

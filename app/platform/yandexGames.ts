@@ -36,6 +36,7 @@ type YaGamesGlobal = { init(): Promise<YandexGamesSdk> }
 type BrowserSdkHost = {
   getYaGames(): YaGamesGlobal | undefined
   loadScript(src: string): Promise<void>
+  isTopLevel(): boolean
 }
 
 export type YandexAdapterOptions = Readonly<{
@@ -95,6 +96,10 @@ export class YandexGamesPlatformAdapter implements GamePlatformAdapter {
   private readySent = false
   private gameplayActive = false
 
+  get isSdkAvailable(): boolean {
+    return this.sdk !== null
+  }
+
   constructor(private readonly options: YandexAdapterOptions) {}
 
   initialize(): Promise<void> {
@@ -112,12 +117,16 @@ export class YandexGamesPlatformAdapter implements GamePlatformAdapter {
     if (mockMode !== 'off') {
       this.sdk = createMockSdk(mockMode)
     } else if (!this.sdk) {
+      // The official loader intentionally refuses a top-level browsing context.
+      // Keep direct-domain review usable as a Pocker guest without pretending
+      // that Yandex initialized or that platform-only APIs are available.
+      if (this.options.host.isTopLevel()) return
       if (!this.options.host.getYaGames()) await this.options.host.loadScript(YANDEX_GAMES_SDK_URL)
       const yaGames = this.options.host.getYaGames()
       if (!yaGames) throw new Error('Yandex Games SDK is unavailable')
       this.sdk = await yaGames.init()
     }
-    this.player = await this.sdk!.getPlayer()
+    this.player = this.sdk ? await this.sdk.getPlayer() : null
   }
 
   async getPlayerIdentity(): Promise<PlatformPlayerIdentity | null> {
@@ -139,7 +148,7 @@ export class YandexGamesPlatformAdapter implements GamePlatformAdapter {
 
   async gameReady(): Promise<void> {
     await this.initialize()
-    if (this.readySent) return
+    if (this.readySent || !this.sdk) return
     this.readySent = true
     await this.sdk?.features?.LoadingAPI?.ready()
   }
@@ -208,6 +217,7 @@ function browserHost(): BrowserSdkHost {
   const getYaGames = () => (window as typeof window & { YaGames?: YaGamesGlobal }).YaGames
   return {
     getYaGames,
+    isTopLevel: () => window === window.top,
     loadScript: (src) => {
       if (browserScriptPromise) return browserScriptPromise
       browserScriptPromise = new Promise<void>((resolve, reject) => {
