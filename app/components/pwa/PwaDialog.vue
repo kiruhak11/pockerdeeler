@@ -28,4 +28,9 @@ h2 { margin: 0; flex: 1; font-size: 1.4rem; line-height: 1.3; }
 :deep(button), :deep(a.btn) { min-height: 44px; }
 :deep(button:focus-visible), :deep(a:focus-visible) { outline: 3px solid var(--accent-strong); outline-offset: 3px; }
 @media (min-width: 700px) { .pwa-dialog { margin: auto; } }
+@media (max-width: 600px) {
+  .pwa-dialog { position: fixed; inset: auto 0 0; width: min(100%, 640px); max-width: none; max-height: 90dvh; margin: 0 auto; padding: 1.2rem 1rem calc(1rem + env(safe-area-inset-bottom, 0px)); border-radius: 24px 24px 0 0; }
+  header { align-items: center; }
+  h2 { font-size: 1.25rem; }
+}
 </style>

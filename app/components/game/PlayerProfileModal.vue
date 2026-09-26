@@ -23,4 +23,10 @@ const statusLabels: Record<string, string> = { waiting: 'Ожидает разд
 .player-profile-modal__stats { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; margin-top: 1rem; p { display: grid; gap: .15rem; margin: 0; padding: .65rem; border-radius: var(--radius-md); background: #ffffff0a; } strong { color: var(--accent); } span { color: var(--text-muted); font-size: .72rem; } }
 .player-profile-modal__achievements { display: flex; flex-wrap: wrap; justify-content: center; gap: .4rem; margin-top: .8rem; span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: rgba(242,180,81,.12); } }
 .player-profile-modal__empty { color: var(--text-muted); }
+@media (max-width: 600px) {
+  .player-profile-modal { align-items: end; padding: 0 max(.35rem,env(safe-area-inset-right,0px)) 0 max(.35rem,env(safe-area-inset-left,0px)); }
+  .player-profile-modal article { width: 100%; max-height: 88dvh; overflow-y: auto; padding: 1.25rem 1rem calc(1rem + env(safe-area-inset-bottom,0px)); border-radius: 24px 24px 0 0; overscroll-behavior: contain; }
+  .player-profile-modal__close { top: .65rem; right: .65rem; }
+  .player-profile-modal__stats { gap: .4rem; }
+}
 </style>

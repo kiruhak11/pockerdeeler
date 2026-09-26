@@ -93,7 +93,7 @@ async function copyRoomLink() {
 </script>
 
 <template>
-  <button class="btn btn--ghost online-friend-invite-trigger" type="button" @click="openInvite">Пригласить друга</button>
+  <button class="btn btn--ghost online-friend-invite-trigger" type="button" aria-label="Пригласить друга" title="Пригласить друга" @click="openInvite"><span class="online-friend-invite-trigger__label">Пригласить друга</span><span class="online-friend-invite-trigger__icon" aria-hidden="true">＋</span></button>
   <Teleport to="body">
     <div v-if="isOpen" class="online-friend-invite-overlay" @click.self="isOpen = false" @keydown.esc.stop.prevent="isOpen = false">
       <section class="panel online-friend-invite-dialog" role="dialog" aria-modal="true" aria-labelledby="online-friend-invite-title">
@@ -123,7 +123,8 @@ async function copyRoomLink() {
 
 <style scoped lang="scss">
 .online-friend-invite-trigger { max-width: 170px; min-height: 40px; padding: .4rem .6rem; text-align: center; white-space: normal; }
-.online-friend-invite-overlay { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 1rem; background: rgba(0,0,0,.68); }
+.online-friend-invite-trigger__icon { display: none; }
+.online-friend-invite-overlay { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; overflow-y: auto; padding: 1rem; background: rgba(0,0,0,.68); overscroll-behavior: contain; }
 .online-friend-invite-dialog { display: grid; gap: .85rem; width: min(100%, 480px); max-height: min(72dvh, 620px); overflow: auto; padding: 1.15rem; border-color: rgba(102,190,255,.32); background: linear-gradient(145deg, #173b46, #10252e); }
 .online-friend-invite-dialog__header { display: flex; justify-content: space-between; align-items: flex-start; gap: .75rem; h2 { margin: .2rem 0 0; font-size: 1.25rem; } }
 .online-friend-invite-dialog__close { flex: 0 0 auto; width: 40px; height: 40px; border: 1px solid rgba(255,255,255,.12); border-radius: 12px; color: inherit; background: rgba(255,255,255,.05); font-size: 1.5rem; cursor: pointer; }
@@ -137,10 +138,16 @@ async function copyRoomLink() {
 .online-friend-invite-dialog__error,.online-friend-invite-dialog__success { margin: 0; font-size: .85rem; }
 .online-friend-invite-dialog__error { color: var(--danger); }.online-friend-invite-dialog__success { color: var(--success); }
 @media (max-width: 600px) {
-  .online-friend-invite-overlay { align-items: end; padding: .5rem .6rem calc(68px + env(safe-area-inset-bottom, 0px)); }
-  .online-friend-invite-dialog { width: 100%; max-height: min(68dvh,560px); padding: 1rem; border-radius: 22px; }
+  .online-friend-invite-overlay { align-items: end; padding: 0 max(env(safe-area-inset-right, 0px), .45rem) env(safe-area-inset-bottom, 0px) max(env(safe-area-inset-left, 0px), .45rem); }
+  .online-friend-invite-dialog { width: 100%; max-height: min(86dvh, 760px); padding: 1rem 1rem calc(1rem + env(safe-area-inset-bottom, 0px)); border-radius: 24px 24px 0 0; }
+  .online-friend-invite-dialog__header { align-items: center; }
+  .online-friend-invite-dialog__copy { min-height: 46px; }
+  .online-friend-invite-list { max-height: min(44dvh, 380px); }
   .online-friend-invite-row { grid-template-columns: auto minmax(0,1fr); }
-  .online-friend-invite-row .btn,.online-friend-invite-row__status { grid-column: 2; justify-self: start; }
+  .online-friend-invite-row .btn,.online-friend-invite-row__status { grid-column: 2; justify-self: start; min-height: 44px; }
   .online-friend-invite-dialog__copy { width: 100%; }
+  .online-friend-invite-trigger { display: grid; place-items: center; width: 42px; min-width: 42px; max-width: 42px; min-height: 42px; padding: .2rem; }
+  .online-friend-invite-trigger__label { display: none; }
+  .online-friend-invite-trigger__icon { display: block; font-size: 1.4rem; line-height: 1; }
 }
 </style>

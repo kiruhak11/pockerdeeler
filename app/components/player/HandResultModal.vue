@@ -95,4 +95,9 @@ function deltaLabel(delta: number): string {
 .hand-result-fade-leave-to {
   opacity: 0;
 }
+
+@media (max-width: 600px) {
+  .hand-result-modal { align-items: end; padding: 0 max(.4rem,env(safe-area-inset-right,0px)) 0 max(.4rem,env(safe-area-inset-left,0px)); }
+  .hand-result-modal__card { width: 100%; max-height: 86dvh; overflow-y: auto; padding: 1.2rem 1rem calc(1rem + env(safe-area-inset-bottom,0px)); border-radius: 24px 24px 0 0; overscroll-behavior: contain; }
+}
 </style>

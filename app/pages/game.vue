@@ -190,4 +190,18 @@ function startExistingGame() {
     }
   }
 }
+
+@media (max-width: 600px) {
+  .game-page {
+    padding-top: .7rem;
+    padding-bottom: 1.25rem;
+
+    &__head { gap: .75rem; }
+    &__head > div:first-child { min-width: 0; }
+    &__nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; gap: .5rem; }
+    &__nav > * { display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 46px; padding-inline: .65rem; text-align: center; }
+    &__controls { display: grid; grid-template-columns: 1fr; }
+    &__controls .btn { width: 100%; min-height: 46px; }
+  }
+}
 </style>

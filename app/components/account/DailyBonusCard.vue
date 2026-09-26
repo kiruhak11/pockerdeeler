@@ -305,5 +305,9 @@ onBeforeUnmount(() => {
   p#{&}__error { color: var(--danger); }
   &__dialog { color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--accent); border-radius: var(--radius-lg); width: min(540px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); padding: 0; overscroll-behavior: contain; &::backdrop { background: rgb(0 0 0 / 75%); } }
   &__promo { display: grid; gap: 0.8rem; padding: 1.4rem; background: radial-gradient(ellipse at top right, #365d3b, transparent 65%); h2 { font-family: 'Space Grotesk', sans-serif; font-size: clamp(1.5rem, 5vw, 2rem); margin: 0; } ul { padding-left: 1.2rem; margin: 0; line-height: 1.7; } progress { width: 100%; height: 12px; accent-color: var(--accent); } }
+  @media (max-width: 600px) {
+    &__dialog { position: fixed; inset: auto 0 0; width: min(100%, 640px); max-width: none; max-height: 90dvh; margin: 0 auto; border-radius: 24px 24px 0 0; }
+    &__promo { padding: 1.2rem 1rem calc(1rem + env(safe-area-inset-bottom, 0px)); }
+  }
 }
 </style>
