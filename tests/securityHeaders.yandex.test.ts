@@ -33,7 +33,7 @@ test('Yandex CSP allows only its official SDK script and exact app WebSocket ori
   assert.match(policy.csp, /frame-ancestors https:\/\/games\.example/)
   assert.match(policy.csp, /script-src 'self' 'unsafe-inline' https:\/\/sdk\.games\.s3\.yandex\.net/)
   assert.match(policy.csp, /connect-src 'self' wss:\/\/pocker\.kiruhak11\.ru/)
-  assert.match(policy.csp, /connect-src[^;]*https:\/\/s3\.mds\.yandex\.net/)
+  assert.doesNotMatch(policy.csp, /s3\.mds\.yandex\.net/)
   assert.doesNotMatch(policy.csp, /connect-src[^;]*\bws:|connect-src[^;]*\bwss:\s*(?:;|$)/)
   assert.match(policy.csp, /img-src 'self' data: blob:/)
   assert.doesNotMatch(policy.csp, /img-src[^;]*https?:/)

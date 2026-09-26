@@ -56,7 +56,7 @@ test('ONLINE create sends no owner identity and navigates to the server room cod
   const page = await source('app/pages/online/create.vue')
   assert.match(page, /POST.*\/api\/online\/rooms|method: 'POST'/s)
   assert.doesNotMatch(page, /ownerId|userId/)
-  assert.match(page, /navigateTo\(`\/online\/\$\{result\.room\.roomCode\}`\)/)
+  assert.match(page, /navigateTo\(isYandex\.value \? `\/yandex\/online\/\$\{result\.room\.roomCode\}` : `\/online\/\$\{result\.room\.roomCode\}`\)/)
 })
 
 test('private creation keeps the secret out of URL and browser storage', async () => {
@@ -105,7 +105,12 @@ test('lobby has no closed-room tab or separate private list', async () => {
 
 test('ONLINE join page uses the existing authenticated join endpoint and no password URL', async () => {
   const page = await source('app/pages/online/[code].vue')
+  const socket = await source('app/composables/useOnlineRoomSocket.ts')
   assert.match(page, /\/api\/online\/rooms\/\$\{encodeURIComponent\(code\.value\)\}\/join/)
+  assert.match(page, /yandexAuthHeaders\(isYandex\.value\)/)
+  assert.match(page, /alias: \['\/yandex\/online\/:code'\]/)
+  assert.match(page, /const socket = useOnlineRoomSocket\(code/)
+  assert.match(socket, /\/api\/auth\/yandex\/ws-ticket/)
   assert.match(page, /type="password"/)
   assert.match(page, /\/login\?redirect=/)
   assert.doesNotMatch(page, /joinSecret.*URL|\?joinSecret|&joinSecret/)
@@ -116,7 +121,7 @@ test('table UI stays isolated from HOME route and browser poker logic', async ()
   const page = await source('app/pages/online/[code].vue')
   assert.doesNotMatch(table, /evaluateWinner|resolveShowdown|buildPots|finishHand/)
   assert.match(page, /@action="socket\.sendAction"/)
-  assert.match(page, /<NuxtLink class="btn" to="\/rooms">/)
+  assert.match(page, /:to="isYandex \? '\/yandex' : '\/rooms'"/)
 })
 
 test('responsive main and rooms styles keep mobile controls inside one column', async () => {
