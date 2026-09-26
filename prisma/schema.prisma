@@ -180,6 +180,7 @@ model User {
   wallet                       UserWallet?
   onlineRoomPlayers            OnlineRoomPlayer[]
   onlineStackOperations        OnlineStackOperation[]
+  blackjackRounds              BlackjackRound[]
   roomMemberAccounts           RoomMemberAccount[]
   predictionRatingEvents       PredictionRatingEvent[]
   tableRatingEvents            TableRatingEvent[]
@@ -214,6 +215,47 @@ model User {
   @@index([username])
   @@index([isBot, botEnabled])
   @@map("users")
+}
+
+model BlackjackRound {
+  id               String    @id @default(uuid()) @db.Uuid
+  userId           String    @map("user_id") @db.Uuid
+  status           String    @default("ACTIVE") @db.VarChar(16)
+  stake            BigInt
+  playerCards      Json      @map("player_cards") @db.JsonB
+  dealerCards      Json      @map("dealer_cards") @db.JsonB
+  shoe             Json      @db.JsonB
+  nextCard         Int       @default(4) @map("next_card")
+  playerTotal      Int       @map("player_total")
+  dealerTotal      Int       @map("dealer_total")
+  dealerSoft       Boolean   @default(false) @map("dealer_soft")
+  dealerHoleHidden Boolean   @default(true) @map("dealer_hole_hidden")
+  outcome          String?   @db.VarChar(16)
+  payout           BigInt    @default(0)
+  idempotencyKey   String    @unique @map("idempotency_key") @db.Text
+  settledAt        DateTime? @map("settled_at") @db.Timestamptz(6)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user    User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  actions BlackjackAction[]
+
+  @@index([userId, status, createdAt])
+  @@map("blackjack_rounds")
+}
+
+model BlackjackAction {
+  id        String   @id @default(uuid()) @db.Uuid
+  roundId   String   @map("round_id") @db.Uuid
+  requestId String   @map("request_id") @db.Uuid
+  action    String   @db.VarChar(8)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  round BlackjackRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+
+  @@unique([roundId, requestId])
+  @@index([roundId, createdAt])
+  @@map("blackjack_actions")
 }
 
 model ExternalIdentity {
