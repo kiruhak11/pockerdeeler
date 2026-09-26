@@ -5,7 +5,7 @@ type Card = { rank: string; suit: string; code: string } | { hidden: true }
 type Round = {
   roundId: string; status: 'ACTIVE' | 'FINISHED'; stake: number; playerCards: Card[]; dealerCards: Card[];
   playerTotal: number; dealerTotal: number; dealerSoft: boolean; dealerHoleHidden: boolean;
-  outcome: 'WIN' | 'LOSE' | 'PUSH' | 'BLACKJACK' | null; payout: number; netChange: number; balance: number
+  outcome: 'WIN' | 'LOSE' | 'PUSH' | 'BLACKJACK' | null; doubled: boolean; payout: number; netChange: number; balance: number
 }
 const account = useAccountStore()
 const round = ref<Round | null>(null)
@@ -16,6 +16,7 @@ const busy = ref(false)
 const errorMessage = ref('')
 const numberFormat = new Intl.NumberFormat('ru-RU')
 const maxEvenStake = computed(() => Math.max(0, balance.value - balance.value % 2))
+const canDouble = computed(() => Boolean(round.value?.status === 'ACTIVE' && round.value.playerCards.length === 2 && round.value.stake > 0 && balance.value >= round.value.stake))
 const outcomeText = computed(() => {
   const labels: Record<string, string> = { WIN: 'Победа', LOSE: 'Раунд за дилером', PUSH: 'Ничья — ставка возвращена', BLACKJACK: 'Натуральный блэкджек!' }
   return labels[round.value?.outcome ?? ''] ?? ''
@@ -59,7 +60,7 @@ async function start() {
   finally { busy.value = false }
 }
 
-async function action(kind: 'hit' | 'stand') {
+async function action(kind: 'hit' | 'stand' | 'double') {
   if (!round.value || round.value.status !== 'ACTIVE' || busy.value) return
   busy.value = true
   errorMessage.value = ''
@@ -96,13 +97,13 @@ onMounted(() => void refresh())
       <template v-else>
         <div class="bj-hand bj-dealer">
           <div class="bj-hand-meta"><div><span class="bj-player-label">ДИЛЕР</span><span v-if="round?.dealerHoleHidden" class="bj-quiet">Одна карта закрыта</span><span v-else class="bj-quiet">Рука дилера</span></div><strong v-if="round">{{ round.dealerHoleHidden ? round.dealerTotal + '+' : round.dealerTotal }}<small v-if="round.dealerSoft && !round.dealerHoleHidden"> soft</small></strong></div>
-          <div class="bj-cards"><div v-for="(card,index) in round?.dealerCards ?? []" :key="'d'+index" class="bj-card" :class="{ 'bj-card-back':'hidden' in card, 'bj-card-red':cardRed(card), 'bj-card-reveal':round && !round.dealerHoleHidden && index===1 }" :style="{ animationDelay: `${index * 70}ms` }" :aria-label="cardLabel(card)"><template v-if="'hidden' in card"><span class="bj-card-back-mark">♠</span><span class="bj-card-back-brand">P D</span></template><template v-else><span class="bj-card-corner">{{ card.rank }}<i>{{ suitMark(card.suit) }}</i></span><b>{{ suitMark(card.suit) }}</b><span class="bj-card-corner bj-card-corner-bottom">{{ card.rank }}<i>{{ suitMark(card.suit) }}</i></span></template></div><span v-if="!round" class="bj-empty-cards">Твои карты уже тасуются в колоде</span></div>
+          <div class="bj-cards"><div v-for="(card,index) in round?.dealerCards ?? []" :key="'d'+index" class="bj-card" :class="{ 'bj-card-back':'hidden' in card, 'bj-card-red':cardRed(card), 'bj-card-reveal':round && !round.dealerHoleHidden && index===1 }" :style="{ animationDelay: `${(round?.doubled ? 500 : 0) + index * 70}ms` }" :aria-label="cardLabel(card)"><template v-if="'hidden' in card"><span class="bj-card-back-mark">♠</span><span class="bj-card-back-brand">P D</span></template><template v-else><span class="bj-card-corner">{{ card.rank }}<i>{{ suitMark(card.suit) }}</i></span><b>{{ suitMark(card.suit) }}</b><span class="bj-card-corner bj-card-corner-bottom">{{ card.rank }}<i>{{ suitMark(card.suit) }}</i></span></template></div><span v-if="!round" class="bj-empty-cards">Твои карты уже тасуются в колоде</span></div>
         </div>
 
         <div class="bj-center-line"><span>♣</span><i/><span>♠</span></div>
 
         <div class="bj-hand bj-player">
-          <div class="bj-hand-meta"><div><span class="bj-player-label">ТВОЯ РУКА</span><span class="bj-quiet">Ставка · {{ numberFormat.format(round?.stake ?? stake) }}</span></div><strong v-if="round">{{ round.playerTotal }}</strong></div>
+          <div class="bj-hand-meta"><div><span class="bj-player-label">ТВОЯ РУКА</span><span class="bj-quiet">Ставка · {{ numberFormat.format(round?.stake ?? stake) }}<i v-if="round?.doubled" class="bj-double-tag">УДВОЕНА</i></span></div><strong v-if="round">{{ round.playerTotal }}</strong></div>
           <div class="bj-cards"><div v-for="(card,index) in round?.playerCards ?? []" :key="'p'+index" class="bj-card" :class="{ 'bj-card-red':cardRed(card) }" :style="{ animationDelay: `${index * 70}ms` }" :aria-label="cardLabel(card)"><span class="bj-card-corner">{{ 'hidden' in card ? '?' : card.rank }}<i v-if="!('hidden' in card)">{{ suitMark(card.suit) }}</i></span><b v-if="!('hidden' in card)">{{ suitMark(card.suit) }}</b><span v-if="!('hidden' in card)" class="bj-card-corner bj-card-corner-bottom">{{ card.rank }}<i>{{ suitMark(card.suit) }}</i></span></div><span v-if="!round" class="bj-empty-cards">Твои карты появятся здесь</span></div>
         </div>
 
@@ -113,7 +114,7 @@ onMounted(() => void refresh())
     <section class="bj-controls">
       <template v-if="!loading && round?.status === 'ACTIVE'">
         <div class="bj-controls-copy"><div><p class="arcade-eyebrow">ТВОЙ ХОД</p><h2>Как сыграем?</h2></div><span class="bj-turn-pip"><i/>Твой выбор</span></div>
-        <div class="bj-actions"><button class="bj-hit" :disabled="busy" @click="action('hit')"><span>＋</span><b>Взять карту</b><small>Ещё одна карта</small></button><button class="bj-stand" :disabled="busy" @click="action('stand')"><span>✓</span><b>Хватит</b><small>Передать ход дилеру</small></button></div>
+        <div class="bj-actions"><button class="bj-hit" :disabled="busy" @click="action('hit')"><span>＋</span><b>Взять</b><small>Ещё карта</small></button><button class="bj-stand" :disabled="busy" @click="action('stand')"><span>✓</span><b>Хватит</b><small>Передать дилеру</small></button><button v-if="canDouble" class="bj-double" :disabled="busy" @click="action('double')"><span>×2</span><b>Удвоить</b><small>+{{ numberFormat.format(round?.stake ?? 0) }}</small></button></div>
       </template>
       <template v-else-if="!loading && (!round || round.status === 'FINISHED')">
         <div class="bj-controls-copy"><div><p class="arcade-eyebrow">{{ round ? 'НОВАЯ РАЗДАЧА' : 'СДЕЛАЙ СТАВКУ' }}</p><h2>{{ round ? 'Ещё одну?' : 'Сыграем?' }}</h2></div><span class="bj-payout-tag">NATURAL <b>3:2</b></span></div>
@@ -137,4 +138,6 @@ onMounted(() => void refresh())
 @keyframes bj-reveal{from{transform:rotateY(90deg);filter:brightness(.7)}to{transform:rotateY(0);filter:brightness(1)}}
 .bj-card-reveal{animation:bj-reveal .42s cubic-bezier(.2,.75,.3,1) both;backface-visibility:hidden}
 @media(prefers-reduced-motion:reduce){.bj-card-reveal{animation:none}}
+.bj-actions{grid-template-columns:repeat(3,minmax(0,1fr))}.bj-double{border:1px solid #e4ca814d;background:linear-gradient(145deg,#3b3822,#292a20);color:#f3dda1}.bj-double>span{background:#e7cd7b20;color:#f0d88f;font-size:11px!important;font-weight:800}.bj-double-tag{margin-left:7px;padding:2px 5px;border:1px solid #e4ca8155;border-radius:20px;color:#e8cc83;font-size:7px;font-style:normal;letter-spacing:.08em;white-space:nowrap;animation:bj-result-in .3s ease-out}
+@media(max-width:600px){.bj-actions{grid-template-columns:repeat(3,minmax(0,1fr))}.bj-actions button{grid-template-columns:29px minmax(0,1fr);padding-inline:7px}.bj-actions b{font-size:10px}.bj-actions small{font-size:8px}}
 </style>

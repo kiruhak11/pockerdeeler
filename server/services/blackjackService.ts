@@ -21,10 +21,11 @@ async function authenticatedUser(token?: string | null): Promise<string> {
 }
 
 async function stateView(tx: Tx, round: Round) {
-  const [wallet, playerCards, dealerCards] = await Promise.all([
+  const [wallet, playerCards, dealerCards, doubleAction] = await Promise.all([
     tx.userWallet.findUniqueOrThrow({ where: { userId: round.userId }, select: { balance: true } }),
     Promise.resolve(jsonCards(round.playerCards)),
-    Promise.resolve(jsonCards(round.dealerCards))
+    Promise.resolve(jsonCards(round.dealerCards)),
+    tx.blackjackAction.findFirst({ where: { roundId: round.id, action: 'DOUBLE' }, select: { id: true } })
   ])
   const visibleDealer = round.dealerHoleHidden ? dealerCards.slice(0, 1) : dealerCards
   const visibleDealerValue = blackjackHandValue(visibleDealer)
@@ -39,6 +40,7 @@ async function stateView(tx: Tx, round: Round) {
     dealerSoft: round.dealerHoleHidden ? visibleDealerValue.soft : round.dealerSoft,
     dealerHoleHidden: round.dealerHoleHidden,
     outcome: round.outcome,
+    doubled: Boolean(doubleAction),
     payout: Number(round.payout),
     netChange: Number(round.payout - round.stake),
     balance: Number(wallet.balance),
@@ -150,13 +152,13 @@ export async function startBlackjack(token: string | null | undefined, input: Bl
   }, { maxWait: 10_000, timeout: 15_000 })
 }
 
-async function applyAction(token: string | null | undefined, raw: BlackjackActionInput, action: 'HIT' | 'STAND') {
+async function applyAction(token: string | null | undefined, raw: BlackjackActionInput, action: 'HIT' | 'STAND' | 'DOUBLE') {
   const userId = await authenticatedUser(token)
   const parsed = blackjackActionSchema.safeParse(raw)
   if (!parsed.success) throw createError({ statusCode: 400, statusMessage: 'Некорректный запрос действия' })
   const input = parsed.data
   return prisma.$transaction(async tx => {
-    await lockUserWallet(tx, userId)
+    const wallet = await lockUserWallet(tx, userId)
     await tx.$queryRaw`SELECT id FROM blackjack_rounds WHERE id = CAST(${input.roundId} AS uuid) AND user_id = CAST(${userId} AS uuid) FOR UPDATE`
     const round = await tx.blackjackRound.findFirst({ where: { id: input.roundId, userId } })
     if (!round) throw createError({ statusCode: 404, statusMessage: 'Раздача не найдена' })
@@ -190,10 +192,35 @@ async function applyAction(token: string | null | undefined, raw: BlackjackActio
       } else {
         updated = await tx.blackjackRound.update({ where: { id: round.id }, data: { playerCards: playerCards as unknown as Prisma.InputJsonValue, nextCard, playerTotal: playerValue.total } })
       }
-    } else {
+    } else if (action === 'STAND') {
       dealerCards = playDealerHand(dealerCards, draw)
       const dealerValue = blackjackHandValue(dealerCards)
       updated = await finishRound(tx, round, { playerCards, dealerCards, nextCard, outcome: resolveBlackjackOutcome(playerCards, dealerCards), dealerTotal: dealerValue.total, dealerSoft: dealerValue.soft })
+    } else {
+      if (playerCards.length !== 2 || round.stake <= 0n) {
+        throw createError({ statusCode: 409, statusMessage: 'Удвоение доступно только до первого добора' })
+      }
+      if (wallet.balance < round.stake) {
+        throw createError({ statusCode: 409, statusMessage: 'Недостаточно фишек для удвоения ставки' })
+      }
+      const initialStake = round.stake
+      await adjustUserWallet(tx, {
+        userId,
+        delta: -initialStake,
+        entryType: 'BLACKJACK_DOUBLE_STAKE',
+        transferId: round.id,
+        idempotencyKey: `blackjack:double:${round.id}`,
+        metadata: { roundId: round.id, additionalStake: Number(initialStake) }
+      })
+      const doubledRound = await tx.blackjackRound.update({ where: { id: round.id }, data: { stake: initialStake * 2n } })
+      playerCards.push(draw())
+      dealerCards = playDealerHand(dealerCards, draw)
+      const playerValue = blackjackHandValue(playerCards)
+      const dealerValue = blackjackHandValue(dealerCards)
+      updated = await finishRound(tx, doubledRound, {
+        playerCards, dealerCards, nextCard, outcome: resolveBlackjackOutcome(playerCards, dealerCards),
+        playerTotal: playerValue.total, dealerTotal: dealerValue.total, dealerSoft: dealerValue.soft
+      })
     }
     await tx.blackjackAction.create({ data: { roundId: round.id, requestId: input.requestId, action } })
     return { round: await stateView(tx, updated), replayed: false }
@@ -206,4 +233,8 @@ export function hitBlackjack(token: string | null | undefined, input: BlackjackA
 
 export function standBlackjack(token: string | null | undefined, input: BlackjackActionInput) {
   return applyAction(token, input, 'STAND')
+}
+
+export function doubleBlackjack(token: string | null | undefined, input: BlackjackActionInput) {
+  return applyAction(token, input, 'DOUBLE')
 }

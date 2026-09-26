@@ -14,5 +14,8 @@ test('mini-game lobby links to Blackjack and its screen supports the round state
   assert.match(component, /round\?\.status === 'ACTIVE'/)
   assert.match(component, /round\?\.status === 'FINISHED'/)
   assert.match(component, /'hidden' in card/)
+  assert.match(component, /canDouble/)
+  assert.match(component, /Удвоить/)
+  assert.match(component, /action\('double'\)/)
   assert.match(component, /Играть снова/)
 })
