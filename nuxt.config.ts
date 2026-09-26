@@ -7,6 +7,7 @@ export default defineNuxtConfig({
   devtools: { enabled: process.env.NODE_ENV !== 'production' },
   modules: ['@pinia/nuxt'],
   runtimeConfig: {
+    yandexGamesAppId: process.env.YANDEX_GAMES_APP_ID || '',
     public: {
       // Only honored by the /yandex shell in a non-production build.
       yandexGamesMock: process.env.NUXT_PUBLIC_YANDEX_GAMES_MOCK || 'off'

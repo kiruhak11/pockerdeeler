@@ -10,6 +10,7 @@ const route = useRoute()
 const status = ref<'loading' | 'ready' | 'error'>('loading')
 const identity = ref<PlatformPlayerIdentity | null>(null)
 const accountAuthorized = ref(false)
+const signedAuthAvailable = ref(false)
 const authorizationBusy = ref(false)
 const errorMessage = ref('')
 const rewardedProgress = ref({ viewsSinceGrant: 0, completedGrants: 0 })
@@ -36,22 +37,29 @@ async function refreshRewardedState() {
 async function initialize() {
   status.value = 'loading'
   errorMessage.value = ''
+  let stage: 'sdk' | 'guest' | 'api' = 'sdk'
   try {
     await adapter().initialize()
     identity.value = await adapter().getPlayerIdentity()
+    await adapter().gameReady()
+    stage = 'guest'
     await ensureYandexSession()
+    stage = 'api'
     await refreshRewardedState()
     const sessionToken = readYandexSessionToken()
     if (sessionToken) {
-      const session = await $fetch<{ authorized: boolean }>('/api/auth/yandex/session', { headers: { Authorization: `Bearer ${sessionToken}` }, retry: 0 })
+      const session = await $fetch<{ authorized: boolean; signedAuthAvailable: boolean }>('/api/auth/yandex/session', { headers: { Authorization: `Bearer ${sessionToken}` }, retry: 0 })
       accountAuthorized.value = session.authorized
+      signedAuthAvailable.value = session.signedAuthAvailable
     }
     status.value = 'ready'
-    await nextTick()
-    await adapter().gameReady()
   } catch {
     status.value = 'error'
-    errorMessage.value = 'Не удалось подключиться к Яндекс Играм. Проверьте соединение и попробуйте ещё раз.'
+    errorMessage.value = stage === 'sdk'
+      ? 'Игровая платформа Яндекса сейчас недоступна. Проверьте соединение и попробуйте ещё раз.'
+      : stage === 'guest'
+        ? 'Не удалось создать гостевой профиль. Попробуйте ещё раз; вход через телефон не требуется.'
+        : 'Сервер игры временно недоступен. Гостевой профиль сохранён — попробуйте подключиться ещё раз.'
   }
 }
 
@@ -94,8 +102,10 @@ async function showRewardedVideo() {
     rewardedProgress.value = { viewsSinceGrant: completion.viewsSinceGrant, completedGrants: completion.completedGrants }
     applyYandexAccountSession(completion.user)
     rewardedNotice.value = completion.grantedAmount ? '+10 000 фишек' : 'Просмотр засчитан.'
-  } catch (error) {
-    rewardedError.value = error instanceof Error ? error.message : 'Не удалось выполнить просмотр. Попробуйте ещё раз.'
+  } catch {
+    rewardedError.value = rewardedCallbackReceived
+      ? 'Просмотр получен, но сервер пока не подтвердил его. Прогресс обновится после повторной проверки.'
+      : 'Сервер бонусов временно недоступен. Попробуйте ещё раз.'
     if (!rewardedCallbackReceived) {
       if (attemptId) await $fetch(`/api/yandex/rewarded/${encodeURIComponent(attemptId)}/cancel`, { method: 'POST', headers: yandexAuthHeaders(), retry: 0 }).catch(() => undefined)
       await refreshRewardedState().catch(() => undefined)
@@ -106,6 +116,10 @@ async function showRewardedVideo() {
 }
 
 async function authorize() {
+  if (!signedAuthAvailable.value) {
+    errorMessage.value = 'Авторизация через Яндекс пока не настроена. Можно продолжить как гость.'
+    return
+  }
   if (authorizationBusy.value) return
   authorizationBusy.value = true
   errorMessage.value = ''
@@ -141,7 +155,8 @@ useHead({ title: 'Pocker · Яндекс Игры' })
       <div v-if="status === 'ready' && identity" class="yandex-shell__player">
         <span class="yandex-shell__avatar" aria-hidden="true">{{ playerInitials }}</span>
         <div><strong>{{ identity.displayName || 'Гость' }}</strong><small>{{ accountAuthorized ? 'Игрок Яндекса' : 'Гостевой режим' }}</small></div>
-        <button v-if="!accountAuthorized" type="button" :disabled="authorizationBusy" @click="authorize">{{ authorizationBusy ? 'Входим…' : 'Войти' }}</button>
+        <button v-if="!accountAuthorized && signedAuthAvailable" type="button" :disabled="authorizationBusy" @click="authorize">{{ authorizationBusy ? 'Входим…' : 'Войти' }}</button>
+        <small v-else-if="!accountAuthorized" class="yandex-shell__auth-hint">Вход через Яндекс пока недоступен — гостевой режим работает.</small>
       </div>
     </header>
 

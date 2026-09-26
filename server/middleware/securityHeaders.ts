@@ -22,7 +22,7 @@ export function parseYandexFrameAncestors(raw: string | undefined, nodeEnv = pro
   return [...new Set(result)]
 }
 
-function websocketOrigin(appUrl: string | undefined, nodeEnv: string | undefined): string | undefined {
+export function websocketOrigin(appUrl: string | undefined, nodeEnv: string | undefined): string | undefined {
   if (!appUrl) return undefined
   try {
     const parsed = new URL(appUrl)

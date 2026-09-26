@@ -3,10 +3,12 @@ import OnlinePokerTable from '~/components/online/OnlinePokerTable.vue'
 import { useAccountStore } from '~/stores/account'
 import { useOnlineRoomSocket } from '~/composables/useOnlineRoomSocket'
 import { ensureYandexSession, yandexAuthHeaders } from '~/platform/yandexSession'
+import { getBrowserYandexGamesAdapter } from '~/platform/yandexGames'
 import { platformFromPath } from '~/platform/types'
 import type { OnlineApiResult, OnlineRoomState } from '~/types/online'
 
 const route = useRoute()
+const runtimeConfig = useRuntimeConfig()
 definePageMeta({ alias: ['/yandex/online/:code'] })
 const account = useAccountStore()
 const isYandex = computed(() => platformFromPath(route.path, route.query.platform) === 'YANDEX_GAMES')
@@ -27,6 +29,14 @@ const walletBalance = ref(0)
 const stackOperationBusy = ref(false)
 const stackOperationResultKey = ref(0)
 let spectatorPoll: ReturnType<typeof setInterval> | undefined
+let yandexPlatformAdapter: ReturnType<typeof getBrowserYandexGamesAdapter> | null = null
+
+function syncYandexGameplayState() {
+  if (!isYandex.value || !yandexPlatformAdapter) return
+  const hand = state.value?.pokerTable.currentHand
+  if (hand && hand.street !== 'FINISHED') yandexPlatformAdapter.gameplayStart()
+  else yandexPlatformAdapter.gameplayStop()
+}
 
 function applyAuthoritativeState(next: OnlineRoomState, token?: string): boolean {
   if (state.value && (next.roomVersion < state.value.roomVersion || (next.roomVersion === state.value.roomVersion && next.pokerTable.stateVersion < state.value.pokerTable.stateVersion))) return false
@@ -37,6 +47,7 @@ function applyAuthoritativeState(next: OnlineRoomState, token?: string): boolean
   joinPrompt.value = !player && (next.visibility === 'PRIVATE' || (route.query.join === '1' && next.pokerTable.status === 'WAITING' && (!next.pokerTable.currentHand || next.pokerTable.currentHand.street === 'FINISHED') && next.pokerTable.players.length < next.maxPlayers))
   ready.value = player?.ready ?? false
   sittingOut.value = player?.sittingOut ?? false
+  syncYandexGameplayState()
   return true
 }
 
@@ -204,7 +215,18 @@ async function changeStack(payload: { direction: 'ADD' | 'WITHDRAW'; amount: num
 }
 
 onMounted(async () => {
-  await account.loadSession()
+  if (isYandex.value) {
+    const mock = String(runtimeConfig.public.yandexGamesMock || 'off')
+    yandexPlatformAdapter = getBrowserYandexGamesAdapter({
+      mockMode: import.meta.dev && (mock === 'guest' || mock === 'authorized') ? mock : 'off',
+      production: import.meta.env.PROD
+    })
+    void yandexPlatformAdapter.initialize()
+      .then(() => yandexPlatformAdapter?.gameReady())
+      .then(() => syncYandexGameplayState())
+      .catch(() => { notice.value = 'Игровая платформа Яндекса временно недоступна; подключаемся к столу.' })
+  }
+  if (!isYandex.value) await account.loadSession()
   try {
     const user = isYandex.value
       ? await ensureYandexSession()
@@ -220,6 +242,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => { if (spectatorPoll) clearInterval(spectatorPoll) })
+onBeforeUnmount(() => yandexPlatformAdapter?.gameplayStop())
 
 useHead(() => ({ title: state.value ? `ONLINE ${state.value.roomCode} · Poker` : 'ONLINE · Poker' }))
 </script>

@@ -2,21 +2,24 @@ import type { AccountUser } from '~/types/account'
 import { useAccountStore } from '~/stores/account'
 
 const STORAGE_KEY = 'pocker-yandex-session-v1'
+const TOKEN_PATTERN = /^[A-Za-z0-9_-]{40,100}$/
+let inMemoryToken: string | null = null
 
 export function readYandexSessionToken(): string | null {
+  if (inMemoryToken && TOKEN_PATTERN.test(inMemoryToken)) return inMemoryToken
   if (typeof localStorage === 'undefined') return null
   try {
     const token = localStorage.getItem(STORAGE_KEY)
-    return token && /^[A-Za-z0-9_-]{40,100}$/.test(token) ? token : null
-  } catch { return null }
+    inMemoryToken = token && TOKEN_PATTERN.test(token) ? token : null
+    return inMemoryToken
+  } catch { return inMemoryToken }
 }
 
 export function writeYandexSessionToken(token: string | null): void {
+  inMemoryToken = token && TOKEN_PATTERN.test(token) ? token : null
   if (typeof localStorage === 'undefined') return
-  try {
-    if (token) localStorage.setItem(STORAGE_KEY, token)
-    else localStorage.removeItem(STORAGE_KEY)
-  } catch { /* browser storage can be disabled */ }
+  try { if (inMemoryToken) localStorage.setItem(STORAGE_KEY, inMemoryToken); else localStorage.removeItem(STORAGE_KEY) }
+  catch { /* Browser storage may be partitioned or disabled in an iframe; memory still serves this run. */ }
 }
 
 export function yandexAuthHeaders(enabled = true): Record<string, string> {
